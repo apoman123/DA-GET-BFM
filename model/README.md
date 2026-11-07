@@ -187,3 +187,15 @@ The modules:
 
 See the repository README for the full description, the training commands,
 and the recommended datasets.
+
+## Data tools
+
+* `model/training/ground_sim.py`: MuJoCo ground-contact simulation built from
+  the embodiment graph, with exact torque, acceleration, and contact labels.
+* `model/robot_analysis.py`: infers floating base, feet, flat feet, rotors,
+  and propeller coefficients from a URDF.
+* `model/conversion/`: converters for GrandTour, MIPO, NeuroBEM, LocoMuJoCo,
+  AMASS-G1, and LAFAN1, plus dataset-column-to-joint matching.
+
+`scripts/make_data_config.py` and `scripts/convert_dataset.py` are the command
+lines; the repository README documents them.

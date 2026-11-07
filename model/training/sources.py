@@ -876,4 +876,77 @@ def huggingface_source(
     return [record], trajectories
 
 
-SOURCE_TYPES = {"synthetic": synthetic_source, "huggingface": huggingface_source}
+def mujoco_source(
+    source: dict[str, Any], base: Path | None, feature_config: JointFeatureConfig
+) -> tuple[list[EmbodimentRecord], list[Trajectory]]:
+    """Simulate legged robots on the ground with MuJoCo (exact contact labels).
+
+    Source keys: ``urdf``, ``name``, ``contact_links`` (required unless the
+    robot analysis finds feet), ``surface_contacts``, ``nominal_pose`` (joint
+    name to standing position; zero clamped into the limits by default),
+    ``randomized_embodiments`` (4), ``episodes_per_embodiment`` (4), ``steps``
+    (300), ``dt`` (0.01 s control period), ``timestep`` (0.002 s physics),
+    ``probe_torques`` (2), ``target_interval`` (50 steps),
+    ``target_amplitude`` (0.15 of each joint's half range; 0.1 for bipeds),
+    ``gain_scale`` (1.0; PD gains put peak torque at 0.5 rad of error),
+    ``push_probability`` (0.02 per step), ``push_force`` (0.3 of the weight;
+    0.15 for bipeds), ``assist`` (spotter stiffness; 0.6 for bipeds, 0 for
+    robots with more feet),
+    ``friction`` ([0.5, 1.2]), ``contact_geometry`` (``radius``,
+    ``sole_offset``, ``foot_size``), ``randomization``, ``seed``, plus the graph
+    and actuator keys shared with other sources.
+
+    Args:
+        source (dict): Source config.
+        base (Path | None): Directory for relative paths.
+        feature_config (JointFeatureConfig): Observation hardware features.
+
+    Returns:
+        tuple: Embodiment records and trajectories.
+    """
+    from model.robot_analysis import analyze_robot
+    from model.training.ground_sim import ContactGeometry, ground_specs, simulate_ground
+
+    robot = parse_urdf(resolve_path(source["urdf"], base))
+    name = source.get("name", robot.name)
+    contact_links = source.get("contact_links")
+    if not contact_links:
+        contact_links = analyze_robot(robot).contact_links
+    if not contact_links:
+        raise ValueError(f"{name}: no contact links given or found; ground simulation needs feet")
+    source = {**source, "contact_links": contact_links, "floating_base": True}
+    generator = torch.Generator().manual_seed(int(source.get("seed", 0)))
+    randomization = {**DEFAULT_RANDOMIZATION, **source.get("randomization", {})}
+    variants = int(source.get("randomized_embodiments", 4))
+    geometry = ContactGeometry(**source.get("contact_geometry", {}))
+    settings = {
+        "episodes": int(source.get("episodes_per_embodiment", 4)),
+        "steps": int(source.get("steps", 300)),
+        "dt": float(source.get("dt", 0.01)),
+        "timestep": float(source.get("timestep", 0.002)),
+        "probes": int(source.get("probe_torques", 2)),
+        "interval": int(source.get("target_interval", 50)),
+        "target_amplitude": float(source.get("target_amplitude", 0.1 if len(contact_links) <= 2 else 0.15)),
+        "gain_scale": float(source.get("gain_scale", 1.0)),
+        "push_probability": float(source.get("push_probability", 0.02)),
+        "push_force": float(source.get("push_force", 0.15 if len(contact_links) <= 2 else 0.3)),
+        "assist": source.get("assist"),
+        "friction": source.get("friction", [0.5, 1.2]),
+        "nominal_pose": source.get("nominal_pose", {}),
+        "geometry": geometry,
+        "probe_range": float(source.get("probe_range", 2.0)),
+        "probe_minimum": float(source.get("probe_minimum", 0.02)),
+    }
+    robots = [robot] if variants == 0 else [randomize_robot(robot, randomization, generator) for _ in range(variants)]
+    records, trajectories = [], []
+    for variant, variant_robot in enumerate(robots):
+        graph = EmbodimentGraph.from_urdf(variant_robot, feature_config, **_graph_kwargs(source, robot))
+        specs = actuator_specs(graph, source.get("actuator_overrides"), _actuator_defaults(source, "position"))
+        specs = ground_specs(specs, settings["gain_scale"])
+        record = _record(f"{name}/{variant}-ground", graph, specs, source)
+        records.append(record)
+        trajectories += simulate_ground(len(records) - 1, record, settings, generator)
+    return records, trajectories
+
+
+SOURCE_TYPES = {"synthetic": synthetic_source, "huggingface": huggingface_source, "mujoco": mujoco_source}

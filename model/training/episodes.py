@@ -198,7 +198,16 @@ class Trajectory:
         transition_valid (torch.Tensor | None): Bool ``[T]``; False where the
             transition to the next frame is not explained by the dynamics.
         base_external_wrench (torch.Tensor | None): ``[T, 6]`` known external
-            wrench on the base (synthetic harness), for exact probe labels.
+            wrench on the base (synthetic harness, pushes), for exact labels.
+        exact_dynamics (bool): The data come from a simulator whose applied
+            torques produce the recorded accelerations exactly (with contacts),
+            so inverse-dynamics labels equal the applied torques.
+        probe_executed (torch.Tensor | None): ``[T, K, J]`` executed probe
+            torques computed by a simulator (with contacts).
+        probe_accelerations (torch.Tensor | None): ``[T, K, J]`` joint
+            accelerations of the probes from the simulator.
+        probe_base_accelerations (torch.Tensor | None): ``[T, K, 6]`` base
+            linear and angular accelerations of the probes (base frame).
     """
 
     embodiment: int
@@ -222,6 +231,10 @@ class Trajectory:
     probe_torques: torch.Tensor | None = None
     transition_valid: torch.Tensor | None = None
     base_external_wrench: torch.Tensor | None = None
+    exact_dynamics: bool = False
+    probe_executed: torch.Tensor | None = None
+    probe_accelerations: torch.Tensor | None = None
+    probe_base_accelerations: torch.Tensor | None = None
 
 
 def _difference(values: torch.Tensor, dt: float, wrap: torch.Tensor | None = None) -> torch.Tensor:
@@ -596,6 +609,8 @@ def process_episode(
     first_estimate = estimate(qdd, motion)
     applied = trajectory.applied_torque.to(torch.float64) if measured else first_estimate.efforts
     residual = first_estimate.residual_wrench.norm(dim=-1)
+    if trajectory.exact_dynamics:
+        residual = torch.zeros_like(residual)
     has_thrust = bool((actuator["mode"] == ACTUATOR_MODES.index("thrust")).any())
     if not record.contact_links and not has_thrust:
         # No contact model: the base is held by something not modelled (a
@@ -652,9 +667,28 @@ def process_episode(
     if trajectory.probe_torques is not None:
         limit = torque_limit(actuator, qd)
         wrenches = rotor_wrenches(graph, actuator, q, qd)
-        for probe in trajectory.probe_torques.to(torch.float64).unbind(1):
+        for probe_index, probe in enumerate(trajectory.probe_torques.to(torch.float64).unbind(1)):
             executed = torch.maximum(torch.minimum(probe, limit), -limit)
-            if floating:
+            if trajectory.probe_accelerations is not None:
+                # Simulator probes (with contacts): use its executed torque and accelerations.
+                executed = trajectory.probe_executed[:, probe_index].to(torch.float64)
+                acceleration = trajectory.probe_accelerations[:, probe_index].to(torch.float64)
+                base_acc = (
+                    trajectory.probe_base_accelerations[:, probe_index].to(torch.float64)
+                    if trajectory.probe_base_accelerations is not None
+                    else torch.zeros_like(base_acceleration0)
+                )
+                linear_acc, angular_acc = base_acc[:, :3], base_acc[:, 3:]
+                if floating:
+                    omega_next = base.angular_velocity + dt * angular_acc
+                    velocity_next_base = base.linear_velocity + dt * (
+                        linear_acc - torch.linalg.cross(base.angular_velocity, base.linear_velocity, dim=-1)
+                    )
+                    base_next = (exp_rotation(omega_next * dt)[:-1], (velocity_next_base * dt)[:-1],
+                                 velocity_next_base[:-1], omega_next[:-1])
+                else:
+                    base_next = None
+            elif floating:
                 linear_acc, angular_acc, acceleration = floating_forward_dynamics(
                     graph, q, qd, executed, gravity, base.linear_velocity, base.angular_velocity,
                     wrenches, trajectory.base_external_wrench,
@@ -688,6 +722,10 @@ def process_episode(
     # Required torque (task C) for each variant's joint and base acceleration.
     required = []
     for index in range(variants):
+        if trajectory.exact_dynamics and (index == 0 or trajectory.probe_accelerations is not None):
+            # Simulated with contacts: the applied torque is the required torque.
+            required.append(torque[:, index])
+            continue
         variant_motion = BaseMotion(
             base.linear_velocity, base.angular_velocity,
             base_acceleration[:, index, :3], base_acceleration[:, index, 3:],

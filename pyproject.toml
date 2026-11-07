@@ -17,6 +17,12 @@ dependencies = [
 validation = [
     "h5py>=3.16.0",
 ]
+convert = [
+    "numcodecs>=0.13.1",
+]
+sim = [
+    "mujoco>=3.17.0",
+]
 
 [dependency-groups]
 dev = [

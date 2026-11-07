@@ -1,7 +1,8 @@
 """Download the robot URDFs used by the example data configs into assets/urdf.
 
-The files come from Unitree's ``unitree_ros`` repository (BSD-3-Clause). The
-examples need only kinematics and inertials, so meshes are not downloaded.
+The Unitree files come from ``unitreerobotics/unitree_ros`` and ANYmal D from
+``ANYbotics/anymal_d_simple_description`` (both BSD-3-Clause). The pipeline
+needs only kinematics and inertials, so meshes are not downloaded.
 
 Usage::
 
@@ -19,6 +20,7 @@ URDFS = {
     "go1.urdf": f"{BASE}/go1_description/urdf/go1.urdf",
     "h1.urdf": f"{BASE}/h1_description/urdf/h1.urdf",
     "g1_29dof.urdf": f"{BASE}/g1_description/g1_29dof.urdf",
+    "anymal_d.urdf": "https://raw.githubusercontent.com/ANYbotics/anymal_d_simple_description/master/urdf/anymal.urdf",
 }
 
 

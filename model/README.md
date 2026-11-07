@@ -1,60 +1,151 @@
 # GET encoder
 
-`GetEncoder` maps per-joint features to per-joint hidden states. Its config and
-model live in separate modules, following the layout of Hugging Face models.
-Each layer applies graph-biased self-attention, optional cross-attention, and a
-feed-forward network. The encoder does not include policy or self-modeling heads.
+An implementation of the Graph Embodiment Transformer (GET) encoder from
+[GET-Zero](https://get-zero-paper.github.io/) (Patel and Song, ICRA 2025), with
+one input token per degree of freedom (DoF) and embodiment graphs read from URDF.
+It works for any tree-structured robot: dexterous hands, arms, quadrupeds,
+bipeds, and humanoids. The encoder has no policy or self-modeling heads.
+
+Environment (uses [uv](https://docs.astral.sh/uv/)):
+
+```bash
+uv sync
+uv run pytest
+```
+
+## Pipeline
 
 ```python
 import torch
 
-from model import GetConfig, GetEncoder
-
-config = GetConfig(
-    input_size=6,
-    hidden_size=128,
-    num_hidden_layers=4,
-    num_attention_heads=4,
-    intermediate_size=512,
-    context_size=64,
-    cross_attention_layers=(1, 3),
+from model import (
+    EmbodimentGraph, GetConfig, GetEncoder, GetTokenizer,
+    JointFeatureConfig, collate_embodiments,
 )
-encoder = GetEncoder(config)
 
-joint_features = torch.randn(2, 3, 6)
-parent_indices = torch.tensor([[-1, 0, 1], [-1, 0, 0]])
-mass_matrix = torch.eye(3).expand(2, -1, -1).clone()
-context = torch.randn(2, 5, 64)
-hidden_states = encoder(
-    joint_features,
-    parent_indices,
-    mass_matrix=mass_matrix,
-    context_states=context,
+features = JointFeatureConfig.cross_embodiment()   # or JointFeatureConfig() = paper
+graphs = [
+    EmbodimentGraph.from_urdf("go1.urdf", features),
+    EmbodimentGraph.from_urdf("h1.urdf", features),
+    EmbodimentGraph.from_urdf("leap_hand.urdf", features),
+]
+batch = collate_embodiments(graphs)                 # pads to the largest DoF count
+
+H = 6                                               # GET-Zero history length
+tokenizer = GetTokenizer(
+    fixed_local_size=features.size,                 # o_fl: URDF hardware features
+    variable_local_size=2,                          # o_vl: q (normalized), PD target
+    variable_global_size=6,                         # o_vg: e.g. base ang. vel + gravity
+    history_size=H,
 )
-assert hidden_states.shape == (2, 3, 128)
+q = torch.zeros(len(graphs), H, batch.joint_mask.shape[1])          # oldest first
+q_target = torch.zeros_like(q)
+tokens = tokenizer(
+    batch.joint_features,
+    batch.joint_mask,
+    variable_local=torch.stack(
+        (batch.normalize_joint_positions(q), batch.normalize_joint_positions(q_target)), -1
+    ),
+    variable_global=torch.zeros(len(graphs), H, 6),
+)
+
+encoder = GetEncoder(GetConfig.get_zero(input_size=tokenizer.token_size))
+hidden = encoder(
+    tokens,
+    mass_matrix=batch.mass_matrix(q[:, -1]),        # M(q) from URDF inertials
+    **batch.encoder_inputs(),                       # parents, mask, edges, distances
+)                                                   # [batch, joints, 512]
 ```
 
-`parent_indices[b, j]` identifies joint `j`'s direct parent or uses `-1` for a
-root. `joint_mask` and `context_mask` use `True` for valid tokens. For padded
-joints, set `parent_indices` to `-1` and their mass-matrix rows and columns to
-zero. The output at padded positions is zero. `adjacency_matrix` adds undirected
-edges, including edges between roots of independent serial chains used by the
-GET-Zero embodiment graph.
+## Tokens: one per DoF
 
-Spatial distance is the shortest path over undirected edges. Parent and child
-distances count directed ancestor steps in each direction. Each attention head
-in each encoder layer learns separate scalar embeddings for those distances.
-Unconnected pairs and distances above `max_graph_distance` share an overflow
-bucket. A linear projection of each normalized inertia entry also contributes
-to the self-attention logit:
+GET-Zero builds token `j` as
+
+```text
+T_j = [o_vg^{t-H+1..t}, o_fg, o_vl,j^{t-H+1..t}, o_fl,j]
+```
+
+| Part | Meaning | GET-Zero LEAP Hand |
+|------|---------|--------------------|
+| `o_vg` | variable global obs with history, shared by all tokens | task phase (sin/cos) |
+| `o_fg` | fixed global obs | none |
+| `o_vl,j` | variable per-joint obs with history | normalized joint angle, PD target |
+| `o_fl,j` | fixed per-joint hardware properties from URDF | joint origin and rotation relative to the parent joint |
+
+History is flattened feature-major, as in the GET-Zero code. The encoder applies a
+layer norm over each raw token and then a learned linear embedding, as in the
+paper. `GetConfig.get_zero` gives the paper's architecture: 8 layers, 16 heads,
+width 512, feed-forward 1024, dropout 0.1.
+
+`JointFeatureConfig()` matches the paper (6 features). Robots in the paper share
+joint axes, so axes were not needed. Across humanoids, quadrupeds, and hands they
+differ, so `JointFeatureConfig.cross_embodiment()` adds the axis, joint type,
+limits, effort and velocity limits, damping and friction, and the mass, center
+of mass, and inertia of the body each joint moves. It also uses the continuous
+6D rotation representation (31 features).
+
+## Embodiment graph from URDF
+
+`EmbodimentGraph.from_urdf` parses URDF with the standard library (no
+robotics dependencies). Expand xacro files first.
+
+* **Nodes**: every `revolute`, `continuous`, and `prismatic` joint.
+* **Directed edges**: parent to child, through any number of fixed joints.
+* **Undirected edges**: between joints that share a parent body, GET-Zero's
+  "joints at the start of independent serial chains". For a hand these are the
+  finger roots on the palm, for a quadruped the four hips on the trunk, and for a
+  humanoid the hips and waist on the pelvis. Shoulders on the torso are joined
+  the same way. Disable this with `sibling_edges=False`.
+* **Fixed joints** are collapsed. Their links' inertia is merged into the body
+  of the nearest moving joint, and hardware poses are composed through them.
+* **Mimic joints** (for example a gripper's second finger) are not independent
+  DoFs. They are frozen at their offset unless `include_mimic_joints=True`.
+* **Floating and planar joints** are rigid mounts by default. With
+  `multi_dof_joints="expand"` they become chains of 1-DoF virtual joints (6 and
+  3), so each DoF still gets one token.
+* **Joint order** defaults to depth-first URDF order, the order MuJoCo and
+  Pinocchio use. Pass `joint_order=[...]` to match your simulator.
+
+On all 633 LEAP Hand variants that ship with GET-Zero, the graph's edges match
+the reference implementation's adjacency matrix exactly. The joint
+origin/rotation features match the URDF to float32 precision.
+
+The graph also provides:
+
+* `forward_kinematics(q)`: each joint's pose in the root frame, which is the
+  GET-Zero self-modeling target.
+* `mass_matrix(q)`: the joint-space inertia `M(q)`, used by the dynamic attention
+  bias. For a floating base robot this equals the actuated block of the
+  floating-base mass matrix. It checks against the closed form for a double
+  pendulum. A joint whose moving body has no mass has a zero diagonal, which the
+  encoder rejects.
+* `normalize_joint_positions(q)`: scales to [-1, 1] by the limits; continuous
+  joints wrap by pi.
+
+## Attention
+
+Each layer adds a learned per-head bias to the attention logits:
 
 ```text
 normalized_mass[i, j] = M(q)[i, j] / (sqrt(M(q)[i, i] * M(q)[j, j]) + mass_epsilon)
-attention_bias[i, j] = spatial[i, j] + parent[i, j] + child[i, j]
-                       + linear(normalized_mass[i, j])
+A[i, j] = q_i k_j / sqrt(d) + spatial[SPD(i, j)] + parent[P(i, j)] + child[C(i, j)]
+          + linear(normalized_mass[i, j])
 ```
 
-The mass matrix is supplied at each forward pass, so changes in `q` change the
-dynamic bias. The module requires a symmetric, finite mass matrix with a
-positive diagonal for every valid joint. Cross-attention is applied after
-self-attention in the zero-based layers listed in `cross_attention_layers`.
+`SPD` is the shortest path over undirected edges. `P` and `C` count ancestor and
+descendant steps and are zero for unrelated pairs. Unreachable pairs, and
+distances above `max_graph_distance`, share an overflow bucket. That bucket does
+not depend on how far a batch is padded. The spatial and parent/child terms are
+from GET-Zero. The mass term is an addition in this repository. It is computed
+at every step from `M(q)`, so it changes with the configuration. Turn it off with
+`use_mass_encoding=False`.
+
+Graph distances depend only on the robot, so `EmbodimentGraph` precomputes them
+and the encoder accepts them as `graph_distances`. Without them, the encoder
+computes them from `parent_indices` and `adjacency_matrix` with a Python loop.
+
+Low-level use without URDF still works: `parent_indices[b, j]` is joint `j`'s
+parent or `-1`, and `joint_mask` and `context_mask` use `True` for valid tokens.
+For padded joints, set `parent_indices` to `-1` and their mass rows and columns
+to zero. Padded outputs are zero. Cross-attention to context tokens runs after
+self-attention in the layers listed in `cross_attention_layers`.

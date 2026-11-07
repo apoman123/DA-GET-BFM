@@ -24,6 +24,9 @@ class GetConfig:
         use_spatial_encoding (bool): Whether to embed undirected graph distance.
         use_parent_child_encoding (bool): Whether to embed directed ancestry.
         use_mass_encoding (bool): Whether to project the normalized mass matrix.
+        use_input_layer_norm (bool): Whether to layer-normalize each raw joint
+            token over its features before the input projection, as GET-Zero
+            does because token features have very different scales.
     """
 
     input_size: int
@@ -39,6 +42,33 @@ class GetConfig:
     use_spatial_encoding: bool = True
     use_parent_child_encoding: bool = True
     use_mass_encoding: bool = True
+    use_input_layer_norm: bool = True
+
+    @classmethod
+    def get_zero(cls, input_size: int, **overrides: object) -> "GetConfig":
+        """Return the GET-Zero LEAP Hand architecture for a token width.
+
+        The paper's model uses 8 layers, 16 heads, width 512, feed-forward
+        width 1024, dropout 0.1, and input layer normalization.
+
+        Args:
+            input_size (int): Raw joint token width, for example
+                ``GetTokenizer.token_size``.
+            **overrides (object): Fields to change from the paper values.
+
+        Returns:
+            GetConfig: Validated configuration.
+        """
+        values = {
+            "hidden_size": 512,
+            "num_hidden_layers": 8,
+            "num_attention_heads": 16,
+            "intermediate_size": 1024,
+            "hidden_dropout_prob": 0.1,
+            "use_input_layer_norm": True,
+        }
+        values.update(overrides)
+        return cls(input_size=input_size, **values)
 
     def __post_init__(self) -> None:
         """Reject invalid dimensions and layer locations.

@@ -105,6 +105,9 @@ def graph_distances(
     return spatial.clamp(max=unreachable), parents, parents.transpose(1, 2)
 
 
+compute_graph_distances = graph_distances
+
+
 class GetGraphAttentionBias(nn.Module):
     """Learn per-head spatial, parent, child, and normalized mass logit biases.
 
@@ -186,9 +189,15 @@ class GetGraphAttentionBias(nn.Module):
         )
         max_distance = self.config.max_graph_distance + 1
         if self.spatial_embedding is not None:
-            bias = bias + self.spatial_embedding(
-                spatial_distances.clamp(max=max_distance)
-            ).to(dtype)
+            # A shortest path over J joints is at most J - 1 long, so any value of
+            # at least J marks an unreachable pair. Map those to the overflow
+            # bucket so the bucket does not depend on how far a batch was padded.
+            spatial_distances = torch.where(
+                spatial_distances >= joint_count,
+                max_distance,
+                spatial_distances.clamp(max=max_distance),
+            )
+            bias = bias + self.spatial_embedding(spatial_distances).to(dtype)
         if self.parent_embedding is not None and self.child_embedding is not None:
             bias = bias + self.parent_embedding(
                 parent_distances.clamp(max=max_distance)
@@ -319,6 +328,8 @@ class GetEncoder(nn.Module):
 
     Attributes:
         config (GetConfig): Encoder dimensions and enabled mechanisms.
+        input_norm (nn.LayerNorm | None): Per-token feature normalization applied
+            before the projection when ``config.use_input_layer_norm`` is set.
         input_projection (nn.Linear): Joint feature to hidden-state projection.
         layers (nn.ModuleList): Independently parameterized transformer layers.
         final_norm (nn.LayerNorm): Output normalization.
@@ -335,6 +346,9 @@ class GetEncoder(nn.Module):
         """
         super().__init__()
         self.config = config
+        self.input_norm = (
+            nn.LayerNorm(config.input_size) if config.use_input_layer_norm else None
+        )
         self.input_projection = nn.Linear(config.input_size, config.hidden_size)
         self.layers = nn.ModuleList(
             GetEncoderLayer(config, index in config.cross_attention_layers)
@@ -351,12 +365,15 @@ class GetEncoder(nn.Module):
         adjacency_matrix: torch.Tensor | None = None,
         context_states: torch.Tensor | None = None,
         context_mask: torch.Tensor | None = None,
+        graph_distances: tuple[torch.Tensor, torch.Tensor, torch.Tensor]
+        | None = None,
     ) -> torch.Tensor:
         """Encode joint features at the current configuration q.
 
         Args:
-            input_values (torch.Tensor): Float joint features of shape
-                ``[batch, joints, config.input_size]``.
+            input_values (torch.Tensor): Float joint tokens of shape
+                ``[batch, joints, config.input_size]``, one token per DoF. Build
+                them with ``GetTokenizer`` to follow the GET-Zero layout.
             parent_indices (torch.Tensor): Direct parent indices of shape
                 ``[batch, joints]``; -1 denotes roots or padding.
             mass_matrix (torch.Tensor | None): Joint-space inertia matrix
@@ -369,6 +386,12 @@ class GetEncoder(nn.Module):
             context_states (torch.Tensor | None): Context tokens of shape
                 ``[batch, context, config.context_size or hidden_size]``.
             context_mask (torch.Tensor | None): Boolean valid-context mask.
+            graph_distances (tuple | None): Precomputed integer ``[batch, joints,
+                joints]`` spatial, ancestor, and descendant distances, such as
+                ``EmbodimentBatch.graph_distances``. They are a function of the
+                robot only, so precomputing them avoids a Python loop per step.
+                When given, they replace the distances that would be computed
+                from ``parent_indices`` and ``adjacency_matrix``.
 
         Returns:
             torch.Tensor: Joint representations of shape
@@ -421,7 +444,22 @@ class GetEncoder(nn.Module):
                 raise ValueError("context_mask must allow at least one token per item")
         elif context_mask is not None:
             raise ValueError("context_mask requires context_states")
-        distances = graph_distances(parent_indices, joint_mask, adjacency_matrix)
+        if graph_distances is None:
+            distances = compute_graph_distances(
+                parent_indices, joint_mask, adjacency_matrix
+            )
+        else:
+            if len(graph_distances) != 3 or any(
+                item.shape != (batch_size, joint_count, joint_count)
+                or item.dtype not in (torch.int32, torch.int64)
+                for item in graph_distances
+            ):
+                raise ValueError(
+                    "graph_distances must hold three integer [batch, joints, joints] tensors"
+                )
+            distances = tuple(item.long() for item in graph_distances)
+        if self.input_norm is not None:
+            input_values = self.input_norm(input_values)
         hidden_states = self.input_projection(input_values)
         hidden_states = hidden_states.masked_fill(~joint_mask.unsqueeze(-1), 0)
         for layer in self.layers:

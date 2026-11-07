@@ -123,7 +123,7 @@ class PretrainingPipelineTest(unittest.TestCase):
     def test_sources_records_and_cache(self) -> None:
         """Both sources load; recorded joints follow joint_names; the cache is reused."""
         names = [record.name for record in self.datasets.records]
-        self.assertEqual(names, ["quadruped/0", "quadruped/1", "humanoid_arms"])
+        self.assertEqual(names, ["quadruped/0-fixed", "quadruped/1-fixed", "humanoid_arms"])
         arm = self.datasets.records[2]
         self.assertEqual(arm.graph.joint_names, tuple(ARM_JOINTS))
         self.assertEqual(arm.effect_mask.tolist(), [False, True, False, True])

@@ -25,7 +25,7 @@ from __future__ import annotations
 from dataclasses import dataclass
 
 JOINT_TYPE_NAMES = ("revolute", "continuous", "prismatic")
-ACTUATOR_MODES = ("torque", "position", "velocity", "passive")
+ACTUATOR_MODES = ("torque", "position", "velocity", "passive", "thrust")
 
 
 @dataclass(frozen=True)
@@ -91,6 +91,9 @@ ACTUATOR_FEATURES: tuple[PhysicsFeature, ...] = (
     PhysicsFeature("gear_ratio", "N_i", "1", "joint", 1.0),
     PhysicsFeature("kp", "K_p,i", "N m/rad | N/m", "joint", 10.0),
     PhysicsFeature("kd", "K_d,i", "N m s/rad | N s/m", "joint", 1.0),
+    # Propeller coefficients of thrust-mode joints (multirotors); zero otherwise.
+    PhysicsFeature("thrust_coefficient", "k_f,i (thrust = k_f w^2 along a_i)", "N s^2/rad^2", "B_i", 1e-6),
+    PhysicsFeature("torque_coefficient", "k_m,i (drag = k_m w^2)", "N m s^2/rad^2", "joint", 1e-8),
     *(
         PhysicsFeature(f"mode_{mode}", f"mode_i[{mode}]", "1 (one-hot)", "joint", None)
         for mode in ACTUATOR_MODES
@@ -99,12 +102,18 @@ ACTUATOR_FEATURES: tuple[PhysicsFeature, ...] = (
 
 DYNAMICS_FEATURES: tuple[PhysicsFeature, ...] = (
     PhysicsFeature("mass_diagonal", "M_ii(q_t)", "kg m^2 | kg", "joint", 1e-3),
-    PhysicsFeature("coriolis", "c_i(q_t, qd_t)", "N m | N", "joint", 0.1),
-    PhysicsFeature("gravity", "g_i(q_t)", "N m | N", "joint", 0.1),
-    PhysicsFeature("friction", "tau_hat_f,i", "N m | N", "joint", 0.1),
+    PhysicsFeature("coriolis", "c_i(q_t, qd_t, base twist)", "N m | N", "joint", 0.1),
+    PhysicsFeature("gravity", "g_i(q_t) with gravity in the base frame", "N m | N", "joint", 0.1),
+    PhysicsFeature("friction", "tau_hat_f,i (joint friction + rotor drag)", "N m | N", "joint", 0.1),
     PhysicsFeature("applied_torque_prev", "tau_i,t-1^applied", "N m | N", "joint", 0.1),
     PhysicsFeature("gravity_load", "|g_i| / (tau_i^cont + eps)", "1", "joint", 1.0),
-    PhysicsFeature("applied_torque_known", "1[tau_t-1^applied measured]", "1 (flag)", "joint", None),
+    PhysicsFeature(
+        "applied_torque_known",
+        "source of tau_t-1: 1 measured, 0.5 inverse-dynamics estimate, 0 unknown",
+        "1 (flag)",
+        "joint",
+        None,
+    ),
 )
 
 PHYSICS_FEATURE_GROUPS: dict[str, tuple[PhysicsFeature, ...]] = {
@@ -121,7 +130,7 @@ FEATURE_UPDATE_TIERS: dict[str, str] = {
     "mass_diagonal": "configuration",  # q (and nothing else)
     "gravity": "configuration",  # q and the gravity direction
     "gravity_load": "configuration",
-    "coriolis": "velocity",  # q and qd
+    "coriolis": "velocity",  # q, qd, and the base twist
     "friction": "velocity",  # qd
     "applied_torque_prev": "measurement",  # new every control step
     "applied_torque_known": "measurement",

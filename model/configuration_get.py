@@ -56,7 +56,7 @@ class GetConfig:
     use_physics_cross_attention: bool = False
     physics_cross_attention_layers: tuple[int, ...] | None = None
     rigid_body_feature_size: int = 25
-    actuator_feature_size: int = 11
+    actuator_feature_size: int = 14
     dynamics_feature_size: int = 7
     physics_tokenizer_hidden_size: int | None = None
 

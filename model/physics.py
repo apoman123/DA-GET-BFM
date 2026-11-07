@@ -59,7 +59,13 @@ class ActuatorSpec:
         gear_ratio (float): N, motor-to-joint reduction.
         kp (float): K_p, position gain of a PD-controlled joint.
         kd (float): K_d, velocity gain.
-        mode (str): ``torque``, ``position``, ``velocity``, or ``passive``.
+        thrust_coefficient (float): k_f of a propeller on a ``thrust`` joint:
+            thrust ``k_f w^2`` in N along the joint axis (negative: along -axis).
+        torque_coefficient (float): k_m of a propeller: drag moment ``k_m w^2``
+            in N m opposing the spin.
+        mode (str): ``torque``, ``position``, ``velocity``, ``passive``, or
+            ``thrust`` (a rotor whose speed is commanded and whose propeller
+            pushes the base).
     """
 
     peak_torque: float
@@ -69,6 +75,8 @@ class ActuatorSpec:
     gear_ratio: float = 1.0
     kp: float = 0.0
     kd: float = 0.0
+    thrust_coefficient: float = 0.0
+    torque_coefficient: float = 0.0
     mode: str = "torque"
 
     def __post_init__(self) -> None:
@@ -81,9 +89,15 @@ class ActuatorSpec:
             ValueError: A value is negative or nonfinite, the continuous limit
                 exceeds the peak, or the mode is unknown.
         """
-        values = [getattr(self, item.name) for item in fields(self) if item.name != "mode"]
+        values = [
+            getattr(self, item.name)
+            for item in fields(self)
+            if item.name not in ("mode", "thrust_coefficient")
+        ]
         if any(not math.isfinite(value) or value < 0 for value in values):
             raise ValueError("actuator values must be finite and nonnegative")
+        if not math.isfinite(self.thrust_coefficient):
+            raise ValueError("thrust_coefficient must be finite")
         if self.mode not in ACTUATOR_MODES:
             raise ValueError(f"mode must be one of {ACTUATOR_MODES}")
         if self.continuous_torque > self.peak_torque:
@@ -251,13 +265,13 @@ def rigid_body_features(graph: EmbodimentGraph) -> torch.Tensor:
 
 
 def actuator_features(specs: Sequence[ActuatorSpec]) -> torch.Tensor:
-    """Return ``[tau^peak, tau^cont, omega^max, P^max, N, K_p, K_d, mode]``.
+    """Return ``[tau^peak, tau^cont, omega^max, P^max, N, K_p, K_d, k_f, k_m, mode]``.
 
     Args:
         specs (Sequence[ActuatorSpec]): One spec per joint.
 
     Returns:
-        torch.Tensor: Float32 ``[J, 11]``; ``mode`` is one-hot.
+        torch.Tensor: Float32 ``[J, 14]``; ``mode`` is one-hot over 5 modes.
     """
     tensors = actuator_tensors(specs)
     mode = torch.nn.functional.one_hot(tensors["mode"], len(ACTUATOR_MODES))
@@ -274,6 +288,8 @@ def actuator_features(specs: Sequence[ActuatorSpec]) -> torch.Tensor:
                         "gear_ratio",
                         "kp",
                         "kd",
+                        "thrust_coefficient",
+                        "torque_coefficient",
                     )
                 ],
                 dim=1,
@@ -306,20 +322,53 @@ def configuration_terms(
     return diagonal, gravity_efforts(graph, positions, gravity)
 
 
+def loss_efforts(
+    graph: EmbodimentGraph, tensors: Mapping[str, torch.Tensor] | None, velocities: torch.Tensor
+) -> torch.Tensor:
+    """Return joint friction plus propeller drag ``k_m w |w|`` of thrust joints.
+
+    Args:
+        graph (EmbodimentGraph): Robot.
+        tensors (Mapping | None): ``actuator_tensors`` output, for rotor drag.
+        velocities (torch.Tensor): ``[..., J]`` joint velocities.
+
+    Returns:
+        torch.Tensor: ``[..., J]`` efforts that oppose motion.
+    """
+    efforts = friction_efforts(graph, velocities)
+    if tensors is not None:
+        thrust = tensors["mode"].to(velocities.device) == ACTUATOR_MODES.index("thrust")
+        drag = tensors["torque_coefficient"].to(velocities) * velocities * velocities.abs()
+        efforts = efforts + torch.where(thrust, drag, torch.zeros_like(drag))
+    return efforts
+
+
 def velocity_terms(
-    graph: EmbodimentGraph, positions: torch.Tensor, velocities: torch.Tensor
+    graph: EmbodimentGraph,
+    positions: torch.Tensor,
+    velocities: torch.Tensor,
+    base_linear_velocity: torch.Tensor | None = None,
+    base_angular_velocity: torch.Tensor | None = None,
+    tensors: Mapping[str, torch.Tensor] | None = None,
 ) -> tuple[torch.Tensor, torch.Tensor]:
-    """Compute the velocity tier: ``c(q, qd)`` and the friction estimate.
+    """Compute the velocity tier: ``c(q, qd, base twist)`` and losses.
 
     Args:
         graph (EmbodimentGraph): Robot.
         positions (torch.Tensor): ``[..., J]`` joint positions.
         velocities (torch.Tensor): ``[..., J]`` joint velocities.
+        base_linear_velocity (torch.Tensor | None): ``[..., 3]`` floating base.
+        base_angular_velocity (torch.Tensor | None): ``[..., 3]`` floating base.
+        tensors (Mapping | None): Actuator tensors, for rotor drag.
 
     Returns:
-        tuple[torch.Tensor, torch.Tensor]: Coriolis and friction efforts.
+        tuple[torch.Tensor, torch.Tensor]: Coriolis efforts and friction (plus
+            rotor drag).
     """
-    return coriolis_efforts(graph, positions, velocities), friction_efforts(graph, velocities)
+    coriolis = coriolis_efforts(
+        graph, positions, velocities, base_linear_velocity, base_angular_velocity
+    )
+    return coriolis, loss_efforts(graph, tensors, velocities)
 
 
 def assemble_dynamics_features(
@@ -329,6 +378,7 @@ def assemble_dynamics_features(
     friction: torch.Tensor,
     applied_torque_prev: torch.Tensor | None,
     continuous_torque: torch.Tensor,
+    torque_source: float | torch.Tensor = 1.0,
 ) -> torch.Tensor:
     """Stack dynamics terms into the 7 dynamics features.
 
@@ -341,11 +391,14 @@ def assemble_dynamics_features(
             efforts of the previous step, or None when unknown (features are
             then zero with the known flag off).
         continuous_torque (torch.Tensor): ``[J]`` tau^cont.
+        torque_source (float | torch.Tensor): Flag value when the previous
+            torque is given: 1 for measured, 0.5 for an inverse-dynamics
+            estimate (broadcast over ``[..., J]``).
 
     Returns:
         torch.Tensor: Float32 ``[..., J, 7]``.
     """
-    known = torch.ones_like(mass_diagonal)
+    known = torch.ones_like(mass_diagonal) * torch.as_tensor(torque_source).to(mass_diagonal)
     if applied_torque_prev is None:
         applied_torque_prev = torch.zeros_like(mass_diagonal)
         known = torch.zeros_like(mass_diagonal)
@@ -374,6 +427,9 @@ def dynamics_features(
     velocities: torch.Tensor,
     applied_torque_prev: torch.Tensor | None = None,
     gravity: torch.Tensor | None = None,
+    base_linear_velocity: torch.Tensor | None = None,
+    base_angular_velocity: torch.Tensor | None = None,
+    torque_source: float = 1.0,
 ) -> torch.Tensor:
     """Compute all dynamics features at once (no caching).
 
@@ -383,22 +439,29 @@ def dynamics_features(
         positions (torch.Tensor): ``[..., J]`` q_t.
         velocities (torch.Tensor): ``[..., J]`` qd_t.
         applied_torque_prev (torch.Tensor | None): ``[..., J]`` tau_{t-1}.
-        gravity (torch.Tensor | None): Gravity in the root frame.
+        gravity (torch.Tensor | None): Gravity in the base frame.
+        base_linear_velocity (torch.Tensor | None): ``[..., 3]`` floating base.
+        base_angular_velocity (torch.Tensor | None): ``[..., 3]`` floating base.
+        torque_source (float): 1 if tau_{t-1} is measured, 0.5 if estimated.
 
     Returns:
         torch.Tensor: Float32 ``[..., J, 7]``.
     """
     positions = positions.to(torch.float64)
     velocities = velocities.to(torch.float64)
+    tensors = actuator_tensors(specs)
     mass_diagonal, gravity_term = configuration_terms(graph, positions, gravity)
-    coriolis, friction = velocity_terms(graph, positions, velocities)
+    coriolis, friction = velocity_terms(
+        graph, positions, velocities, base_linear_velocity, base_angular_velocity, tensors
+    )
     return assemble_dynamics_features(
         mass_diagonal,
         coriolis,
         gravity_term,
         friction,
         applied_torque_prev,
-        actuator_tensors(specs)["continuous_torque"],
+        tensors["continuous_torque"],
+        torque_source,
     )
 
 
@@ -432,7 +495,8 @@ def requested_torque(
 
     ``torque`` mode: the proposal is the effort. ``position``: a PD target,
     ``K_p (a - q) - K_d qd``. ``velocity``: a velocity target, ``K_d (a - qd)``.
-    ``passive``: zero.
+    ``thrust``: a rotor speed target, ``K_d (a - qd) + k_m a |a|`` (speed
+    tracking plus the propeller drag at the target speed). ``passive``: zero.
 
     Args:
         tensors (Mapping[str, torch.Tensor]): Output of ``actuator_tensors``.
@@ -448,9 +512,16 @@ def requested_torque(
     kd = tensors["kd"].to(proposal)
     pd = kp * (proposal - positions) - kd * velocities
     velocity = kd * (proposal - velocities)
+    rotor = velocity + tensors["torque_coefficient"].to(proposal) * proposal * proposal.abs()
     zero = torch.zeros_like(proposal)
     return torch.where(
-        mode == 0, proposal, torch.where(mode == 1, pd, torch.where(mode == 2, velocity, zero))
+        mode == 0,
+        proposal,
+        torch.where(
+            mode == 1,
+            pd,
+            torch.where(mode == 2, velocity, torch.where(mode == 4, rotor, zero)),
+        ),
     )
 
 
@@ -547,7 +618,7 @@ class PhysicsFeatureCache:
     Attributes:
         graphs (tuple[EmbodimentGraph, ...]): One robot per row.
         rigid_body_features (torch.Tensor): Float32 ``[B, J, 25]``, zero padded.
-        actuator_features (torch.Tensor): Float32 ``[B, J, 11]``, zero padded.
+        actuator_features (torch.Tensor): Float32 ``[B, J, 14]``, zero padded.
         joint_mask (torch.Tensor): Bool ``[B, J]``.
         refresh_counts (dict[str, int]): Number of recomputations per tier, for
             monitoring.
@@ -592,6 +663,7 @@ class PhysicsFeatureCache:
         self.rigid_body_features = torch.zeros((len(graphs), joint_count, RIGID_BODY_FEATURE_SIZE))
         self.actuator_features = torch.zeros((len(graphs), joint_count, ACTUATOR_FEATURE_SIZE))
         self._continuous = []
+        self._tensors = []
         for row, (graph, row_specs) in enumerate(zip(self.graphs, self.specs)):
             if len(row_specs) != graph.num_joints:
                 raise ValueError("each row needs one actuator spec per joint")
@@ -599,7 +671,8 @@ class PhysicsFeatureCache:
             self.joint_mask[row, :count] = True
             self.rigid_body_features[row, :count] = rigid_body_features(graph)
             self.actuator_features[row, :count] = actuator_features(row_specs)
-            self._continuous.append(actuator_tensors(row_specs)["continuous_torque"])
+            self._tensors.append(actuator_tensors(row_specs))
+            self._continuous.append(self._tensors[-1]["continuous_torque"])
         self.configuration_interval = configuration_interval
         self.configuration_tolerance = configuration_tolerance
         self.velocity_interval = velocity_interval
@@ -627,6 +700,9 @@ class PhysicsFeatureCache:
         velocities: torch.Tensor,
         applied_torque_prev: torch.Tensor | None = None,
         gravity: torch.Tensor | None = None,
+        base_linear_velocity: torch.Tensor | None = None,
+        base_angular_velocity: torch.Tensor | None = None,
+        torque_source: float = 1.0,
     ) -> torch.Tensor:
         """Return dynamics features for the current step.
 
@@ -636,7 +712,12 @@ class PhysicsFeatureCache:
             applied_torque_prev (torch.Tensor | None): Padded ``[B, J]`` measured
                 tau_{t-1}, or None if not measured.
             gravity (torch.Tensor | None): ``[3]`` or ``[B, 3]`` gravity in each
-                root frame; defaults to -z.
+                base frame (projected gravity times 9.81 for a floating base);
+                defaults to -z.
+            base_linear_velocity (torch.Tensor | None): ``[B, 3]`` base frame.
+            base_angular_velocity (torch.Tensor | None): ``[B, 3]`` base frame.
+            torque_source (float): 1 if applied_torque_prev is measured, 0.5
+                if it is an estimate.
 
         Returns:
             torch.Tensor: Float32 ``[B, J, 7]``, zero on padding.
@@ -655,8 +736,12 @@ class PhysicsFeatureCache:
             if gravity is not None:
                 row_gravity = (gravity if gravity.ndim == 1 else gravity[row]).detach()
                 row_gravity = row_gravity.to("cpu", torch.float64)
+            twist = [
+                None if value is None else value[row].detach().to("cpu", torch.float64)
+                for value in (base_linear_velocity, base_angular_velocity)
+            ]
             configuration, moved = self._configuration_tier(row, graph, q, row_gravity)
-            velocity = self._velocity_tier(row, graph, q, qd, moved)
+            velocity = self._velocity_tier(row, graph, q, qd, moved, twist)
             torque = None
             if applied_torque_prev is not None:
                 torque = applied_torque_prev[row, :count].detach().to("cpu", torch.float64)
@@ -667,6 +752,7 @@ class PhysicsFeatureCache:
                 velocity.values[1],
                 torque,
                 self._continuous[row],
+                torque_source,
             )
         return output.to(positions.device)
 
@@ -692,19 +778,25 @@ class PhysicsFeatureCache:
         tier.age += 1
         return tier, False
 
-    def _velocity_tier(self, row, graph, q, qd, configuration_refreshed) -> _Tier:
+    def _velocity_tier(self, row, graph, q, qd, configuration_refreshed, twist) -> _Tier:
         """Return the velocity tier of one row, refreshing if stale.
 
-        c(q, qd) also depends on q, so it is refreshed with the configuration tier.
+        c(q, qd, base twist) also depends on q, so it is refreshed with the
+        configuration tier; the base twist counts as part of the velocity.
         """
         tier = self._velocity[row]
+        reference = torch.cat([qd] + [value for value in twist if value is not None])
         if (
             tier is None
             or configuration_refreshed
             or tier.age + 1 >= self.velocity_interval
-            or float((qd - tier.reference).abs().max()) > self.velocity_tolerance
+            or tier.reference.shape != reference.shape
+            or float((reference - tier.reference).abs().max()) > self.velocity_tolerance
         ):
-            tier = _Tier(qd.clone(), velocity_terms(graph, q, qd))
+            tier = _Tier(
+                reference.clone(),
+                velocity_terms(graph, q, qd, twist[0], twist[1], self._tensors[row]),
+            )
             self._velocity[row] = tier
             self.refresh_counts["velocity"] += 1
         else:

@@ -1,0 +1,57 @@
+{
+  "history_size": 3,
+  "joint_features": "get_zero",
+  "eval_fraction": 0.05,
+  "seed": 0,
+  "max_estimate_residual": 0.5,
+  "sources": [
+    {
+      "type": "huggingface",
+      "name": "g1_wbt_pick_up_fruit",
+      "repo_id": "unitreerobotics/G1_WBT_Inspire_Pick_Up_Fruit",
+      "data_files": "data/*/*.parquet",
+      "urdf": "../../assets/urdf/g1_29dof.urdf",
+      "floating_base": true,
+      "joint_names": [
+        "left_hip_pitch_joint", "left_hip_roll_joint", "left_hip_yaw_joint", "left_knee_joint",
+        "left_ankle_pitch_joint", "left_ankle_roll_joint",
+        "right_hip_pitch_joint", "right_hip_roll_joint", "right_hip_yaw_joint", "right_knee_joint",
+        "right_ankle_pitch_joint", "right_ankle_roll_joint",
+        "waist_yaw_joint", "waist_roll_joint", "waist_pitch_joint",
+        "left_shoulder_pitch_joint", "left_shoulder_roll_joint", "left_shoulder_yaw_joint", "left_elbow_joint",
+        "left_wrist_yaw_joint", "left_wrist_roll_joint", "left_wrist_pitch_joint",
+        "right_shoulder_pitch_joint", "right_shoulder_roll_joint", "right_shoulder_yaw_joint", "right_elbow_joint",
+        "right_wrist_yaw_joint", "right_wrist_roll_joint", "right_wrist_pitch_joint"
+      ],
+      "state_key": ["observation.state.lower_body", "observation.state.left_arm", "observation.state.right_arm"],
+      "action_key": ["action.lower_body", "action.left_arm", "action.right_arm"],
+      "action_type": "position",
+      "base_position_key": "observation.state.state_base_pose",
+      "base_position_indices": [0, 1, 2],
+      "base_orientation_key": "observation.state.state_base_pose",
+      "base_orientation_indices": [3, 4, 5, 6],
+      "base_orientation_format": "xyzw",
+      "base_angular_velocity_key": "observation.state.state_base_rot",
+      "base_angular_velocity_indices": [3, 4, 5],
+      "contact_links": ["left_ankle_roll_link", "right_ankle_roll_link"],
+      "surface_contacts": true,
+      "contact_height_tolerance": 0.03,
+      "fps": 30,
+      "smoothing_window": 3,
+      "max_episodes": 40,
+      "end_effectors": ["left_wrist_pitch_joint", "right_wrist_pitch_joint", "left_ankle_roll_joint", "right_ankle_roll_joint"],
+      "actuator_defaults": {"kp": 80.0, "kd": 2.0}
+    },
+    {
+      "type": "synthetic",
+      "name": "g1",
+      "urdf": "../../assets/urdf/g1_29dof.urdf",
+      "base_modes": ["fixed", "floating"],
+      "contact_links": ["left_ankle_roll_link", "right_ankle_roll_link"],
+      "randomized_embodiments": 8,
+      "episodes_per_embodiment": 8,
+      "steps": 150,
+      "seed": 7
+    }
+  ]
+}

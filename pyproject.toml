@@ -13,6 +13,11 @@ dependencies = [
     "transformers>=4.46",
 ]
 
+[project.optional-dependencies]
+validation = [
+    "h5py>=3.16.0",
+]
+
 [dependency-groups]
 dev = [
     "pytest>=8",

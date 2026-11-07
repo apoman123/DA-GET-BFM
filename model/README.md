@@ -158,9 +158,12 @@ self-attention. Observation tokens attend to `3J` physics tokens:
 
 * rigid body (25): `m`, `vech(I)` about the CoM in body frame `B_i`, `r^CoM`,
   `a^axis`, `T^parent`, joint type;
-* actuator (11): `τ^peak`, `τ^cont`, `ω^max`, `P^max`, `N`, `K_p`, `K_d`, mode;
-* dynamics (7): `M_ii(q)`, `c(q, qd)`, `g(q)`, friction, `τ_{t-1}`,
-  `|g| / τ^cont`, known flag.
+* actuator (14): `τ^peak`, `τ^cont`, `ω^max`, `P^max`, `N`, `K_p`, `K_d`,
+  propeller `k_f` and `k_m`, and the mode (torque, position, velocity,
+  passive, thrust);
+* dynamics (7): `M_ii(q)`, `c(q, qd, base twist)`, `g(q)` with gravity in the
+  base frame, friction plus rotor drag, `τ_{t-1}`, `|g| / τ^cont`, and the
+  source of `τ_{t-1}` (1 measured, 0.5 estimated, 0 unknown).
 
 Each group has its own asinh-scaled MLP tokenizer
 (`PhysicsFeatureTokenizer`). The attention bias is a per-head graph distance
@@ -176,7 +179,9 @@ The modules:
   and update tiers.
 * `model/physics.py`: feature extraction, plus `PhysicsFeatureCache` for tiered
   recomputation at control time.
-* `model/dynamics.py`: RNEA.
+* `model/dynamics.py`: RNEA for fixed and floating bases, the floating-base
+  mass matrix and forward dynamics, contact-force distribution, rotor thrust,
+  and `estimate_joint_efforts` for datasets without torque sensors.
 * `model/pretraining.py`: the auxiliary heads A to F.
 * `model/training/`: the data pipeline and Trainer.
 

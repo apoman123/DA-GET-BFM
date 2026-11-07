@@ -180,6 +180,30 @@ class _Token:
     )
 
 
+@dataclass
+class _Body:
+    """Accumulate the mass properties of the root (base) body."""
+
+    mass: float = 0.0
+    first_moment: torch.Tensor = field(
+        default_factory=lambda: torch.zeros(3, dtype=torch.float64)
+    )
+    origin_inertia: torch.Tensor = field(
+        default_factory=lambda: torch.zeros((3, 3), dtype=torch.float64)
+    )
+
+
+def _center_inertia(body) -> tuple[torch.Tensor, torch.Tensor]:
+    """Return the center of mass and the inertia about it of an accumulated body."""
+    if body.mass <= 0:
+        return torch.zeros(3, dtype=torch.float64), torch.zeros((3, 3), dtype=torch.float64)
+    com = body.first_moment / body.mass
+    inertia = body.origin_inertia - body.mass * (
+        (com @ com) * torch.eye(3, dtype=torch.float64) - torch.outer(com, com)
+    )
+    return com, inertia
+
+
 def _skew(vector: torch.Tensor) -> torch.Tensor:
     """Return the cross-product matrix of a 3-vector."""
     x, y, z = vector.tolist()
@@ -288,6 +312,19 @@ class EmbodimentGraph:
         characteristic_length (float): Largest distance from the root to a joint
             origin at q = 0, in meters (at least 1 cm). Used to normalize
             positions across robots of different size.
+        floating_base (bool): Whether the root body moves freely (humanoids,
+            quadrupeds, multirotors) rather than being bolted down.
+        base_mass (float): Mass of the root body, the root link plus every link
+            rigidly attached to it, in kg.
+        base_com (torch.Tensor): Float64 ``[3]`` root body center of mass in the
+            root frame.
+        base_inertia (torch.Tensor): Float64 ``[3, 3]`` root body inertia about
+            its center of mass, in the root frame.
+        link_names (tuple[str, ...]): Every URDF link reached from the root.
+        link_bodies (torch.Tensor): Long ``[L]`` token whose body carries each
+            link, or -1 for the root body.
+        link_transforms (torch.Tensor): Float64 ``[L, 4, 4]`` link frame in the
+            carrying body's frame.
     """
 
     name: str
@@ -314,6 +351,13 @@ class EmbodimentGraph:
     gear_ratios: torch.Tensor = field(repr=False, default=None)
     leaf_mask: torch.Tensor = field(repr=False, default=None)
     characteristic_length: float = 1.0
+    floating_base: bool = False
+    base_mass: float = 0.0
+    base_com: torch.Tensor = field(repr=False, default=None)
+    base_inertia: torch.Tensor = field(repr=False, default=None)
+    link_names: tuple[str, ...] = field(repr=False, default=())
+    link_bodies: torch.Tensor = field(repr=False, default=None)
+    link_transforms: torch.Tensor = field(repr=False, default=None)
 
     @property
     def num_joints(self) -> int:
@@ -343,6 +387,7 @@ class EmbodimentGraph:
         multi_dof_joints: Literal["skip", "expand"] = "skip",
         sibling_edges: bool = True,
         frozen_joints: Mapping[str, float] | None = None,
+        floating_base: bool | None = None,
     ) -> EmbodimentGraph:
         """Build an embodiment graph with one token per URDF degree of freedom.
 
@@ -364,6 +409,11 @@ class EmbodimentGraph:
                 rigid at the given position (rad or m). Use this when a dataset
                 records only part of a robot, for example the arms of a humanoid
                 whose legs are locked; their links are merged like fixed links.
+            floating_base (bool | None): Whether the root body is free. None
+                detects it: True when the URDF has a ``floating`` joint that is
+                skipped (the usual ``world -> floating -> pelvis`` layout).
+                Many legged URDFs have no floating joint and start at the trunk;
+                pass True for them.
 
         Returns:
             EmbodimentGraph: The graph, features, and kinematic data.
@@ -385,11 +435,24 @@ class EmbodimentGraph:
         )
         if unknown:
             raise ValueError(f"frozen_joints must name 1-DoF URDF joints: {unknown}")
-        tokens = _collect_tokens(robot, include_mimic_joints, multi_dof_joints, frozen)
+        base = _Body()
+        links: dict[str, tuple[int, torch.Tensor]] = {}
+        tokens = _collect_tokens(
+            robot, include_mimic_joints, multi_dof_joints, frozen, base, links
+        )
         if not tokens:
             raise ValueError(f"robot {robot.name!r} has no degrees of freedom")
         if joint_order is not None:
-            tokens = _reorder(tokens, joint_order)
+            tokens, old_to_new = _reorder(tokens, joint_order)
+            links = {
+                name: (body if body < 0 else old_to_new[body], transform)
+                for name, (body, transform) in links.items()
+            }
+        if floating_base is None:
+            floating_base = multi_dof_joints == "skip" and any(
+                joint.joint_type == "floating" for joint in robot.joints.values()
+            )
+        base_com, base_inertia = _center_inertia(base)
         joint_count = len(tokens)
         parents = torch.tensor([token.parent for token in tokens], dtype=torch.long)
         adjacency = torch.zeros((joint_count, joint_count), dtype=torch.bool)
@@ -477,6 +540,13 @@ class EmbodimentGraph:
             ),
             leaf_mask=leaf,
             characteristic_length=max(float(origins.norm(dim=1).max()), 0.01),
+            floating_base=bool(floating_base),
+            base_mass=float(base.mass),
+            base_com=base_com,
+            base_inertia=base_inertia,
+            link_names=tuple(links),
+            link_bodies=torch.tensor([body for body, _ in links.values()], dtype=torch.long),
+            link_transforms=torch.stack([transform for _, transform in links.values()]),
         )
 
     def normalize_joint_positions(self, positions: torch.Tensor) -> torch.Tensor:
@@ -522,6 +592,49 @@ class EmbodimentGraph:
             ValueError: positions does not end with dimension J.
         """
         return self._kinematics(positions)[0]
+
+    @property
+    def total_mass(self) -> float:
+        """Return the mass of the whole robot in kg."""
+        return self.base_mass + float(self.body_mass.sum())
+
+    def link_index(self, names: Sequence[str]) -> torch.Tensor:
+        """Return indices into ``link_names``.
+
+        Args:
+            names (Sequence[str]): URDF link names.
+
+        Returns:
+            torch.Tensor: Long ``[K]`` indices.
+
+        Raises:
+            ValueError: A link is unknown.
+        """
+        missing = sorted(set(names) - set(self.link_names))
+        if missing:
+            raise ValueError(f"unknown links {missing}")
+        return torch.tensor([self.link_names.index(name) for name in names], dtype=torch.long)
+
+    def link_poses(self, positions: torch.Tensor, links: Sequence[str]) -> torch.Tensor:
+        """Compute poses of URDF links in the root frame.
+
+        Args:
+            positions (torch.Tensor): Joint positions ``[..., J]``.
+            links (Sequence[str]): Link names, for example feet or rotors.
+
+        Returns:
+            torch.Tensor: ``[..., K, 4, 4]`` link frames.
+        """
+        indices = self.link_index(links)
+        frames = self.forward_kinematics(positions)
+        dtype, device = positions.dtype, positions.device
+        identity = torch.eye(4, dtype=dtype, device=device).expand(*positions.shape[:-1], 4, 4)
+        poses = []
+        for index in indices.tolist():
+            body = int(self.link_bodies[index])
+            carrier = identity if body < 0 else frames[..., body, :, :]
+            poses.append(carrier @ self.link_transforms[index].to(dtype=dtype, device=device))
+        return torch.stack(poses, dim=-3)
 
     def mass_matrix(self, positions: torch.Tensor) -> torch.Tensor:
         """Compute the fixed-base joint-space inertia matrix ``M(q)``.
@@ -660,6 +773,8 @@ def _collect_tokens(
     include_mimic_joints: bool,
     multi_dof_joints: str,
     frozen_joints: Mapping[str, float] | None = None,
+    base: _Body | None = None,
+    links: dict[str, tuple[int, torch.Tensor]] | None = None,
 ) -> list[_Token]:
     """Traverse the URDF depth-first and create one token per DoF.
 
@@ -669,19 +784,24 @@ def _collect_tokens(
         multi_dof_joints (str): ``skip`` or ``expand``.
         frozen_joints (Mapping[str, float] | None): 1-DoF joints held rigid at
             the given positions.
+        base (_Body | None): Receives the mass of links rigid with the root.
+        links (dict | None): Receives each link's carrying token and transform.
 
     Returns:
         list[_Token]: Tokens in depth-first order with merged body inertia.
     """
     tokens: list[_Token] = []
     frozen_joints = frozen_joints or {}
+    base = base if base is not None else _Body()
+    links = links if links is not None else {}
 
     def add_link(link_name: str, parent: int, link_in_body: torch.Tensor) -> None:
+        links[link_name] = (parent, link_in_body)
         inertial = robot.links[link_name].inertial
-        if parent >= 0 and inertial is not None and inertial.mass > 0:
+        if inertial is not None and inertial.mass > 0:
             frame = link_in_body @ inertial.origin
             rotation, center = frame[:3, :3], frame[:3, 3]
-            token = tokens[parent]
+            token = tokens[parent] if parent >= 0 else base
             token.mass += inertial.mass
             token.first_moment = token.first_moment + inertial.mass * center
             skew = _skew(center)
@@ -733,7 +853,9 @@ def _collect_tokens(
     return tokens
 
 
-def _reorder(tokens: list[_Token], joint_order: Sequence[str]) -> list[_Token]:
+def _reorder(
+    tokens: list[_Token], joint_order: Sequence[str]
+) -> tuple[list[_Token], dict[int, int]]:
     """Permute tokens to a requested name order and remap parents.
 
     Args:
@@ -741,7 +863,7 @@ def _reorder(tokens: list[_Token], joint_order: Sequence[str]) -> list[_Token]:
         joint_order (Sequence[str]): Every token name exactly once.
 
     Returns:
-        list[_Token]: Tokens in the requested order.
+        tuple: Tokens in the requested order and the old-to-new index map.
 
     Raises:
         ValueError: joint_order is not a permutation of token names.
@@ -757,7 +879,7 @@ def _reorder(tokens: list[_Token], joint_order: Sequence[str]) -> list[_Token]:
     reordered = [tokens[names.index(name)] for name in joint_order]
     for token in reordered:
         token.parent = -1 if token.parent < 0 else old_to_new[token.parent]
-    return reordered
+    return reordered, old_to_new
 
 
 def _joint_features(

@@ -10,9 +10,13 @@ A. Forward kinematics: ``f_FK(H_i) -> (p_i, R_i)`` of every joint frame in the
 B. Action-conditioned forward dynamics: ``D_FD(H, tau^applied) -> qdd``, with a
    short graph action-mixing stack so that each joint sees the other joints'
    torques (``M^-1`` couples them).
-   ``L_FD = 1/N_e sum_i ((qdd_hat_i - qdd_i) / sigma_i^a)^2``.
-C. Inverse dynamics: ``D_ID(H, qdd^desired) -> tau^required`` with the full
-   desired acceleration vector mixed over the graph.
+   ``L_FD = 1/N_e sum_i ((qdd_hat_i - qdd_i) / sigma_i^a)^2``. For a floating
+   base the generalized acceleration also contains the base linear and angular
+   acceleration, predicted from the pooled mixed tokens and normalized per
+   robot.
+C. Inverse dynamics: ``D_ID(H, qdd^desired, base acc^desired) ->
+   tau^required`` with the full desired acceleration vector mixed over the
+   graph; the desired base acceleration is given to every joint.
    ``L_ID = 1/N_e sum_i ((tau_hat_i - tau_i) / (tau_i^cont + eps))^2``.
 D. Motor feasibility and capability margins: ``D_motor(H_i, a_i^proposal)``
    predicts peak and continuous feasibility flags and five margins.
@@ -64,6 +68,8 @@ class GetPhysicsPretrainingConfig(PretrainedConfig):
         lambda_effect_position, lambda_effect_rotation, lambda_effect_velocity,
         lambda_effect_angular_velocity (float): Effect term weights.
         huber_delta (float): Huber transition point for margins.
+        lambda_base_acceleration (float): Weight of the floating-base
+            acceleration term inside the FD loss.
         epsilon (float): Stabilizer in normalizations.
         token_layout (dict): Observation token layout used by the data
             collator, saved for reproducibility.
@@ -88,6 +94,7 @@ class GetPhysicsPretrainingConfig(PretrainedConfig):
         lambda_effect_angular_velocity: float = 1.0,
         huber_delta: float = 1.0,
         epsilon: float = 1e-6,
+        lambda_base_acceleration: float = 1.0,
         token_layout: dict | None = None,
         **kwargs: Any,
     ) -> None:
@@ -116,6 +123,7 @@ class GetPhysicsPretrainingConfig(PretrainedConfig):
         self.lambda_effect_angular_velocity = lambda_effect_angular_velocity
         self.huber_delta = huber_delta
         self.epsilon = epsilon
+        self.lambda_base_acceleration = lambda_base_acceleration
         self.token_layout = token_layout or {}
         super().__init__(**kwargs)
 
@@ -307,7 +315,8 @@ class GetForPhysicsPretraining(PreTrainedModel):
         self.fk_head = _mlp(hidden, head, 9)
         self.fd_mixer = GraphActionMixer(encoder_config, 1, config.mixing_layers)
         self.fd_head = _mlp(hidden, head, 1)
-        self.id_mixer = GraphActionMixer(encoder_config, 1, config.mixing_layers)
+        self.fd_base_head = _mlp(hidden, head, 6)
+        self.id_mixer = GraphActionMixer(encoder_config, 7, config.mixing_layers)
         self.id_head = _mlp(hidden, head, 1)
         self.motor_mixer = GraphActionMixer(encoder_config, ACTION_FEATURE_SIZE, 0)
         self.motor_head = _mlp(hidden, head, MOTOR_FLAG_COUNT + MOTOR_MARGIN_COUNT)
@@ -417,9 +426,29 @@ class GetForPhysicsPretraining(PreTrainedModel):
             losses["fd"] = masked_joint_mean(
                 (normalized_acceleration - batch["fd_target"]).pow(2), batch["fd_mask"]
             )
+            if "fd_base_target" in batch and bool(batch["fd_base_mask"].any()):
+                # Floating base: the generalized acceleration also has the base
+                # linear and angular acceleration (normalized per robot).
+                pooled_mixed = (mixed * mask_float[..., None]).sum(1) / mask_float.sum(1, keepdim=True)
+                base_prediction = self.fd_base_head(pooled_mixed)
+                predictions["fd_base_acceleration"] = base_prediction
+                base_error = (base_prediction - batch["fd_base_target"]).pow(2).mean(-1)
+                base_mask = batch["fd_base_mask"].to(base_error.dtype)
+                base_loss = (base_error * base_mask).sum() / base_mask.sum().clamp_min(1)
+                losses["fd"] = losses["fd"] + config.lambda_base_acceleration * base_loss
 
         if "id_acceleration" in batch:
-            mixed = self.id_mixer(embeddings, batch["id_acceleration"][..., None], distances, joint_mask)
+            base_acceleration = batch.get("id_base_acceleration")
+            if base_acceleration is None:
+                base_acceleration = embeddings.new_zeros((embeddings.shape[0], 6))
+            id_input = torch.cat(
+                (
+                    batch["id_acceleration"][..., None],
+                    base_acceleration[:, None, :].expand(-1, embeddings.shape[1], -1),
+                ),
+                dim=-1,
+            )
+            mixed = self.id_mixer(embeddings, id_input, distances, joint_mask)
             torque = self.id_head(mixed).squeeze(-1)
             predictions["id_torque"] = torque
             losses["id"] = masked_joint_mean((torque - batch["id_target"]).pow(2), batch["id_mask"])

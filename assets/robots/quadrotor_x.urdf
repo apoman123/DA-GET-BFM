@@ -1,0 +1,36 @@
+<?xml version="1.0"?>
+<!-- X-configuration quadrotor for DA-GET-BFM synthetic flight data.
+     About 1 kg with 0.24 m arms; rotors are continuous joints about +z.
+     Propeller coefficients are set in the data config (actuator_overrides). -->
+<robot name="quadrotor_x">
+  <link name="base_link">
+    <inertial><origin xyz="0 0 0"/><mass value="0.92"/>
+      <inertia ixx="0.0049" iyy="0.0049" izz="0.0088" ixy="0" ixz="0" iyz="0"/></inertial>
+  </link>
+  <link name="imu_link"/>
+  <joint name="imu_joint" type="fixed"><parent link="base_link"/><child link="imu_link"/><origin xyz="0 0 0.01"/></joint>
+  <link name="rotor_front_left">
+    <inertial><origin xyz="0 0 0"/><mass value="0.02"/>
+      <inertia ixx="1e-6" iyy="2e-5" izz="2e-5" ixy="0" ixz="0" iyz="0"/></inertial>
+  </link>
+  <joint name="rotor_front_left_joint" type="continuous"><parent link="base_link"/><child link="rotor_front_left"/>
+    <origin xyz="0.17 0.17 0.03"/><axis xyz="0 0 1"/><limit effort="0.25" velocity="1100"/></joint>
+  <link name="rotor_back_left">
+    <inertial><origin xyz="0 0 0"/><mass value="0.02"/>
+      <inertia ixx="1e-6" iyy="2e-5" izz="2e-5" ixy="0" ixz="0" iyz="0"/></inertial>
+  </link>
+  <joint name="rotor_back_left_joint" type="continuous"><parent link="base_link"/><child link="rotor_back_left"/>
+    <origin xyz="-0.17 0.17 0.03"/><axis xyz="0 0 1"/><limit effort="0.25" velocity="1100"/></joint>
+  <link name="rotor_back_right">
+    <inertial><origin xyz="0 0 0"/><mass value="0.02"/>
+      <inertia ixx="1e-6" iyy="2e-5" izz="2e-5" ixy="0" ixz="0" iyz="0"/></inertial>
+  </link>
+  <joint name="rotor_back_right_joint" type="continuous"><parent link="base_link"/><child link="rotor_back_right"/>
+    <origin xyz="-0.17 -0.17 0.03"/><axis xyz="0 0 1"/><limit effort="0.25" velocity="1100"/></joint>
+  <link name="rotor_front_right">
+    <inertial><origin xyz="0 0 0"/><mass value="0.02"/>
+      <inertia ixx="1e-6" iyy="2e-5" izz="2e-5" ixy="0" ixz="0" iyz="0"/></inertial>
+  </link>
+  <joint name="rotor_front_right_joint" type="continuous"><parent link="base_link"/><child link="rotor_front_right"/>
+    <origin xyz="0.17 -0.17 0.03"/><axis xyz="0 0 1"/><limit effort="0.25" velocity="1100"/></joint>
+</robot>

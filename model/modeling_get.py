@@ -765,7 +765,7 @@ class GetEncoder(nn.Module):
                 rigid-body features (``model.physics.rigid_body_features``).
                 Required by Physics Cross Attention unless ``physics_memory``
                 is given.
-            actuator_features (torch.Tensor | None): ``[batch, joints, 11]``
+            actuator_features (torch.Tensor | None): ``[batch, joints, 14]``
                 actuator features. Same requirement as rigid_body_features.
             dynamics_features (torch.Tensor | None): ``[batch, joints, 7]``
                 dynamics features at time t. Required by Physics Cross Attention.

@@ -72,7 +72,7 @@ class DynamicsTest(unittest.TestCase):
             graph = EmbodimentGraph.from_urdf(urdf, multi_dof_joints="expand")
             q, qd, qdd = random_state(graph)
             no_gravity = torch.zeros(3, dtype=torch.float64)
-            inertial = recursive_newton_euler(graph, q, torch.zeros_like(q), qdd, no_gravity)[0]
+            inertial = recursive_newton_euler(graph, q, torch.zeros_like(q), qdd, no_gravity).efforts
             torch.testing.assert_close(inertial, (graph.mass_matrix(q) @ qdd[..., None]).squeeze(-1))
             # qd^T c(q, qd) = 1/2 qd^T dM/dt qd (the Coriolis matrix is skew w.r.t. Mdot).
             step = 1e-6

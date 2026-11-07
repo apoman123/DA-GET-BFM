@@ -1,0 +1,56 @@
+{
+  "history_size": 3,
+  "joint_features": "get_zero",
+  "eval_fraction": 0.05,
+  "seed": 0,
+  "sources": [
+    {
+      "type": "huggingface",
+      "name": "g1_dex3_toasted_bread",
+      "repo_id": "unitreerobotics/G1_Dex3_ToastedBread_Dataset",
+      "data_files": "data/*/*.parquet",
+      "urdf": "../../assets/urdf/g1_29dof.urdf",
+      "joint_names": [
+        "left_shoulder_pitch_joint", "left_shoulder_roll_joint", "left_shoulder_yaw_joint",
+        "left_elbow_joint", "left_wrist_roll_joint", "left_wrist_pitch_joint", "left_wrist_yaw_joint",
+        "right_shoulder_pitch_joint", "right_shoulder_roll_joint", "right_shoulder_yaw_joint",
+        "right_elbow_joint", "right_wrist_roll_joint", "right_wrist_pitch_joint", "right_wrist_yaw_joint"
+      ],
+      "state_key": "observation.state",
+      "state_indices": [0, 1, 2, 3, 4, 5, 6, 7, 8, 9, 10, 11, 12, 13],
+      "action_key": "action",
+      "action_indices": [0, 1, 2, 3, 4, 5, 6, 7, 8, 9, 10, 11, 12, 13],
+      "action_type": "position",
+      "fps": 30,
+      "smoothing_window": 3,
+      "max_episodes": 60,
+      "end_effectors": ["left_wrist_yaw_joint", "right_wrist_yaw_joint"],
+      "actuator_defaults": {"kp": 60.0, "kd": 1.5}
+    },
+    {
+      "type": "synthetic",
+      "name": "g1_arms",
+      "urdf": "../../assets/urdf/g1_29dof.urdf",
+      "joint_names": [
+        "left_shoulder_pitch_joint", "left_shoulder_roll_joint", "left_shoulder_yaw_joint",
+        "left_elbow_joint", "left_wrist_roll_joint", "left_wrist_pitch_joint", "left_wrist_yaw_joint",
+        "right_shoulder_pitch_joint", "right_shoulder_roll_joint", "right_shoulder_yaw_joint",
+        "right_elbow_joint", "right_wrist_roll_joint", "right_wrist_pitch_joint", "right_wrist_yaw_joint"
+      ],
+      "end_effectors": ["left_wrist_yaw_joint", "right_wrist_yaw_joint"],
+      "randomized_embodiments": 8,
+      "episodes_per_embodiment": 8,
+      "steps": 200,
+      "seed": 4
+    },
+    {
+      "type": "synthetic",
+      "name": "go1",
+      "urdf": "../../assets/urdf/go1.urdf",
+      "randomized_embodiments": 8,
+      "episodes_per_embodiment": 8,
+      "steps": 200,
+      "seed": 5
+    }
+  ]
+}

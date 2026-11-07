@@ -149,3 +149,36 @@ parent or `-1`, and `joint_mask` and `context_mask` use `True` for valid tokens.
 For padded joints, set `parent_indices` to `-1` and their mass rows and columns
 to zero. Padded outputs are zero. Cross-attention to context tokens runs after
 self-attention in the layers listed in `cross_attention_layers`.
+
+## Physics Cross Attention and pretraining
+
+With `use_physics_cross_attention=True`, every encoder layer (or those in
+`physics_cross_attention_layers`) adds Physics Cross Attention after
+self-attention. Observation tokens attend to `3J` physics tokens:
+
+* rigid body (25): `m`, `vech(I)` about the CoM in body frame `B_i`, `r^CoM`,
+  `a^axis`, `T^parent`, joint type;
+* actuator (11): `τ^peak`, `τ^cont`, `ω^max`, `P^max`, `N`, `K_p`, `K_d`, mode;
+* dynamics (7): `M_ii(q)`, `c(q, qd)`, `g(q)`, friction, `τ_{t-1}`,
+  `|g| / τ^cont`, known flag.
+
+Each group has its own asinh-scaled MLP tokenizer
+(`PhysicsFeatureTokenizer`). The attention bias is a per-head graph distance
+term plus a per-group term.
+
+`GetEncoder.build_physics_memory` caches the rigid-body and actuator keys and
+values, so a control step only embeds the dynamics tokens. The encoder rejects
+a memory built from parameters that have changed since.
+
+The modules:
+
+* `model/physics_schema.py`: the feature schema, with symbols, units, frames,
+  and update tiers.
+* `model/physics.py`: feature extraction, plus `PhysicsFeatureCache` for tiered
+  recomputation at control time.
+* `model/dynamics.py`: RNEA.
+* `model/pretraining.py`: the auxiliary heads A to F.
+* `model/training/`: the data pipeline and Trainer.
+
+See the repository README for the full description, the training commands,
+and the recommended datasets.

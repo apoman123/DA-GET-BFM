@@ -1,0 +1,41 @@
+{
+  "history_size": 3,
+  "joint_features": "get_zero",
+  "eval_fraction": 0.05,
+  "seed": 0,
+  "sources": [
+    {
+      "type": "synthetic",
+      "name": "go1",
+      "urdf": "../../assets/urdf/go1.urdf",
+      "randomized_embodiments": 8,
+      "episodes_per_embodiment": 8,
+      "steps": 200,
+      "dt": 0.01,
+      "probe_torques": 2,
+      "seed": 1
+    },
+    {
+      "type": "synthetic",
+      "name": "h1",
+      "urdf": "../../assets/urdf/h1.urdf",
+      "randomized_embodiments": 8,
+      "episodes_per_embodiment": 8,
+      "steps": 200,
+      "dt": 0.01,
+      "probe_torques": 2,
+      "seed": 2
+    },
+    {
+      "type": "synthetic",
+      "name": "g1",
+      "urdf": "../../assets/urdf/g1_29dof.urdf",
+      "randomized_embodiments": 8,
+      "episodes_per_embodiment": 8,
+      "steps": 200,
+      "dt": 0.01,
+      "probe_torques": 2,
+      "seed": 3
+    }
+  ]
+}

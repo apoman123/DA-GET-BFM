@@ -27,6 +27,16 @@ class GetConfig:
         use_input_layer_norm (bool): Whether to layer-normalize each raw joint
             token over its features before the input projection, as GET-Zero
             does because token features have very different scales.
+        use_physics_cross_attention (bool): Whether observation tokens attend to
+            rigid-body, actuator, and dynamics tokens ("Physics Cross
+            Attention"). The encoder then requires physics features.
+        physics_cross_attention_layers (tuple[int, ...] | None): Layers with
+            Physics Cross Attention; None means every layer.
+        rigid_body_feature_size (int): Rigid-body features per joint.
+        actuator_feature_size (int): Actuator features per joint.
+        dynamics_feature_size (int): Dynamics features per joint.
+        physics_tokenizer_hidden_size (int | None): Hidden width of each physics
+            tokenizer MLP; defaults to hidden_size.
     """
 
     input_size: int
@@ -43,6 +53,12 @@ class GetConfig:
     use_parent_child_encoding: bool = True
     use_mass_encoding: bool = True
     use_input_layer_norm: bool = True
+    use_physics_cross_attention: bool = False
+    physics_cross_attention_layers: tuple[int, ...] | None = None
+    rigid_body_feature_size: int = 25
+    actuator_feature_size: int = 11
+    dynamics_feature_size: int = 7
+    physics_tokenizer_hidden_size: int | None = None
 
     @classmethod
     def get_zero(cls, input_size: int, **overrides: object) -> "GetConfig":
@@ -104,3 +120,32 @@ class GetConfig:
             for index in self.cross_attention_layers
         ):
             raise ValueError("cross_attention_layers must contain unique valid indices")
+        physics_layers = self.physics_cross_attention_layers
+        if physics_layers is not None and (
+            len(set(physics_layers)) != len(physics_layers)
+            or any(not 0 <= index < self.num_hidden_layers for index in physics_layers)
+        ):
+            raise ValueError("physics_cross_attention_layers must contain unique valid indices")
+        physics_sizes = (
+            self.rigid_body_feature_size,
+            self.actuator_feature_size,
+            self.dynamics_feature_size,
+        )
+        if any(size <= 0 for size in physics_sizes) or (
+            self.physics_tokenizer_hidden_size is not None
+            and self.physics_tokenizer_hidden_size <= 0
+        ):
+            raise ValueError("physics feature and tokenizer sizes must be positive")
+
+    @property
+    def physics_layers(self) -> tuple[int, ...]:
+        """Return the layer indices with Physics Cross Attention.
+
+        Returns:
+            tuple[int, ...]: Empty when the mechanism is disabled.
+        """
+        if not self.use_physics_cross_attention:
+            return ()
+        if self.physics_cross_attention_layers is None:
+            return tuple(range(self.num_hidden_layers))
+        return tuple(sorted(self.physics_cross_attention_layers))

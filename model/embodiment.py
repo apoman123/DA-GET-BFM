@@ -29,7 +29,7 @@ from __future__ import annotations
 import math
 from dataclasses import dataclass, field
 from pathlib import Path
-from typing import Literal, Sequence
+from typing import Literal, Mapping, Sequence
 
 import torch
 
@@ -186,14 +186,19 @@ def _skew(vector: torch.Tensor) -> torch.Tensor:
     return torch.tensor([[0, -z, y], [z, 0, -x], [-y, x, 0]], dtype=vector.dtype)
 
 
-def _frozen_motion(joint: UrdfJoint) -> torch.Tensor:
+def _frozen_motion(joint: UrdfJoint, position: float | None = None) -> torch.Tensor:
     """Return the motion of a joint that is not a token.
 
-    Mimic joints are frozen at their offset; floating and planar joints at zero.
+    Joints in ``frozen_joints`` are held at their given position, mimic joints at
+    their offset, and floating and planar joints at zero.
     """
-    if joint.mimic_joint is None or joint.joint_type not in TOKEN_JOINT_TYPES:
+    if joint.joint_type not in TOKEN_JOINT_TYPES:
         return make_transform()
-    value = torch.tensor(joint.mimic_offset, dtype=torch.float64)
+    if position is None:
+        if joint.mimic_joint is None:
+            return make_transform()
+        position = joint.mimic_offset
+    value = torch.tensor(position, dtype=torch.float64)
     if joint.joint_type == "prismatic":
         return make_transform(joint.axis * value)
     return make_transform(rotation=axis_angle_to_matrix(joint.axis, value))
@@ -268,6 +273,21 @@ class EmbodimentGraph:
             of mass in the joint frame.
         ancestor_mask (torch.Tensor): Bool ``[J, J]``; entry ``[k, j]`` is True if
             joint ``j`` is joint ``k`` or one of its ancestors.
+        actuated (torch.Tensor): Bool ``[J]``; False for virtual DoFs of an
+            expanded floating or planar joint, which have no actuator.
+        effort_limits (torch.Tensor): Float64 ``[J]`` URDF effort limit in N m
+            (revolute) or N (prismatic); zero when absent.
+        velocity_limits (torch.Tensor): Float64 ``[J]`` URDF velocity limit in
+            rad/s or m/s; zero when absent.
+        damping (torch.Tensor): Float64 ``[J]`` viscous damping in N m s/rad.
+        friction (torch.Tensor): Float64 ``[J]`` Coulomb friction in N m.
+        gear_ratios (torch.Tensor): Float64 ``[J]`` transmission reduction N from
+            URDF ``<transmission>``; one when absent.
+        leaf_mask (torch.Tensor): Bool ``[J]``; True for joints with no moving
+            descendant, the default end-effector frames.
+        characteristic_length (float): Largest distance from the root to a joint
+            origin at q = 0, in meters (at least 1 cm). Used to normalize
+            positions across robots of different size.
     """
 
     name: str
@@ -286,6 +306,14 @@ class EmbodimentGraph:
     body_com: torch.Tensor = field(repr=False)
     body_inertia: torch.Tensor = field(repr=False)
     ancestor_mask: torch.Tensor = field(repr=False)
+    actuated: torch.Tensor = field(repr=False, default=None)
+    effort_limits: torch.Tensor = field(repr=False, default=None)
+    velocity_limits: torch.Tensor = field(repr=False, default=None)
+    damping: torch.Tensor = field(repr=False, default=None)
+    friction: torch.Tensor = field(repr=False, default=None)
+    gear_ratios: torch.Tensor = field(repr=False, default=None)
+    leaf_mask: torch.Tensor = field(repr=False, default=None)
+    characteristic_length: float = 1.0
 
     @property
     def num_joints(self) -> int:
@@ -314,6 +342,7 @@ class EmbodimentGraph:
         include_mimic_joints: bool = False,
         multi_dof_joints: Literal["skip", "expand"] = "skip",
         sibling_edges: bool = True,
+        frozen_joints: Mapping[str, float] | None = None,
     ) -> EmbodimentGraph:
         """Build an embodiment graph with one token per URDF degree of freedom.
 
@@ -331,6 +360,10 @@ class EmbodimentGraph:
                 as rigid mounts; ``"expand"`` gives each of their DoFs a token.
             sibling_edges (bool): Add undirected edges between joints that share
                 a parent body, as GET-Zero does between serial chains.
+            frozen_joints (Mapping[str, float] | None): 1-DoF joints to treat as
+                rigid at the given position (rad or m). Use this when a dataset
+                records only part of a robot, for example the arms of a humanoid
+                whose legs are locked; their links are merged like fixed links.
 
         Returns:
             EmbodimentGraph: The graph, features, and kinematic data.
@@ -343,7 +376,16 @@ class EmbodimentGraph:
             raise ValueError("multi_dof_joints must be 'skip' or 'expand'")
         robot = source if isinstance(source, UrdfRobot) else parse_urdf(source)
         feature_config = feature_config or JointFeatureConfig()
-        tokens = _collect_tokens(robot, include_mimic_joints, multi_dof_joints)
+        frozen = dict(frozen_joints or {})
+        unknown = sorted(
+            name
+            for name in frozen
+            if name not in robot.joints
+            or robot.joints[name].joint_type not in TOKEN_JOINT_TYPES
+        )
+        if unknown:
+            raise ValueError(f"frozen_joints must name 1-DoF URDF joints: {unknown}")
+        tokens = _collect_tokens(robot, include_mimic_joints, multi_dof_joints, frozen)
         if not tokens:
             raise ValueError(f"robot {robot.name!r} has no degrees of freedom")
         if joint_order is not None:
@@ -393,6 +435,17 @@ class EmbodimentGraph:
         distances = graph_distances(
             parents[None], torch.ones((1, joint_count), dtype=torch.bool), adjacency[None]
         )
+        real = [token.source.joint_type in TOKEN_JOINT_TYPES for token in tokens]
+
+        def joint_values(read) -> torch.Tensor:
+            return torch.tensor(
+                [read(token.source) if is_real else 0.0 for token, is_real in zip(tokens, real)],
+                dtype=torch.float64,
+            )
+
+        leaf = torch.ones(joint_count, dtype=torch.bool)
+        leaf[parents[parents >= 0]] = False
+        origins = _rest_origins(parents, tree)
         return cls(
             name=robot.name,
             joint_names=tuple(token.name for token in tokens),
@@ -410,6 +463,20 @@ class EmbodimentGraph:
             body_com=com,
             body_inertia=inertia,
             ancestor_mask=ancestors,
+            actuated=torch.tensor(real, dtype=torch.bool),
+            effort_limits=joint_values(lambda joint: joint.effort or 0.0),
+            velocity_limits=joint_values(lambda joint: joint.velocity or 0.0),
+            damping=joint_values(lambda joint: joint.damping),
+            friction=joint_values(lambda joint: joint.friction),
+            gear_ratios=torch.tensor(
+                [
+                    robot.gear_ratios.get(token.source.name, 1.0) if is_real else 1.0
+                    for token, is_real in zip(tokens, real)
+                ],
+                dtype=torch.float64,
+            ),
+            leaf_mask=leaf,
+            characteristic_length=max(float(origins.norm(dim=1).max()), 0.01),
         )
 
     def normalize_joint_positions(self, positions: torch.Tensor) -> torch.Tensor:
@@ -495,12 +562,21 @@ class EmbodimentGraph:
         angular = torch.where(prismatic[:, None], torch.zeros_like(axes), axes)
         linear, angular = linear * mask, angular * mask
         mass = self.body_mass.to(dtype=dtype, device=device)
-        translational = torch.einsum("...k,...kia,...kja->...ij", mass, linear, linear)
-        rotational = torch.einsum(
-            "...kia,...kab,...kjb->...ij", angular, inertia, angular
-        )
+        # Sum over bodies k of m_k Jv_k^T Jv_k + Jw_k^T I_k Jw_k, as two matmuls
+        # over the flattened (body, xyz) dimension.
+        joints = self.num_joints
+        flat_linear = linear.transpose(-3, -2).reshape(*linear.shape[:-3], joints, -1)
+        weighted = (linear * mass[:, None, None]).transpose(-3, -2)
+        translational = flat_linear @ weighted.reshape(*linear.shape[:-3], joints, -1).transpose(-1, -2)
+        spun = (angular @ inertia.transpose(-1, -2)).transpose(-3, -2)
+        flat_angular = angular.transpose(-3, -2).reshape(*angular.shape[:-3], joints, -1)
+        rotational = flat_angular @ spun.reshape(*angular.shape[:-3], joints, -1).transpose(-1, -2)
         matrix = translational + rotational
         return 0.5 * (matrix + matrix.transpose(-1, -2))
+
+    def _depth_order(self) -> list[int]:
+        """Return joint indices sorted so parents come before children."""
+        return torch.argsort(self.ancestor_mask.sum(dim=1), stable=True).tolist()
 
     def _kinematics(
         self, positions: torch.Tensor
@@ -525,31 +601,65 @@ class EmbodimentGraph:
         axes = self.axes.to(dtype=dtype, device=device)
         batch_shape = positions.shape[:-1]
         identity = torch.eye(4, dtype=dtype, device=device).expand(*batch_shape, 4, 4)
+        # Joint motions for all joints at once: rotation about the axis for
+        # revolute and continuous joints, translation along it for prismatic.
+        prismatic = torch.tensor(
+            [kind == "prismatic" for kind in self.joint_types], device=device
+        )
+        rotation = axis_angle_to_matrix(
+            axes.expand(*batch_shape, -1, 3), torch.where(prismatic, 0.0, positions)
+        )
+        translation = axes * torch.where(prismatic, positions, 0.0)[..., None]
+        motions = torch.cat(
+            (
+                torch.cat((rotation, translation[..., None]), dim=-1),
+                identity[..., None, 3:, :].expand(*batch_shape, self.num_joints, 1, 4),
+            ),
+            dim=-2,
+        )
         frames: list[torch.Tensor | None] = [None] * self.num_joints
         static: list[torch.Tensor | None] = [None] * self.num_joints
-        depth = self.ancestor_mask.sum(dim=1)
-        for index in torch.argsort(depth, stable=True).tolist():
-            parent = int(self.parent_indices[index])
+        parents = self.parent_indices.tolist()
+        for index in self._depth_order():
+            parent = parents[index]
             parent_frame = identity if parent < 0 else frames[parent]
             joint_frame = parent_frame @ tree[index]
-            angle = positions[..., index]
-            motion = torch.eye(4, dtype=dtype, device=device).repeat(*batch_shape, 1, 1)
-            if self.joint_types[index] == "prismatic":
-                motion[..., :3, 3] = axes[index] * angle[..., None]
-            else:
-                motion[..., :3, :3] = axis_angle_to_matrix(
-                    axes[index].expand(*batch_shape, 3), angle
-                )
             static[index] = joint_frame
-            frames[index] = joint_frame @ motion
+            frames[index] = joint_frame @ motions[..., index, :, :]
         moving = torch.stack(frames, dim=-3)
         fixed = torch.stack(static, dim=-3)
         world_axes = (fixed[..., :3, :3] @ axes[..., None]).squeeze(-1)
         return moving, fixed[..., :3, 3], world_axes
 
 
+def _rest_origins(parents: torch.Tensor, tree: torch.Tensor) -> torch.Tensor:
+    """Return joint origins in the root frame at q = 0.
+
+    Args:
+        parents (torch.Tensor): Long ``[J]`` parent indices, parents before
+            children not required.
+        tree (torch.Tensor): Float64 ``[J, 4, 4]`` parent-to-joint transforms.
+
+    Returns:
+        torch.Tensor: Float64 ``[J, 3]`` origins.
+    """
+    frames: dict[int, torch.Tensor] = {}
+
+    def frame(index: int) -> torch.Tensor:
+        if index not in frames:
+            parent = int(parents[index])
+            base = make_transform() if parent < 0 else frame(parent)
+            frames[index] = base @ tree[index]
+        return frames[index]
+
+    return torch.stack([frame(index)[:3, 3] for index in range(len(parents))])
+
+
 def _collect_tokens(
-    robot: UrdfRobot, include_mimic_joints: bool, multi_dof_joints: str
+    robot: UrdfRobot,
+    include_mimic_joints: bool,
+    multi_dof_joints: str,
+    frozen_joints: Mapping[str, float] | None = None,
 ) -> list[_Token]:
     """Traverse the URDF depth-first and create one token per DoF.
 
@@ -557,11 +667,14 @@ def _collect_tokens(
         robot (UrdfRobot): Parsed robot.
         include_mimic_joints (bool): Whether mimic joints become tokens.
         multi_dof_joints (str): ``skip`` or ``expand``.
+        frozen_joints (Mapping[str, float] | None): 1-DoF joints held rigid at
+            the given positions.
 
     Returns:
         list[_Token]: Tokens in depth-first order with merged body inertia.
     """
     tokens: list[_Token] = []
+    frozen_joints = frozen_joints or {}
 
     def add_link(link_name: str, parent: int, link_in_body: torch.Tensor) -> None:
         inertial = robot.links[link_name].inertial
@@ -580,8 +693,10 @@ def _collect_tokens(
         for joint_name in robot.child_joints[link_name]:
             joint = robot.joints[joint_name]
             to_joint = link_in_body @ joint.origin
-            is_dof = joint.joint_type in TOKEN_JOINT_TYPES and (
-                joint.mimic_joint is None or include_mimic_joints
+            is_dof = (
+                joint.joint_type in TOKEN_JOINT_TYPES
+                and joint.name not in frozen_joints
+                and (joint.mimic_joint is None or include_mimic_joints)
             )
             if is_dof:
                 lower, upper = _limits(joint)
@@ -608,7 +723,11 @@ def _collect_tokens(
                     current, transform = len(tokens) - 1, make_transform()
                 add_link(joint.child, current, make_transform())
             else:
-                add_link(joint.child, parent, to_joint @ _frozen_motion(joint))
+                add_link(
+                    joint.child,
+                    parent,
+                    to_joint @ _frozen_motion(joint, frozen_joints.get(joint.name)),
+                )
 
     add_link(robot.root_link, -1, make_transform())
     return tokens

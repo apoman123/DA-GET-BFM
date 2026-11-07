@@ -5,8 +5,12 @@ description = "GET (Graph Embodiment Transformer) encoder with per-DoF tokens bu
 readme = "README.md"
 requires-python = ">=3.10"
 dependencies = [
+    "accelerate>=1.0",
+    "datasets>=3.0",
     "numpy>=2.2.6",
+    "safetensors>=0.8.0",
     "torch>=2.2",
+    "transformers>=4.46",
 ]
 
 [dependency-groups]

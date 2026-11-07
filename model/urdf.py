@@ -101,6 +101,9 @@ class UrdfRobot:
         root_link (str): The single link that is never a joint child.
         child_joints (dict[str, tuple[str, ...]]): Joints leaving each link, in
             declaration order.
+        gear_ratios (dict[str, float]): Joint name to the ``mechanicalReduction``
+            of a ``<transmission>`` that drives it. Joints without a
+            transmission are absent.
     """
 
     name: str
@@ -108,6 +111,7 @@ class UrdfRobot:
     joints: dict[str, UrdfJoint]
     root_link: str
     child_joints: dict[str, tuple[str, ...]] = field(repr=False)
+    gear_ratios: dict[str, float] = field(default_factory=dict, repr=False)
 
 
 def rpy_to_matrix(rpy: torch.Tensor) -> torch.Tensor:
@@ -357,6 +361,45 @@ def _parse_joint(element: ElementTree.Element) -> UrdfJoint:
     )
 
 
+def _parse_gear_ratios(
+    root: ElementTree.Element, joints: dict[str, UrdfJoint]
+) -> dict[str, float]:
+    """Read gear ratios from ROS ``<transmission>`` blocks.
+
+    Both the ROS 1 layout (``mechanicalReduction`` under ``<actuator>``) and the
+    older layout (directly under ``<transmission>``) are read. The reduction is
+    the actuator-to-joint gear ratio N, so joint torque is N times motor torque.
+
+    Args:
+        root (ElementTree.Element): The ``<robot>`` element.
+        joints (dict[str, UrdfJoint]): Parsed joints, to ignore unknown names.
+
+    Returns:
+        dict[str, float]: Joint name to positive gear ratio.
+
+    Raises:
+        ValueError: A reduction is not a positive number.
+    """
+    ratios: dict[str, float] = {}
+    for transmission in root.findall("transmission"):
+        reduction = transmission.find("actuator/mechanicalReduction")
+        if reduction is None:
+            reduction = transmission.find("mechanicalReduction")
+        if reduction is None or reduction.text is None:
+            continue
+        try:
+            value = float(reduction.text)
+        except ValueError as error:
+            raise ValueError("mechanicalReduction must be a number") from error
+        if not math.isfinite(value) or value <= 0:
+            raise ValueError("mechanicalReduction must be positive")
+        for joint in transmission.findall("joint"):
+            name = joint.get("name")
+            if name in joints:
+                ratios[name] = value
+    return ratios
+
+
 def parse_urdf(source: str | Path) -> UrdfRobot:
     """Parse URDF text or a URDF file into a validated kinematic tree.
 
@@ -421,4 +464,5 @@ def parse_urdf(source: str | Path) -> UrdfRobot:
         joints=joints,
         root_link=roots[0],
         child_joints={name: tuple(value) for name, value in child_joints.items()},
+        gear_ratios=_parse_gear_ratios(root, joints),
     )

@@ -32,6 +32,7 @@ import torch
 from model.dynamics import (
     STANDARD_GRAVITY,
     BaseMotion,
+    determinate_torque_projector,
     estimate_joint_efforts,
     floating_forward_dynamics,
     forward_dynamics,
@@ -632,6 +633,12 @@ def process_episode(
     mass_matrix = graph.mass_matrix(q)
     poses = graph.forward_kinematics(q)
     length = graph.characteristic_length
+    # Estimated torques are only determined up to internal contact forces;
+    # the inverse-dynamics loss is applied after this projection.
+    projection = torch.eye(joints, dtype=torch.float64).expand(steps, joints, joints)
+    if contacts is not None and not measured and not trajectory.exact_dynamics:
+        surface = record.surface_contacts if record.surface_contacts is not None else len(record.contact_links) <= 2
+        projection, _ = determinate_torque_projector(graph, q, list(record.contact_links), contacts, surface)
 
     # Variant 0: what was executed.
     if trajectory.actions is not None:
@@ -789,7 +796,9 @@ def process_episode(
         "friction_torque": store(friction),
         "fk_position": store(poses[..., :3, 3] / length),
         "fk_rotation": store(poses[..., :3, :3]),
-        "torque_measured": torch.full((steps,), measured),
+        "torque_measured": torch.full((steps,), measured or trajectory.exact_dynamics),
+        "id_projection": store(projection),
+        "floating_base": torch.full((steps,), floating),
         "estimate_residual": store(residual),
         # Per variant [T, V, ...]
         "applied_torque": store(torque),

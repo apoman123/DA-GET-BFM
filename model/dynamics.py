@@ -583,6 +583,109 @@ def distribute_contact_forces(
     return forces, moments
 
 
+def contact_maps(
+    graph: EmbodimentGraph,
+    positions: torch.Tensor,
+    contact_links: Sequence[str],
+    active: torch.Tensor,
+    surface: bool,
+) -> tuple[torch.Tensor, torch.Tensor]:
+    """Linear maps from contact wrenches to the base wrench and to joint torques.
+
+    The contact unknowns are a force per contact (and a moment per surface
+    contact), stacked as ``n`` values.
+
+    Args:
+        graph (EmbodimentGraph): Robot.
+        positions (torch.Tensor): ``[..., J]`` q.
+        contact_links (Sequence[str]): Contact links.
+        active (torch.Tensor): Bool ``[..., C]``; inactive contacts get zero columns.
+        surface (bool): Contacts also carry moments.
+
+    Returns:
+        tuple: ``A`` ``[..., 6, n]`` (contact wrenches to base wrench) and ``B``
+            ``[..., J, n]`` (contact wrenches to the change in joint torque).
+    """
+    _, origins, axes = graph._kinematics(positions)
+    points = graph.link_poses(positions, contact_links)[..., :3, 3]
+    bodies = graph.link_bodies[graph.link_index(contact_links)].tolist()
+    prismatic = torch.tensor([kind == "prismatic" for kind in graph.joint_types], device=positions.device)
+    dtype, batch = positions.dtype, positions.shape[:-1]
+    eye = torch.eye(3, dtype=dtype, device=positions.device).expand(*batch, 3, 3)
+    zero3 = torch.zeros_like(eye)
+    columns_a, columns_b = [], []
+    for contact, body in enumerate(bodies):
+        point = points[..., contact, :]
+        weight = active[..., contact].to(dtype)[..., None, None]
+        ancestors = (
+            graph.ancestor_mask[body].to(positions.device)
+            if body >= 0
+            else torch.zeros(graph.num_joints, dtype=torch.bool, device=positions.device)
+        )
+        lever = point[..., None, :] - origins
+        # A force f at the point changes joint j's torque by -(a_j x (p - o_j)) . f
+        # (revolute) or -a_j . f (prismatic), for every joint above the contact.
+        rows = torch.where(prismatic[:, None], axes, torch.linalg.cross(axes, lever, dim=-1))
+        x, y, z = point.unbind(-1)
+        nil = torch.zeros_like(x)
+        skew = torch.stack(
+            (torch.stack((nil, -z, y), -1), torch.stack((z, nil, -x), -1), torch.stack((-y, x, nil), -1)), -2
+        )
+        columns_a.append(torch.cat((eye, skew), -2) * weight)
+        columns_b.append(-rows * ancestors[:, None].to(dtype) * weight)
+        if surface:
+            columns_a.append(torch.cat((zero3, eye), -2) * weight)
+            moment_rows = torch.where(prismatic[:, None], torch.zeros_like(axes), axes)
+            columns_b.append(-moment_rows * ancestors[:, None].to(dtype) * weight)
+    return torch.cat(columns_a, -1), torch.cat(columns_b, -1)
+
+
+def determinate_torque_projector(
+    graph: EmbodimentGraph,
+    positions: torch.Tensor,
+    contact_links: Sequence[str],
+    active: torch.Tensor,
+    surface: bool,
+    tolerance: float = 1e-8,
+) -> tuple[torch.Tensor, torch.Tensor]:
+    """Project joint torques onto the part that the motion determines.
+
+    With several feet down, contact forces that push the feet against each
+    other (internal forces, the null space of ``A``) produce no motion, yet
+    change the joint torques by ``B N z``. No estimate from kinematics can
+    recover that part. ``P = I - U U^T``, with ``U`` an orthonormal basis of
+    ``range(B N)``, removes it; ``P tau`` is fully determined by the motion and
+    the contact set.
+
+    Args:
+        graph (EmbodimentGraph): Robot.
+        positions (torch.Tensor): ``[..., J]`` q.
+        contact_links (Sequence[str]): Contact links.
+        active (torch.Tensor): Bool ``[..., C]`` contact state.
+        surface (bool): Contacts also carry moments.
+        tolerance (float): Relative singular-value threshold.
+
+    Returns:
+        tuple: Projector ``[..., J, J]`` and the number of undetermined
+            torque directions ``[...]``.
+    """
+    matrix_a, matrix_b = contact_maps(graph, positions, contact_links, active, surface)
+    count = matrix_a.shape[-1]
+    _, singular, vh = torch.linalg.svd(matrix_a, full_matrices=True)
+    ranked = torch.zeros((*matrix_a.shape[:-2], count), dtype=positions.dtype, device=positions.device)
+    threshold = tolerance * singular[..., :1].clamp_min(1e-12)
+    ranked[..., : singular.shape[-1]] = (singular > threshold).to(positions.dtype)
+    null = vh.transpose(-1, -2) * (1 - ranked)[..., None, :]
+    image = matrix_b @ null
+    u, values, _ = torch.linalg.svd(image, full_matrices=True)
+    keep = torch.zeros((*image.shape[:-2], image.shape[-2]), dtype=positions.dtype, device=positions.device)
+    scale = values.amax(dim=-1, keepdim=True).clamp_min(1e-12)
+    keep[..., : values.shape[-1]] = (values > tolerance * 1e4 * scale).to(positions.dtype) * (values > 1e-9).to(positions.dtype)
+    ambiguous = (u * keep[..., None, :]) @ u.transpose(-1, -2)
+    eye = torch.eye(graph.num_joints, dtype=positions.dtype, device=positions.device)
+    return eye - ambiguous, keep.sum(-1)
+
+
 @dataclass(frozen=True)
 class EffortEstimate:
     """Joint efforts estimated by inverse dynamics.

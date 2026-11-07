@@ -14,7 +14,9 @@ Usage::
         --sequence indoor/20230625_gait/230625-risqh-flytrot-04-032-33square.h5
 
 It prints, per estimate, the RMSE in N m, the RMSE relative to the RMS of the
-measured torque (by joint type), and the mean correlation:
+measured torque (by joint type), the mean correlation, and the error left in
+the torque directions the motion determines (internal contact forces removed,
+see ``determinate_torque_projector``):
 
 * fixed-base inverse dynamics (what you get if you ignore the floating base);
 * floating base with contacts from the foot-force sensors;
@@ -112,10 +114,13 @@ def evaluate(name: str, data, urdf: Path, floating: bool, contacts, use_imu: boo
         imu_specific_force=data["specific_force"] if use_imu else None,
         contacts=contacts,
     )
-    estimate = process_episode(record, trajectory)["applied_torque"][:, 0].double()
+    episode = process_episode(record, trajectory)
+    estimate = episode["applied_torque"][:, 0].double()
+    projection = episode["id_projection"].double()
     measured = data["tau"]
     keep = slice(10, -10)
     error = (estimate - measured)[keep]
+    determined = (projection[keep] @ error[..., None]).squeeze(-1)
     rmse = error.pow(2).mean(0).sqrt()
     rms = measured[keep].pow(2).mean(0).sqrt()
     total = float(rmse.pow(2).mean().sqrt())
@@ -127,7 +132,11 @@ def evaluate(name: str, data, urdf: Path, floating: bool, contacts, use_imu: boo
     correlation = np.mean(
         [np.corrcoef(estimate[keep, j], measured[keep, j])[0, 1] for j in range(measured.shape[1])]
     )
-    print(f"{name:46s} RMSE {total:5.2f} N m ({100 * relative:5.1f}%)  {parts}  corr {correlation:.2f}")
+    determined_relative = float(determined.pow(2).mean().sqrt()) / float(rms.pow(2).mean().sqrt())
+    print(
+        f"{name:46s} RMSE {total:5.2f} N m ({100 * relative:5.1f}%)  {parts}  corr {correlation:.2f}"
+        f"  | motion-determined part {100 * determined_relative:5.1f}%"
+    )
 
 
 def main() -> None:

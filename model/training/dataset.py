@@ -10,6 +10,7 @@ A JSON data config lists trajectory sources and the observation layout::
       "allow_estimated_torque_for_fd": true,
       "use_estimated_previous_torque": true,
       "max_estimate_residual": 0.5,
+      "estimated_torque_weight": 0.3,
       "sources": [
         {"type": "synthetic", "urdf": "../assets/urdf/go1.urdf", "name": "go1"},
         {"type": "huggingface", "repo_id": "...", "urdf": "...", "joint_names": [...], "fps": 30}
@@ -53,7 +54,7 @@ from model.training.episodes import (
 )
 from model.training.sources import SOURCE_TYPES, resolve_path
 
-CACHE_VERSION = 3
+CACHE_VERSION = 4
 VARIABLE_LOCAL_SIZE = 5
 VARIABLE_GLOBAL_SIZE = BASE_FEATURE_SIZE
 FD_TORQUE_CLIP = 5.0
@@ -114,6 +115,7 @@ class PhysicsDatasets:
         feature_config (JointFeatureConfig): Observation hardware features.
         allow_estimated_torque_for_fd (bool): Train FD on ID-estimated torques.
         max_estimate_residual (float): See ``PhysicsDataCollator``.
+        estimated_torque_weight (float): See ``PhysicsDataCollator``.
     """
 
     train: PhysicsTrajectoryDataset
@@ -123,6 +125,7 @@ class PhysicsDatasets:
     feature_config: JointFeatureConfig
     allow_estimated_torque_for_fd: bool
     max_estimate_residual: float = 0.5
+    estimated_torque_weight: float = 0.3
 
     def collator(self) -> PhysicsDataCollator:
         """Return a collator for these datasets."""
@@ -131,6 +134,7 @@ class PhysicsDatasets:
             self.history_size,
             self.allow_estimated_torque_for_fd,
             self.max_estimate_residual,
+            self.estimated_torque_weight,
         )
 
     @property
@@ -231,10 +235,12 @@ def build_physics_datasets(
         feature_config,
         bool(config.get("allow_estimated_torque_for_fd", True)),
         float(config.get("max_estimate_residual", 0.5)),
+        float(config.get("estimated_torque_weight", 0.3)),
     )
 
 
 PER_FRAME_KEYS = (
+    "id_projection",
     "dynamics_features",
     "mass_matrix",
     "coriolis",
@@ -318,6 +324,7 @@ class PhysicsTrajectoryDataset(Dataset):
             "torque_measured": bool(episode["torque_measured"][step]),
             "estimate_residual": float(episode["estimate_residual"][step]),
             "base_acceleration_known": bool(episode["base_acceleration_known"][step, variant]),
+            "floating_base": bool(episode["floating_base"][step]),
             "effect_valid": bool(episode["effect_valid"][step, variant]),
         }
         for key in PER_FRAME_KEYS:
@@ -350,6 +357,7 @@ class PhysicsDataCollator:
         history_size: int,
         allow_estimated_torque_for_fd: bool = True,
         max_estimate_residual: float = 0.5,
+        estimated_torque_weight: float = 0.3,
     ) -> None:
         """Precompute per-embodiment scales.
 
@@ -361,11 +369,15 @@ class PhysicsDataCollator:
             max_estimate_residual (float): Drop FD and ID labels of estimated
                 frames whose unexplained base wrench exceeds this fraction of
                 the robot's weight.
+            estimated_torque_weight (float): Loss weight of FD and ID labels
+                that rest on estimated torques (measured and simulated
+                torques have weight 1).
         """
         self.records = list(records)
         self.history_size = history_size
         self.allow_estimated_torque_for_fd = allow_estimated_torque_for_fd
         self.max_estimate_residual = max_estimate_residual
+        self.estimated_torque_weight = estimated_torque_weight
         feature_size = self.records[0].joint_features.shape[1]
         self.token_builder = GetTokenizer(
             fixed_local_size=feature_size,
@@ -440,6 +452,8 @@ class PhysicsDataCollator:
         base_acceleration = torch.stack([sample["base_acceleration"] for sample in samples]).float() / base_scale
         base_known = torch.tensor([sample["base_acceleration_known"] for sample in samples])
         base_acceleration = torch.where(base_known[:, None], base_acceleration, torch.zeros_like(base_acceleration))
+        label_weight = torch.where(measured, 1.0, self.estimated_torque_weight)
+        floating = torch.tensor([sample["floating_base"] for sample in samples])
         applied = stack("applied_torque").float()
         acceleration = stack("acceleration").float()
         spatial, ancestors, descendants = structure.graph_distances
@@ -470,6 +484,8 @@ class PhysicsDataCollator:
             "id_base_acceleration": base_acceleration,
             "id_target": stack("required_torque").float() / (continuous + EPSILON),
             "id_mask": actuated & reliable[:, None],
+            "id_projection": stack("id_projection", dims=2).float(),
+            "torque_label_weight": label_weight,
             # D. motor feasibility
             "motor_input": stack("action_features").float(),
             "motor_flags": stack("motor_flags").float(),
@@ -490,4 +506,5 @@ class PhysicsDataCollator:
             "applied_torque": applied,
             "acceleration_scale": acceleration_scale,
             "torque_scale": continuous,
+            "rbd_mask": actuated & fd_rows[:, None] & ~floating[:, None],
         }

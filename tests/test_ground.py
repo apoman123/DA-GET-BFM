@@ -78,6 +78,32 @@ class GroundSimulationTest(unittest.TestCase):
         self.assertTrue(bool(episode["base_acceleration_known"].all()))
         self.assertEqual(float(episode["dynamics_features"][5, 0, 6]), 1.0)
 
+    def test_estimate_error_is_internal_contact_forces(self) -> None:
+        """With exact dynamics, estimated torques differ from MuJoCo's only by internal forces."""
+        from model.dynamics import determinate_torque_projector, estimate_joint_efforts
+        from model.training.sources import mujoco_source
+
+        with tempfile.TemporaryDirectory() as folder:
+            path = Path(folder, "quad.urdf")
+            path.write_text(quadruped())
+            source = {"urdf": str(path), "contact_links": FEET, "nominal_pose": STAND, "randomized_embodiments": 0,
+                      "episodes_per_embodiment": 1, "steps": 100, "probe_torques": 0, "gain_scale": 3.0}
+            records, trajectories = mujoco_source(source, None, JointFeatureConfig())
+        record, trajectory = records[0], trajectories[0]
+        world = torch.tensor([0, 0, -9.80665], dtype=torch.float64)
+        gravity = (trajectory.base_orientation.transpose(-1, -2) @ world[:, None]).squeeze(-1)
+        motion = BaseMotion(trajectory.base_linear_velocity, trajectory.base_angular_velocity,
+                            trajectory.base_linear_acceleration, trajectory.base_angular_acceleration)
+        estimate = estimate_joint_efforts(record.graph, trajectory.positions, trajectory.velocities, trajectory.accelerations,
+                                          gravity, motion, FEET, trajectory.contacts, record.actuator,
+                                          base_external_wrench=trajectory.base_external_wrench)
+        error = estimate.efforts - trajectory.applied_torque
+        projector, _ = determinate_torque_projector(record.graph, trajectory.positions, FEET, trajectory.contacts, False)
+        determined = (projector @ error[..., None]).squeeze(-1)
+        scale = trajectory.applied_torque.pow(2).mean().sqrt()
+        self.assertLess(float(determined.pow(2).mean().sqrt() / scale), 0.1)
+        self.assertGreater(float(error.pow(2).mean().sqrt()), 2 * float(determined.pow(2).mean().sqrt()))
+
     def test_biped_is_steadied_by_the_spotter(self) -> None:
         """A biped stays up thanks to a recorded, small spotter wrench."""
         from model.training.sources import mujoco_source

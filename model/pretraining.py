@@ -16,7 +16,10 @@ B. Action-conditioned forward dynamics: ``D_FD(H, tau^applied) -> qdd``, with a
    robot.
 C. Inverse dynamics: ``D_ID(H, qdd^desired, base acc^desired) ->
    tau^required`` with the full desired acceleration vector mixed over the
-   graph; the desired base acceleration is given to every joint.
+   graph; the desired base acceleration is given to every joint. For
+   estimated torques of robots in contact, the error is projected onto the
+   torque directions the motion determines (``id_projection``): internal
+   contact forces cannot be observed and are not supervised.
    ``L_ID = 1/N_e sum_i ((tau_hat_i - tau_i) / (tau_i^cont + eps))^2``.
 D. Motor feasibility and capability margins: ``D_motor(H_i, a_i^proposal)``
    predicts peak and continuous feasibility flags and five margins.
@@ -211,12 +214,15 @@ def geodesic_distance(prediction: torch.Tensor, target: torch.Tensor) -> torch.T
     return torch.acos(cosine)
 
 
-def masked_joint_mean(values: torch.Tensor, mask: torch.Tensor) -> torch.Tensor:
+def masked_joint_mean(
+    values: torch.Tensor, mask: torch.Tensor, weights: torch.Tensor | None = None
+) -> torch.Tensor:
     """Average per-joint values over valid joints, then over samples.
 
     Args:
         values (torch.Tensor): ``[B, J]`` per-joint losses.
         mask (torch.Tensor): Bool ``[B, J]``.
+        weights (torch.Tensor | None): ``[B]`` sample weights (label confidence).
 
     Returns:
         torch.Tensor: Scalar; zero (with gradient) when nothing is valid.
@@ -227,7 +233,10 @@ def masked_joint_mean(values: torch.Tensor, mask: torch.Tensor) -> torch.Tensor:
     valid = counts > 0
     if not torch.any(valid):
         return values.sum() * 0
-    return per_sample[valid].mean()
+    if weights is None:
+        return per_sample[valid].mean()
+    weights = weights.to(values.dtype)[valid]
+    return (per_sample[valid] * weights).sum() / weights.sum().clamp_min(1e-12)
 
 
 class GraphActionMixer(nn.Module):
@@ -424,7 +433,9 @@ class GetForPhysicsPretraining(PreTrainedModel):
             normalized_acceleration = self.fd_head(mixed).squeeze(-1)
             predictions["fd_acceleration"] = normalized_acceleration
             losses["fd"] = masked_joint_mean(
-                (normalized_acceleration - batch["fd_target"]).pow(2), batch["fd_mask"]
+                (normalized_acceleration - batch["fd_target"]).pow(2),
+                batch["fd_mask"],
+                batch.get("torque_label_weight"),
             )
             if "fd_base_target" in batch and bool(batch["fd_base_mask"].any()):
                 # Floating base: the generalized acceleration also has the base
@@ -451,7 +462,13 @@ class GetForPhysicsPretraining(PreTrainedModel):
             mixed = self.id_mixer(embeddings, id_input, distances, joint_mask)
             torque = self.id_head(mixed).squeeze(-1)
             predictions["id_torque"] = torque
-            losses["id"] = masked_joint_mean((torque - batch["id_target"]).pow(2), batch["id_mask"])
+            error = torque - batch["id_target"]
+            if "id_projection" in batch:
+                # Only the part of the torque that the motion determines is
+                # supervised; internal contact forces are unobservable.
+                scale = batch["torque_scale"] + eps
+                error = (batch["id_projection"] @ (error * scale)[..., None]).squeeze(-1) / scale
+            losses["id"] = masked_joint_mean(error.pow(2), batch["id_mask"], batch.get("torque_label_weight"))
 
         if "motor_input" in batch:
             mixed = self.motor_mixer(embeddings, batch["motor_input"], distances, joint_mask)
@@ -501,7 +518,9 @@ class GetForPhysicsPretraining(PreTrainedModel):
                 + batch["friction_torque"]
                 - batch["applied_torque"]
             ) / (batch["torque_scale"] + eps)
-            losses["rbd"] = masked_joint_mean(residual.pow(2), batch["fd_mask"])
+            # The residual has no contact or base-coupling terms, so it is only
+            # valid for fixed-base samples.
+            losses["rbd"] = masked_joint_mean(residual.pow(2), batch.get("rbd_mask", batch["fd_mask"]))
 
         loss = None
         if losses:

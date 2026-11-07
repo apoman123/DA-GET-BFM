@@ -12,6 +12,8 @@ from datasets import Dataset
 from model import EmbodimentGraph, JointFeatureConfig, actuator_specs
 from model.dynamics import (
     BaseMotion,
+    contact_maps,
+    determinate_torque_projector,
     distribute_contact_forces,
     estimate_joint_efforts,
     floating_forward_dynamics,
@@ -130,6 +132,18 @@ class TorqueEstimationTest(unittest.TestCase):
         forces, _ = distribute_contact_forces(wrench, points, active, normal=normal)
         self.assertTrue(bool((forces[..., 2] >= -1e-6).all()))
         torch.testing.assert_close(forces.sum(-2)[0, 2], torch.tensor(100.0, dtype=torch.float64), atol=1e-2, rtol=0)
+
+    def test_projector_removes_internal_contact_forces(self) -> None:
+        """Internal forces (no net base wrench) change torques only in projected-out directions."""
+        graph = EmbodimentGraph.from_urdf(quadruped(), floating_base=True)
+        q = 0.3 * torch.randn(4, graph.num_joints, dtype=torch.float64, generator=torch.Generator().manual_seed(3))
+        for active, expected in ((torch.ones(4, 4, dtype=torch.bool), 6), (torch.tensor([[True, False, False, True]] * 4), 1), (torch.zeros(4, 4, dtype=torch.bool), 0)):
+            projector, undetermined = determinate_torque_projector(graph, q, FEET, active, False)
+            self.assertTrue(bool((undetermined == expected).all()))
+            matrix_a, matrix_b = contact_maps(graph, q, FEET, active, False)
+            internal = torch.linalg.svd(matrix_a, full_matrices=True).Vh.transpose(-1, -2)[..., :, 6:]
+            torch.testing.assert_close(projector @ matrix_b @ internal, torch.zeros_like(matrix_b @ internal), atol=1e-10, rtol=0)
+            torch.testing.assert_close(projector @ projector, projector, atol=1e-10, rtol=0)
 
     def test_hover_thrust_balances_weight(self) -> None:
         """Rotors at hover speed lift the weight; RNEA sees no base wrench left."""
@@ -289,6 +303,9 @@ class FloatingPipelineTest(unittest.TestCase):
         collator = datasets.collator()
         batch = collator([datasets.train[index] for index in range(0, len(datasets.train), 7)][:8])
         self.assertTrue(bool(batch["fd_base_mask"].any()))
+        self.assertFalse(bool(batch["rbd_mask"].any()))  # floating-base samples never use task F
+        recorded_rows = batch["torque_label_weight"] < 1
+        self.assertTrue(bool(recorded_rows.any()))
         self.assertEqual(batch["input_values"].shape[-1], datasets.token_size)
         for name, value in batch.items():
             self.assertTrue(torch.isfinite(value.float()).all(), name)
@@ -301,6 +318,17 @@ class FloatingPipelineTest(unittest.TestCase):
         output = model(**batch)
         self.assertIn("fd_base_acceleration", output.predictions)
         self.assertTrue(torch.isfinite(output.loss))
+        # The ID loss ignores the part of the target that internal contact forces could change.
+        projection = batch["id_projection"]
+        ambiguous = torch.eye(projection.shape[-1]) - projection
+        shift = (ambiguous @ torch.randn(projection.shape[:-1])[..., None]).squeeze(-1) / batch["torque_scale"]
+        shifted = dict(batch, id_target=batch["id_target"] + shift)
+        torch.manual_seed(0)
+        model.eval()
+        with torch.no_grad():
+            first = model(**batch).loss_components["id"]
+            second = model(**shifted).loss_components["id"]
+        torch.testing.assert_close(first, second, atol=1e-5, rtol=1e-4)
 
 
 if __name__ == "__main__":

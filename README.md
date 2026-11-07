@@ -565,6 +565,71 @@ Use contact sensors when a dataset has them. Prefer datasets with measured
 torques (GrandTour, MIPO, DFKI Go2) for tasks B and C, and mix in synthetic
 and MuJoCo ground data, which have exact torques and contact forces.
 
+### Why the error is large, and what training does about it
+
+There are two separate error sources.
+
+**1. Internal contact forces cannot be observed.** With several feet down
+there are more contact-force unknowns than base equations: 12 against 6 for
+four point feet. Forces that push the feet against each other produce no
+motion, but they change the joint torques. `determinate_torque_projector`
+computes these directions:
+- the torque effect `B N` of the null space `N` of the contact-to-base-wrench
+  map;
+- `P = I − U Uᵀ`, which keeps only the torque components that the motion
+  determines.
+
+Four feet down leave 6 undetermined directions, two diagonal feet 1, and
+flight 0. In MuJoCo, where our dynamics are exact, the error splits cleanly:
+
+| Go1 in MuJoCo, 3 episodes | Full torque error | Error in the motion-determined part |
+|---|---|---|
+| estimated vs simulated torques | 43.7% | **3.7%** |
+
+Almost all of the simulated error comes from internal forces, which no method
+can recover from kinematics.
+
+**2. Model and measurement mismatch on real robots.** On real data the
+motion-determined part stays large:
+
+| Data | Full error | Motion-determined part |
+|---|---|---|
+| MIPO Go1, 4 sequences | 43–97% | 40–92% |
+| GrandTour ANYmal D | 47% | 37% |
+
+So on real robots, internal forces are not the main problem; trotting has
+only one undetermined direction. A cross-validated per-joint actuator model
+was fitted to the measured torques: scale, offset, rotor inertia, viscous and
+Coulomb friction. It removes only 1–7 points. Most of the remaining gap
+therefore lies in things kinematics cannot fix:
+- the "measured" torque itself, which Unitree estimates from motor current;
+- unsynchronized IMU and joint clocks;
+- acceleration noise from differentiation;
+- inertia errors in the URDF.
+
+**What the pipeline does:**
+- **Projected ID loss.** For estimated torques of robots in contact, task C is
+  supervised only on `P (τ̂ − τ)`. The model is never penalized for internal
+  forces it cannot know. The FD labels need no change: with rigid contacts,
+  torque components in the internal-force directions produce no
+  acceleration.
+- **Label confidence.** FD and ID losses of samples whose torques are
+  estimated have weight `estimated_torque_weight` (default 0.3, in the data
+  config). Measured and simulated torques have weight 1.
+- **Residual masking.** As before, frames whose contacts cannot explain the
+  base wrench are dropped.
+- **Task F only on fixed bases.** The rigid-body residual has no contact or
+  base-coupling terms, so floating-base samples are excluded from it.
+
+**What you can do:**
+- Train the dynamics heads mainly on measured torques (GrandTour, MIPO, DFKI
+  Go2) and on exact simulation (synthetic, MuJoCo ground).
+- Use kinematics-only datasets mostly for FK, effect, and motion statistics.
+- Prefer datasets with contact sensors and synchronized clocks.
+- `scripts/validate_torque_estimation.py` prints both the full and the
+  motion-determined error, so you can check a new robot or dataset the same
+  way.
+
 ## Physics pretraining
 
 `GetForPhysicsPretraining` (`model/pretraining.py`) is a Hugging Face
@@ -577,10 +642,10 @@ so a 29-DoF humanoid does not outweigh a 4-rotor drone.
 |---|---|---|---|
 | **A. Forward kinematics** | `H_i` | `p_i / L_e` (`L_e` = robot size) and `R_i ∈ SO(3)` of every joint frame in the base frame | `1/N_e Σ λ_p ‖p̂−p‖² + λ_R d_SO(3)(R̂, R)²`; `fk_orientation=False` gives the position-only first pass |
 | **B. Forward dynamics** | `[H_i; E_τ(τ_i^applied)]` passed through `mixing_layers` of graph action mixing | `qdd_t`; for a floating base also the base linear and angular acceleration (from the pooled mixed tokens) | `1/N_e Σ ((qdd̂ − qdd) / σ_i^a)²` + `λ_base` · mean of squared base-acceleration errors normalized per robot |
-| **C. Inverse dynamics** | `[H_i; E(qdd_i^desired, base acceleration^desired)]` with graph mixing | `τ^required` = inverse dynamics, with contacts for legged robots | `1/N_e Σ ((τ̂ − τ) / (τ_i^cont + ε))²` |
+| **C. Inverse dynamics** | `[H_i; E(qdd_i^desired, base acceleration^desired)]` with graph mixing | `τ^required` = inverse dynamics, with contacts for legged robots | `1/N_e Σ ((P(τ̂ − τ))_i / (τ_i^cont + ε))²`; `P = I` for measured or simulated torques, the motion-determined projector for estimated torques in contact |
 | **D. Motor feasibility** | `[H_i; E(a_i^proposal)]` | peak and continuous feasibility flags; margins for peak torque `1 − \|τ\|/τ^max(qd)`, continuous torque, power, velocity, and joint limit | `λ_f BCE + λ_m Huber` |
 | **E. Action effect** | `[H_i; E(a_i)]` with graph mixing | at end-effector frames, in the base frame at `t`: `Δp`, `R_{t+1}`, `v_{t+1}`, `ω_{t+1}` | `λ_p‖Δp̂−Δp‖² + λ_R d_SO(3)² + λ_v‖v̂−v‖² + λ_ω‖ω̂−ω‖²` |
-| **F. RBD consistency** (optional) | the FD prediction | `r = M qdd̂ + c + g + τ_f − τ^applied` | `1/N_e ‖W_e r‖²` with `W_e = 1/(τ^cont + ε)` |
+| **F. RBD consistency** (optional) | the FD prediction | `r = M qdd̂ + c + g + τ_f − τ^applied` | `1/N_e ‖W_e r‖²` with `W_e = 1/(τ^cont + ε)`; fixed-base samples only |
 
 Notes on the design:
 
@@ -671,6 +736,7 @@ A data config is JSON. Relative paths start from the config file.
   "allow_estimated_torque_for_fd": true,
   "use_estimated_previous_torque": true,
   "max_estimate_residual": 0.5,
+  "estimated_torque_weight": 0.3,
   "sources": [ { "type": "synthetic", ... }, { "type": "huggingface", ... } ]
 }
 ```
@@ -1020,7 +1086,7 @@ uv sync --all-extras
 uv run pytest
 ```
 
-The suite has 73 tests (the MuJoCo and HDF5 tests are skipped without the
+The suite has 75 tests (the MuJoCo and HDF5 tests are skipped without the
 `sim` and `validation` extras):
 
 - `test_embodiment.py`: URDF graphs, features, kinematics, mass matrix,
@@ -1042,11 +1108,15 @@ The suite has 73 tests (the MuJoCo and HDF5 tests are skipped without the
   - hover thrust;
   - harnessed floating and flight simulations whose torques are recovered
     from kinematics alone;
+  - the determinate-torque projector removes exactly the internal-force
+    directions, and the projected ID loss ignores them;
   - a Hub-style floating-base dataset with split state columns, through to a
     model forward pass.
 - `test_ground.py` (MuJoCo):
   - the generated MJCF has our dynamics (mass matrix and bias forces);
   - a quadruped stands with exact labels and probe accelerations;
+  - estimated torques differ from MuJoCo's almost only by internal contact
+    forces (motion-determined error below 10%);
   - a biped is steadied by a small recorded spotter wrench.
 - `test_conversion.py`:
   - every converter on small files in each dataset's real format;

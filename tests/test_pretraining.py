@@ -177,6 +177,21 @@ class PretrainingPipelineTest(unittest.TestCase):
         components = self.model()(**partial).loss_components
         self.assertNotIn("effect", components)
 
+    def test_ablations_accept_the_same_batch(self) -> None:
+        """Without Physics Cross Attention or mass encoding, the model ignores those inputs."""
+        batch = self.batch()
+        for overrides in ({"use_physics_cross_attention": False}, {"use_mass_encoding": False}):
+            encoder = GetConfig(
+                input_size=self.datasets.token_size,
+                hidden_size=32,
+                num_attention_heads=4,
+                num_hidden_layers=2,
+                intermediate_size=64,
+                **{"use_physics_cross_attention": True, **overrides},
+            )
+            model = GetForPhysicsPretraining(GetPhysicsPretrainingConfig.from_encoder_config(encoder))
+            self.assertTrue(torch.isfinite(model(**batch).loss))
+
     def test_save_and_reload(self) -> None:
         """save_pretrained and from_pretrained round-trip the weights and config."""
         model = self.model().eval()

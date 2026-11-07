@@ -640,7 +640,7 @@ DA-GET-BFM/
 uv run pytest
 ```
 
-The suite has 47 tests:
+The suite has 48 tests:
 
 - `test_embodiment.py`: URDF graphs, features, kinematics, mass matrix,
   batching, padding invariance.
@@ -675,6 +675,34 @@ Checks outside the test suite:
 - **On real recorded data:** `unitreerobotics/G1_Dex3_ToastedBread_Dataset`
   loads through the `huggingface` source. Its 14 arm joints map to the G1 URDF
   by name, and the shoulder gravity torques come out around 4 N m.
+
+**Validation training run.** This used `configs/data/g1_hub_plus_synthetic.json`:
+- 60 recorded G1 episodes from the Hub;
+- 8 randomized G1-arm variants;
+- 8 randomized Go1 variants.
+
+That is 17 embodiments, 127k training samples, and 5,460 evaluation samples
+from held-out episodes. Building the data cache took 6 minutes on CPU. Both
+runs used the `small` preset (4 layers, width 128), 800 steps, batch 64,
+learning rate 5e-4, on CPU. They differ only in Physics Cross Attention.
+Evaluation loss at step 800:
+
+| Eval loss | Physics Cross Attention (2.01M params) | Without (1.68M params) |
+|---|---|---|
+| total | **1.992** | 2.155 |
+| A. FK | **0.129** | 0.179 |
+| B. FD | 0.325 | **0.307** |
+| C. ID | **0.143** | 0.181 |
+| D. motor | 0.0207 | **0.0199** |
+| E. effect | **1.331** | 1.424 |
+
+On the physics run, training loss fell from 7.97 to 2.56 and evaluation loss
+from 2.62 (step 400) to 1.99. With Physics Cross Attention, the total, FK, ID
+(21% lower), and effect losses are lower. FD and motor are slightly higher.
+This is one seed and a short run with unequal parameter counts, so read it as
+a check that the pipeline trains end to end. It is not a conclusive ablation.
+Use longer runs, several seeds, and held-out robots before drawing
+conclusions.
 
 
 ## Limitations

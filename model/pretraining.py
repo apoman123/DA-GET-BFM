@@ -354,6 +354,13 @@ class GetForPhysicsPretraining(PreTrainedModel):
         distances = None
         if spatial_distances is not None:
             distances = (spatial_distances, ancestor_distances, descendant_distances)
+        if self.encoder.physics_tokenizers is None:
+            # Physics Cross Attention is off (for example in an ablation): the
+            # collator still provides physics features, so drop them here.
+            rigid_body_features = actuator_features = dynamics_features = None
+            physics_memory = None
+        if not self.encoder.config.use_mass_encoding:
+            mass_matrix = None
         return self.encoder(
             input_values,
             parent_indices,

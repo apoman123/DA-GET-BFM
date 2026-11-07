@@ -1,0 +1,69 @@
+{
+  "history_size": 3,
+  "joint_features": "get_zero",
+  "eval_fraction": 0.05,
+  "seed": 0,
+  "sources": [
+    {
+      "type": "mujoco",
+      "name": "go1_ground",
+      "urdf": "../../assets/urdf/go1.urdf",
+      "contact_links": ["FR_foot", "FL_foot", "RR_foot", "RL_foot"],
+      "contact_geometry": {"radius": 0.02},
+      "nominal_pose": {
+        "FR_thigh_joint": 0.9, "FL_thigh_joint": 0.9, "RR_thigh_joint": 0.9, "RL_thigh_joint": 0.9,
+        "FR_calf_joint": -1.8, "FL_calf_joint": -1.8, "RR_calf_joint": -1.8, "RL_calf_joint": -1.8
+      },
+      "randomized_embodiments": 8,
+      "episodes_per_embodiment": 8,
+      "steps": 300,
+      "seed": 21
+    },
+    {
+      "type": "mujoco",
+      "name": "anymal_ground",
+      "urdf": "../../assets/urdf/anymal_d.urdf",
+      "joint_names": ["LF_HAA", "LF_HFE", "LF_KFE", "RF_HAA", "RF_HFE", "RF_KFE", "LH_HAA", "LH_HFE", "LH_KFE", "RH_HAA", "RH_HFE", "RH_KFE"],
+      "contact_links": ["LF_FOOT", "RF_FOOT", "LH_FOOT", "RH_FOOT"],
+      "contact_geometry": {"radius": 0.03},
+      "nominal_pose": {
+        "LF_HFE": 0.6, "RF_HFE": 0.6, "LH_HFE": -0.6, "RH_HFE": -0.6,
+        "LF_KFE": -1.0, "RF_KFE": -1.0, "LH_KFE": 1.0, "RH_KFE": 1.0
+      },
+      "randomized_embodiments": 8,
+      "episodes_per_embodiment": 8,
+      "steps": 300,
+      "seed": 22
+    },
+    {
+      "type": "mujoco",
+      "name": "g1_ground",
+      "urdf": "../../assets/urdf/g1_29dof.urdf",
+      "contact_links": ["left_ankle_roll_link", "right_ankle_roll_link"],
+      "contact_geometry": {"radius": 0.01, "sole_offset": [0.03, 0.0, -0.03], "foot_size": [0.18, 0.06]},
+      "nominal_pose": {
+        "left_hip_pitch_joint": -0.2, "right_hip_pitch_joint": -0.2, "left_knee_joint": 0.4, "right_knee_joint": 0.4,
+        "left_ankle_pitch_joint": -0.2, "right_ankle_pitch_joint": -0.2
+      },
+      "randomized_embodiments": 8,
+      "episodes_per_embodiment": 8,
+      "steps": 300,
+      "seed": 23
+    },
+    {
+      "type": "mujoco",
+      "name": "h1_ground",
+      "urdf": "../../assets/urdf/h1.urdf",
+      "contact_links": ["left_ankle_link", "right_ankle_link"],
+      "contact_geometry": {"radius": 0.01, "sole_offset": [0.04, 0.0, -0.07], "foot_size": [0.22, 0.07]},
+      "nominal_pose": {
+        "left_hip_pitch_joint": -0.4, "right_hip_pitch_joint": -0.4, "left_knee_joint": 0.8, "right_knee_joint": 0.8,
+        "left_ankle_joint": -0.4, "right_ankle_joint": -0.4
+      },
+      "randomized_embodiments": 8,
+      "episodes_per_embodiment": 8,
+      "steps": 300,
+      "seed": 24
+    }
+  ]
+}

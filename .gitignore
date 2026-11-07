@@ -5,4 +5,5 @@ __pycache__/
 assets/urdf/
 .cache/
 runs/
-data/
+/data/
+MUJOCO_LOG.TXT

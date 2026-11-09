@@ -19,7 +19,7 @@ Adapted parts:
 - the orthogonal `bfm_weight_init`;
 - the sphere projection of z;
 - the latent sampling and the goal, reward, and tracking inference of
-  `GetBfmModel`.
+  `DaGetBfmModel`.
 
 Changes:
 - rewritten in this repository's style;

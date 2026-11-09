@@ -1,7 +1,10 @@
 """BFM-Zero (FB-CPR) networks whose actor and critics read GET joint embeddings.
 
+"Da" stands for dynamic-aware: the GET embeddings these networks read carry the
+robot's dynamics.
+
 * ``BackwardMap`` B(s) and ``Discriminator`` D(s, z) keep the BFM-Zero MLPs.
-* ``GetBfmActor`` π(a | s, z) and ``GetForwardMap`` F(s, a, z) (also used for
+* ``DaGetBfmActor`` π(a | s, z) and ``DaGetForwardMap`` F(s, a, z) (also used for
   the discriminator critic and the auxiliary critic, with one output) replace
   the flat-state MLPs. They take the ``[batch, joints, hidden]`` output of
   ``GetEncoder``, cross-attend from joint tokens to latent tokens made from z
@@ -24,7 +27,7 @@ References and attribution:
 * GET-Zero: A. Patel, S. Song. "GET-Zero: Graph Embodiment Transformer for
   Zero-shot Embodiment Generalization." ICRA 2025.
 * ``BackwardMap``, ``Discriminator``, ``TruncatedNormal``, ``bfm_weight_init``,
-  the z projection and the inference methods of ``GetBfmModel`` are adapted
+  the z projection and the inference methods of ``DaGetBfmModel`` are adapted
   from ``humanoidverse/agents/nn_models.py`` and ``agents/fb/model.py`` of
   https://github.com/LeCAR-Lab/BFM-Zero (Copyright (c) Meta Platforms, Inc.
   and affiliates, CC BY-NC 4.0, https://creativecommons.org/licenses/by-nc/4.0/).
@@ -275,7 +278,7 @@ def _joint_mask(joint_embeddings: torch.Tensor, joint_mask: torch.Tensor | None)
     return joint_mask
 
 
-class GetBfmActor(nn.Module):
+class DaGetBfmActor(nn.Module):
     """z-conditioned policy π(a | s, z) that outputs one action per DoF.
 
     GET joint embeddings are projected to ``hidden_size``, refined by
@@ -364,7 +367,7 @@ class GetForwardNetwork(nn.Module):
         context_mask: torch.Tensor | None = None,
         latent_mask: torch.Tensor | None = None,
     ) -> torch.Tensor:
-        """Return ``[batch, output_size]``; see ``GetForwardMap.forward`` for arguments."""
+        """Return ``[batch, output_size]``; see ``DaGetForwardMap.forward`` for arguments."""
         memory, memory_mask = self.memory(z, latent_mask, context_states, context_mask)
         if action.ndim == 2:
             action = action[..., None]
@@ -379,7 +382,7 @@ class GetForwardNetwork(nn.Module):
         return self.output_head(torch.cat([pooled, mean], dim=-1))
 
 
-class GetForwardMap(nn.Module):
+class DaGetForwardMap(nn.Module):
     """Ensemble of ``num_parallel`` forward networks (F with ``z_dim`` outputs, critics with 1).
 
     Matches BFM-Zero's ``ForwardMap`` output layout: ``[num_parallel, batch, out]``
@@ -428,7 +431,7 @@ class GetForwardMap(nn.Module):
         return outputs if len(self.members) > 1 else outputs[0]
 
 
-class GetBfmModel(nn.Module):
+class DaGetBfmModel(nn.Module):
     """FB-CPR model (BFM-Zero's ``FBcprAuxModel``) with GET-conditioned actor and critics.
 
     Holds B, F, the actor, the discriminator critic, the discriminator and an
@@ -437,22 +440,22 @@ class GetBfmModel(nn.Module):
 
     Attributes:
         backward_map (BackwardMap): B(s).
-        forward_map (GetForwardMap): F(s, a, z) with ``z_dim`` outputs.
-        actor (GetBfmActor): π(a | s, z).
-        critic (GetForwardMap): Discriminator-reward critic Q(s, a, z).
+        forward_map (DaGetForwardMap): F(s, a, z) with ``z_dim`` outputs.
+        actor (DaGetBfmActor): π(a | s, z).
+        critic (DaGetForwardMap): Discriminator-reward critic Q(s, a, z).
         discriminator (Discriminator): D(s, z).
-        aux_critic (GetForwardMap | None): Auxiliary-reward critic.
+        aux_critic (DaGetForwardMap | None): Auxiliary-reward critic.
     """
 
     def __init__(self, config: BfmConfig, use_aux_critic: bool = True) -> None:
         super().__init__()
         self.config = config
         self.backward_map = BackwardMap(config)
-        self.forward_map = GetForwardMap(config, config.z_dim)
-        self.actor = GetBfmActor(config)
-        self.critic = GetForwardMap(config, 1)
+        self.forward_map = DaGetForwardMap(config, config.z_dim)
+        self.actor = DaGetBfmActor(config)
+        self.critic = DaGetForwardMap(config, 1)
         self.discriminator = Discriminator(config)
-        self.aux_critic = GetForwardMap(config, 1) if use_aux_critic else None
+        self.aux_critic = DaGetForwardMap(config, 1) if use_aux_critic else None
 
     def init_weights(self) -> None:
         """Apply BFM-Zero's orthogonal initialization to every linear layer."""

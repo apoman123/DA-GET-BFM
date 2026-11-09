@@ -1,5 +1,8 @@
 # DA-GET-BFM
 
+DA stands for **dynamic-aware**: a Graph Embodiment Transformer (GET) that sees
+the robot's dynamics, used as the encoder of a behavior foundation model (BFM).
+
 A PyTorch encoder that turns any tree-structured robot, given its URDF, into
 one token per degree of freedom (DoF) and encodes those tokens with a graph
 transformer. It implements the Graph Embodiment Transformer (GET) from
@@ -1032,9 +1035,9 @@ URDF + q, q̇, … ─► GetEncoder ─► H [B, J, 512] ─► LatentMemory(z,
 |---|---|---|
 | Backward map `B(s)` | MLP: Linear → LayerNorm → Tanh → Linear, normalized to radius `√z_dim` | **Unchanged** (`BackwardMap`) |
 | Discriminator `D(s, z)` | MLP on `[z, s]`, reward `log D − log(1−D)` | **Unchanged** (`Discriminator`) |
-| Actor `π(a \| s, z)` | Residual MLP on `[s, z]` → `tanh` mean, truncated normal | `GetBfmActor`: joint tokens cross-attend to latent tokens, then a per-DoF head gives a `tanh` mean and a truncated normal |
-| Forward map `F(s, a, z)` | Residual MLP, ensemble of 2, `z_dim` outputs | `GetForwardMap`: each joint token gets its own action, cross-attends to latent tokens, then the joints are pooled; ensemble of `num_parallel` |
-| Critic, aux critic `Q(s, a, z)` | Same as F with one output | `GetForwardMap(config, 1)` |
+| Actor `π(a \| s, z)` | Residual MLP on `[s, z]` → `tanh` mean, truncated normal | `DaGetBfmActor`: joint tokens cross-attend to latent tokens, then a per-DoF head gives a `tanh` mean and a truncated normal |
+| Forward map `F(s, a, z)` | Residual MLP, ensemble of 2, `z_dim` outputs | `DaGetForwardMap`: each joint token gets its own action, cross-attends to latent tokens, then the joints are pooled; ensemble of `num_parallel` |
+| Critic, aux critic `Q(s, a, z)` | Same as F with one output | `DaGetForwardMap(config, 1)` |
 
 Design details:
 - **Latent tokens.** A single z would give cross-attention just one key: the
@@ -1058,11 +1061,11 @@ Design details:
   The FB-CPR training losses can therefore be ported as they are.
 
 ```python
-from model import BfmConfig, GetBfmModel
+from model import BfmConfig, DaGetBfmModel
 
 # hidden, batch from the quick start above
 config = BfmConfig(embedding_size=hidden.shape[-1], backward_input_size=state_dim)
-bfm = GetBfmModel(config)
+bfm = DaGetBfmModel(config)
 bfm.init_weights()
 
 z = bfm.goal_inference(goal_state)                       # or tracking_inference / reward_inference
@@ -1170,7 +1173,7 @@ DA-GET-BFM/
 │   │                          # physics tokenizers, PhysicsMemory
 │   ├── pretraining.py         # GetForPhysicsPretraining (HF PreTrainedModel), heads A–F
 │   ├── configuration_bfm.py   # BfmConfig
-│   ├── modeling_bfm.py        # BFM-Zero B, D, and GET-conditioned actor, F, critics; GetBfmModel
+│   ├── modeling_bfm.py        # BFM-Zero B, D, and GET-conditioned actor, F, critics; DaGetBfmModel
 │   ├── transformer.py         # attention and cross-attention blocks
 │   ├── robot_analysis.py      # infer floating base, feet, rotors, propellers from a URDF
 │   ├── conversion/

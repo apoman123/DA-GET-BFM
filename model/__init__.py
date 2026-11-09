@@ -10,10 +10,10 @@ from model.embodiment import (
 )
 from model.modeling_bfm import (
     BackwardMap,
+    DaGetBfmActor,
+    DaGetBfmModel,
+    DaGetForwardMap,
     Discriminator,
-    GetBfmActor,
-    GetBfmModel,
-    GetForwardMap,
     TruncatedNormal,
 )
 from model.modeling_get import GetEncoder, PhysicsMemory
@@ -34,14 +34,14 @@ __all__ = [
     "ActuatorSpec",
     "BackwardMap",
     "BfmConfig",
+    "DaGetBfmActor",
+    "DaGetBfmModel",
+    "DaGetForwardMap",
     "Discriminator",
     "EmbodimentBatch",
     "EmbodimentGraph",
-    "GetBfmActor",
-    "GetBfmModel",
     "GetConfig",
     "GetEncoder",
-    "GetForwardMap",
     "GetTokenizer",
     "JointFeatureConfig",
     "PhysicsFeatureCache",

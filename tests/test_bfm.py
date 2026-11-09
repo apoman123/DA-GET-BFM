@@ -5,7 +5,7 @@ import unittest
 
 import torch
 
-from model import BfmConfig, GetBfmModel, GetConfig, GetEncoder
+from model import BfmConfig, DaGetBfmModel, GetConfig, GetEncoder
 from model.modeling_bfm import TruncatedNormal
 
 EMBED, STATE, Z = 16, 10, 12
@@ -25,7 +25,7 @@ class BfmNetworksTest(unittest.TestCase):
 
     def setUp(self) -> None:
         torch.manual_seed(0)
-        self.model = GetBfmModel(config()).eval()
+        self.model = DaGetBfmModel(config()).eval()
         self.model.init_weights()
         self.embeddings = torch.randn(3, 6, EMBED)
         self.mask = torch.tensor([[True] * 6, [True] * 4 + [False] * 2, [True] * 2 + [False] * 4])
@@ -99,7 +99,7 @@ class BfmNetworksTest(unittest.TestCase):
 
     def test_multi_output_actions_and_single_member(self) -> None:
         """Several action entries per DoF and a single-member ensemble."""
-        model = GetBfmModel(config(action_size_per_joint=2, num_parallel=1), use_aux_critic=False)
+        model = DaGetBfmModel(config(action_size_per_joint=2, num_parallel=1), use_aux_critic=False)
         self.assertIsNone(model.aux_critic)
         action = model.actor(self.embeddings, self.z, 0.1, self.mask).sample()
         self.assertEqual(action.shape, (3, 6, 2))
@@ -107,7 +107,7 @@ class BfmNetworksTest(unittest.TestCase):
 
     def test_inference(self) -> None:
         """Goal, reward (chunked) and tracking inference match their definitions."""
-        model = GetBfmModel(config(inference_batch_size=7)).eval()
+        model = DaGetBfmModel(config(inference_batch_size=7)).eval()
         states, reward = torch.randn(20, STATE), torch.randn(20, 1)
         b = model.backward_map(states)
         torch.testing.assert_close(model.reward_inference(states, reward), model.project_z(reward.T @ b))
@@ -132,7 +132,7 @@ class GetEncoderToActorTest(unittest.TestCase):
         torch.manual_seed(1)
         encoder = GetEncoder(GetConfig(input_size=3, hidden_size=EMBED, num_hidden_layers=1, num_attention_heads=2,
                                        intermediate_size=32, use_mass_encoding=False))
-        model = GetBfmModel(config())
+        model = DaGetBfmModel(config())
         tokens = torch.randn(2, 4, 3)
         parents = torch.tensor([[-1, 0, 1, 2], [-1, 0, -1, -1]])
         mask = torch.tensor([[True] * 4, [True, True, False, False]])

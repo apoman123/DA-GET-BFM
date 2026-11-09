@@ -46,8 +46,8 @@ from torch.nn import functional
 from transformers import PretrainedConfig, PreTrainedModel
 from transformers.utils import ModelOutput
 
-from model.configuration_get import GetConfig
-from model.modeling_get import GetEncoder, GetEncoderLayer
+from model.configuration_get import DaGetConfig
+from model.modeling_get import DaGetEncoder, GetEncoderLayer
 
 LOSS_NAMES = ("fk", "fd", "id", "motor", "effect", "rbd")
 MOTOR_FLAG_COUNT = 2
@@ -59,7 +59,7 @@ class GetPhysicsPretrainingConfig(PretrainedConfig):
     """Configure the encoder, the auxiliary heads, and the loss weights.
 
     Attributes:
-        encoder (dict): ``GetConfig`` fields.
+        encoder (dict): ``DaGetConfig`` fields.
         head_hidden_size (int | None): Head MLP width; defaults to the encoder width.
         mixing_layers (int): Graph action-mixing layers in the FD, ID, and effect
             heads; 0 makes those heads per-joint.
@@ -131,21 +131,21 @@ class GetPhysicsPretrainingConfig(PretrainedConfig):
         super().__init__(**kwargs)
 
     @property
-    def encoder_config(self) -> GetConfig:
-        """Return the validated ``GetConfig``.
+    def encoder_config(self) -> DaGetConfig:
+        """Return the validated ``DaGetConfig``.
 
         Returns:
-            GetConfig: Encoder configuration.
+            DaGetConfig: Encoder configuration.
         """
-        valid = {item.name for item in fields(GetConfig)}
-        return GetConfig(**{key: value for key, value in self.encoder.items() if key in valid})
+        valid = {item.name for item in fields(DaGetConfig)}
+        return DaGetConfig(**{key: value for key, value in self.encoder.items() if key in valid})
 
     @classmethod
-    def from_encoder_config(cls, encoder: GetConfig, **kwargs: Any) -> GetPhysicsPretrainingConfig:
-        """Build from a ``GetConfig``.
+    def from_encoder_config(cls, encoder: DaGetConfig, **kwargs: Any) -> GetPhysicsPretrainingConfig:
+        """Build from a ``DaGetConfig``.
 
         Args:
-            encoder (GetConfig): Encoder configuration.
+            encoder (DaGetConfig): Encoder configuration.
             **kwargs (Any): Other fields.
 
         Returns:
@@ -247,11 +247,11 @@ class GraphActionMixer(nn.Module):
     prediction can depend on the inputs of the other joints.
     """
 
-    def __init__(self, encoder_config: GetConfig, input_size: int, layers: int) -> None:
+    def __init__(self, encoder_config: DaGetConfig, input_size: int, layers: int) -> None:
         """Build the mixer.
 
         Args:
-            encoder_config (GetConfig): Encoder configuration (width, heads).
+            encoder_config (DaGetConfig): Encoder configuration (width, heads).
             input_size (int): Features per joint of x.
             layers (int): Graph self-attention layers; 0 keeps it per-joint.
         """
@@ -320,7 +320,7 @@ class GetForPhysicsPretraining(PreTrainedModel):
         encoder_config = config.encoder_config
         hidden = encoder_config.hidden_size
         head = config.head_hidden_size or hidden
-        self.encoder = GetEncoder(encoder_config)
+        self.encoder = DaGetEncoder(encoder_config)
         self.fk_head = _mlp(hidden, head, 9)
         self.fd_mixer = GraphActionMixer(encoder_config, 1, config.mixing_layers)
         self.fd_head = _mlp(hidden, head, 1)

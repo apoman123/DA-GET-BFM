@@ -5,7 +5,7 @@ import unittest
 
 import torch
 
-from model import BfmConfig, DaGetBfmModel, GetConfig, GetEncoder
+from model import BfmConfig, DaGetBfmModel, DaGetConfig, DaGetEncoder
 from model.modeling_bfm import TruncatedNormal
 
 EMBED, STATE, Z = 16, 10, 12
@@ -130,7 +130,7 @@ class GetEncoderToActorTest(unittest.TestCase):
     def test_td3_style_update_reaches_encoder(self) -> None:
         """The FB actor loss -Fᵀz backpropagates into the encoder."""
         torch.manual_seed(1)
-        encoder = GetEncoder(GetConfig(input_size=3, hidden_size=EMBED, num_hidden_layers=1, num_attention_heads=2,
+        encoder = DaGetEncoder(DaGetConfig(input_size=3, hidden_size=EMBED, num_hidden_layers=1, num_attention_heads=2,
                                        intermediate_size=32, use_mass_encoding=False))
         model = DaGetBfmModel(config())
         tokens = torch.randn(2, 4, 3)

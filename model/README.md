@@ -19,7 +19,7 @@ uv run pytest
 import torch
 
 from model import (
-    EmbodimentGraph, GetConfig, GetEncoder, GetTokenizer,
+    EmbodimentGraph, DaGetConfig, DaGetEncoder, DaGetTokenizer,
     JointFeatureConfig, collate_embodiments,
 )
 
@@ -32,7 +32,7 @@ graphs = [
 batch = collate_embodiments(graphs)                 # pads to the largest DoF count
 
 H = 6                                               # GET-Zero history length
-tokenizer = GetTokenizer(
+tokenizer = DaGetTokenizer(
     fixed_local_size=features.size,                 # o_fl: URDF hardware features
     variable_local_size=2,                          # o_vl: q (normalized), PD target
     variable_global_size=6,                         # o_vg: e.g. base ang. vel + gravity
@@ -49,7 +49,7 @@ tokens = tokenizer(
     variable_global=torch.zeros(len(graphs), H, 6),
 )
 
-encoder = GetEncoder(GetConfig.get_zero(input_size=tokenizer.token_size))
+encoder = DaGetEncoder(DaGetConfig.get_zero(input_size=tokenizer.token_size))
 hidden = encoder(
     tokens,
     mass_matrix=batch.mass_matrix(q[:, -1]),        # M(q) from URDF inertials
@@ -74,7 +74,7 @@ T_j = [o_vg^{t-H+1..t}, o_fg, o_vl,j^{t-H+1..t}, o_fl,j]
 
 History is flattened feature-major, as in the GET-Zero code. The encoder applies a
 layer norm over each raw token and then a learned linear embedding, as in the
-paper. `GetConfig.get_zero` gives the paper's architecture: 8 layers, 16 heads,
+paper. `DaGetConfig.get_zero` gives the paper's architecture: 8 layers, 16 heads,
 width 512, feed-forward 1024, dropout 0.1.
 
 `JointFeatureConfig()` matches the paper (6 features). Robots in the paper share
@@ -169,7 +169,7 @@ Each group has its own asinh-scaled MLP tokenizer
 (`PhysicsFeatureTokenizer`). The attention bias is a per-head graph distance
 term plus a per-group term.
 
-`GetEncoder.build_physics_memory` caches the rigid-body and actuator keys and
+`DaGetEncoder.build_physics_memory` caches the rigid-body and actuator keys and
 values, so a control step only embeds the dynamics tokens. The encoder rejects
 a memory built from parameters that have changed since.
 

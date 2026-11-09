@@ -9,10 +9,10 @@ class BfmConfig:
 
     The backward map and discriminator keep the BFM-Zero MLPs on a flat state.
     The actor, forward map and critics read the ``[batch, joints, embedding_size]``
-    output of ``GetEncoder`` and cross-attend from joints to latent tokens made from z.
+    output of ``DaGetEncoder`` and cross-attend from joints to latent tokens made from z.
 
     Attributes:
-        embedding_size (int): Width of GET joint embeddings (``GetConfig.hidden_size``).
+        embedding_size (int): Width of GET joint embeddings (``DaGetConfig.hidden_size``).
         backward_input_size (int): Flat state width read by the backward map.
         discriminator_input_size (int | None): Flat state width read by the
             discriminator; defaults to backward_input_size.

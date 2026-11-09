@@ -27,7 +27,7 @@ import torch
 
 
 @dataclass(frozen=True)
-class GetTokenizer:
+class DaGetTokenizer:
     """Concatenate global and per-joint observations into GET-Zero tokens.
 
     Attributes:

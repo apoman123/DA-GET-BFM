@@ -7,9 +7,9 @@ import torch
 
 from model import (
     EmbodimentGraph,
-    GetConfig,
-    GetEncoder,
-    GetTokenizer,
+    DaGetConfig,
+    DaGetEncoder,
+    DaGetTokenizer,
     JointFeatureConfig,
     collate_embodiments,
     parse_urdf,
@@ -310,7 +310,7 @@ class TokenizationAndEncoderTest(unittest.TestCase):
 
     def test_tokenizer_layout(self) -> None:
         """Tokens follow [o_vg, o_fg, o_vl, o_fl] with feature-major history."""
-        tokenizer = GetTokenizer(
+        tokenizer = DaGetTokenizer(
             fixed_local_size=1, variable_local_size=2, variable_global_size=1, fixed_global_size=1, history_size=2
         )
         self.assertEqual(tokenizer.token_size, 8)
@@ -339,7 +339,7 @@ class TokenizationAndEncoderTest(unittest.TestCase):
         batch = collate_embodiments(graphs)
         joints = batch.joint_mask.shape[1]
         history = 3
-        tokenizer = GetTokenizer(
+        tokenizer = DaGetTokenizer(
             fixed_local_size=config.size, variable_local_size=2, variable_global_size=6, history_size=history
         )
         q = torch.randn(3, history, joints) * batch.joint_mask[:, None]
@@ -352,8 +352,8 @@ class TokenizationAndEncoderTest(unittest.TestCase):
             variable_local=variable_local,
             variable_global=torch.randn(3, history, 6),
         )
-        encoder = GetEncoder(
-            GetConfig(
+        encoder = DaGetEncoder(
+            DaGetConfig(
                 input_size=tokenizer.token_size,
                 hidden_size=16,
                 num_hidden_layers=2,
@@ -384,8 +384,8 @@ class TokenizationAndEncoderTest(unittest.TestCase):
         """Disconnected chains encode the same whether or not a batch is padded."""
         torch.manual_seed(5)
         graph = EmbodimentGraph.from_urdf(quadruped(), sibling_edges=False)
-        encoder = GetEncoder(
-            GetConfig(
+        encoder = DaGetEncoder(
+            DaGetConfig(
                 input_size=graph.feature_size,
                 hidden_size=8,
                 num_hidden_layers=1,
@@ -406,7 +406,7 @@ class TokenizationAndEncoderTest(unittest.TestCase):
 
     def test_get_zero_config(self) -> None:
         """The paper preset uses the published architecture sizes."""
-        config = GetConfig.get_zero(input_size=20)
+        config = DaGetConfig.get_zero(input_size=20)
         self.assertEqual(
             (config.hidden_size, config.num_hidden_layers, config.num_attention_heads, config.intermediate_size),
             (512, 8, 16, 1024),

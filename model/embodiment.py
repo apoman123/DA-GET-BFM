@@ -978,7 +978,7 @@ class EmbodimentBatch:
     joint_features: torch.Tensor
 
     def encoder_inputs(self) -> dict[str, object]:
-        """Return the structural keyword arguments for ``GetEncoder.forward``.
+        """Return the structural keyword arguments for ``DaGetEncoder.forward``.
 
         Returns:
             dict[str, object]: ``parent_indices``, ``joint_mask``,

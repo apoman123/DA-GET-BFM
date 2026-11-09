@@ -5,7 +5,7 @@ import unittest
 
 import torch
 
-from model import EmbodimentGraph, GetConfig, GetEncoder, collate_embodiments
+from model import EmbodimentGraph, DaGetConfig, DaGetEncoder, collate_embodiments
 from model.dynamics import (
     coriolis_efforts,
     forward_dynamics,
@@ -272,7 +272,7 @@ class PhysicsCrossAttentionTest(unittest.TestCase):
         joints = self.batch.joint_mask.shape[1]
         self.q = torch.zeros(2, joints)
         self.dynamics = self.cache.update(self.q, torch.zeros_like(self.q))
-        config = GetConfig(
+        config = DaGetConfig(
             input_size=self.batch.joint_features.shape[-1],
             hidden_size=32,
             num_attention_heads=4,
@@ -281,7 +281,7 @@ class PhysicsCrossAttentionTest(unittest.TestCase):
             use_physics_cross_attention=True,
             physics_cross_attention_layers=(0, 2),
         )
-        self.encoder = GetEncoder(config).eval()
+        self.encoder = DaGetEncoder(config).eval()
 
     def inputs(self) -> dict:
         """Return encoder keyword arguments except physics."""
@@ -337,7 +337,7 @@ class PhysicsCrossAttentionTest(unittest.TestCase):
         """Missing dynamics raise; physics inputs to a non-physics encoder raise."""
         with self.assertRaises(ValueError):
             self.encoder(self.batch.joint_features, **self.inputs())
-        plain = GetEncoder(GetConfig(input_size=self.batch.joint_features.shape[-1], hidden_size=32))
+        plain = DaGetEncoder(DaGetConfig(input_size=self.batch.joint_features.shape[-1], hidden_size=32))
         with self.assertRaises(ValueError):
             plain(self.batch.joint_features, dynamics_features=self.dynamics, **self.inputs())
 

@@ -309,10 +309,10 @@ class FloatingPipelineTest(unittest.TestCase):
         self.assertEqual(batch["input_values"].shape[-1], datasets.token_size)
         for name, value in batch.items():
             self.assertTrue(torch.isfinite(value.float()).all(), name)
-        from model import GetConfig
+        from model import DaGetConfig
         from model.pretraining import GetForPhysicsPretraining, GetPhysicsPretrainingConfig
 
-        encoder = GetConfig(input_size=datasets.token_size, hidden_size=32, num_attention_heads=4,
+        encoder = DaGetConfig(input_size=datasets.token_size, hidden_size=32, num_attention_heads=4,
                             num_hidden_layers=1, intermediate_size=64, use_physics_cross_attention=True)
         model = GetForPhysicsPretraining(GetPhysicsPretrainingConfig.from_encoder_config(encoder))
         output = model(**batch)

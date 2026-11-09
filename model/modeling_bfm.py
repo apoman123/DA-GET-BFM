@@ -7,7 +7,7 @@ robot's dynamics.
 * ``DaGetBfmActor`` π(a | s, z) and ``DaGetForwardMap`` F(s, a, z) (also used for
   the discriminator critic and the auxiliary critic, with one output) replace
   the flat-state MLPs. They take the ``[batch, joints, hidden]`` output of
-  ``GetEncoder``, cross-attend from joint tokens to latent tokens made from z
+  ``DaGetEncoder``, cross-attend from joint tokens to latent tokens made from z
   (and optional context tokens), mix joints with self-attention, and either
   decode one action per DoF (actor) or pool the joints (forward map, critics).
 
@@ -310,7 +310,7 @@ class DaGetBfmActor(nn.Module):
         """Return the action distribution.
 
         Args:
-            joint_embeddings (torch.Tensor): ``GetEncoder`` output ``[batch, joints, embedding_size]``.
+            joint_embeddings (torch.Tensor): ``DaGetEncoder`` output ``[batch, joints, embedding_size]``.
             z (torch.Tensor): Latent ``[batch, z_dim]`` or latent sequence ``[batch, L, z_dim]``.
             std (float): Policy standard deviation.
             joint_mask (torch.Tensor | None): Bool ``[batch, joints]`` of real DoFs.
@@ -334,7 +334,7 @@ class DaGetBfmActor(nn.Module):
         return TruncatedNormal(mean, torch.full_like(mean, std), mask=joint_mask)
 
 
-class GetForwardNetwork(nn.Module):
+class DaGetForwardNetwork(nn.Module):
     """One ensemble member of F(s, a, z): joint tokens with their action, conditioned on z, pooled.
 
     Each joint token is its projected GET embedding plus an embedding of the
@@ -393,7 +393,7 @@ class DaGetForwardMap(nn.Module):
         super().__init__()
         self.config = config
         self.output_size = output_size or config.z_dim
-        self.members = nn.ModuleList(GetForwardNetwork(config, self.output_size) for _ in range(config.num_parallel))
+        self.members = nn.ModuleList(DaGetForwardNetwork(config, self.output_size) for _ in range(config.num_parallel))
 
     def forward(
         self,
@@ -408,7 +408,7 @@ class DaGetForwardMap(nn.Module):
         """Evaluate every ensemble member.
 
         Args:
-            joint_embeddings (torch.Tensor): ``GetEncoder`` output ``[batch, joints, embedding_size]``.
+            joint_embeddings (torch.Tensor): ``DaGetEncoder`` output ``[batch, joints, embedding_size]``.
             z (torch.Tensor): Latent ``[batch, z_dim]`` or ``[batch, L, z_dim]``.
             action (torch.Tensor): Per-DoF action ``[batch, joints]`` or ``[batch, joints, A]``.
             joint_mask (torch.Tensor | None): Bool ``[batch, joints]``.
@@ -436,7 +436,7 @@ class DaGetBfmModel(nn.Module):
 
     Holds B, F, the actor, the discriminator critic, the discriminator and an
     optional auxiliary critic, plus BFM-Zero's latent sampling and inference.
-    Actor and critics take ``GetEncoder`` embeddings; B and D take flat states.
+    Actor and critics take ``DaGetEncoder`` embeddings; B and D take flat states.
 
     Attributes:
         backward_map (BackwardMap): B(s).

@@ -4,8 +4,8 @@ from dataclasses import dataclass
 
 
 @dataclass(frozen=True)
-class GetConfig:
-    """Hold validated dimensions and graph encoding options for ``GetEncoder``.
+class DaGetConfig:
+    """Hold validated dimensions and graph encoding options for ``DaGetEncoder``.
 
     Attributes:
         input_size (int): Positive number of features in each joint token.
@@ -61,7 +61,7 @@ class GetConfig:
     physics_tokenizer_hidden_size: int | None = None
 
     @classmethod
-    def get_zero(cls, input_size: int, **overrides: object) -> "GetConfig":
+    def get_zero(cls, input_size: int, **overrides: object) -> "DaGetConfig":
         """Return the GET-Zero LEAP Hand architecture for a token width.
 
         The paper's model uses 8 layers, 16 heads, width 512, feed-forward
@@ -69,11 +69,11 @@ class GetConfig:
 
         Args:
             input_size (int): Raw joint token width, for example
-                ``GetTokenizer.token_size``.
+                ``DaGetTokenizer.token_size``.
             **overrides (object): Fields to change from the paper values.
 
         Returns:
-            GetConfig: Validated configuration.
+            DaGetConfig: Validated configuration.
         """
         values = {
             "hidden_size": 512,

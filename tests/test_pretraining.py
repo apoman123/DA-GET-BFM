@@ -10,7 +10,7 @@ import torch
 from datasets import Dataset
 from transformers import TrainingArguments
 
-from model import GetConfig
+from model import DaGetConfig
 from model.pretraining import (
     LOSS_NAMES,
     GetForPhysicsPretraining,
@@ -100,7 +100,7 @@ class PretrainingPipelineTest(unittest.TestCase):
 
     def model(self, **overrides) -> GetForPhysicsPretraining:
         """Return a small pretraining model for the test data."""
-        encoder = GetConfig(
+        encoder = DaGetConfig(
             input_size=self.datasets.token_size,
             hidden_size=32,
             num_attention_heads=4,
@@ -181,7 +181,7 @@ class PretrainingPipelineTest(unittest.TestCase):
         """Without Physics Cross Attention or mass encoding, the model ignores those inputs."""
         batch = self.batch()
         for overrides in ({"use_physics_cross_attention": False}, {"use_mass_encoding": False}):
-            encoder = GetConfig(
+            encoder = DaGetConfig(
                 input_size=self.datasets.token_size,
                 hidden_size=32,
                 num_attention_heads=4,

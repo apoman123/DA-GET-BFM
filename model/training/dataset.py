@@ -45,7 +45,7 @@ from torch.utils.data import Dataset
 
 from model.embodiment import JointFeatureConfig, collate_embodiments
 from model.physics import EPSILON
-from model.tokenization_get import GetTokenizer
+from model.tokenization_get import DaGetTokenizer
 from model.training.episodes import (
     BASE_FEATURE_SIZE,
     EmbodimentRecord,
@@ -379,7 +379,7 @@ class PhysicsDataCollator:
         self.max_estimate_residual = max_estimate_residual
         self.estimated_torque_weight = estimated_torque_weight
         feature_size = self.records[0].joint_features.shape[1]
-        self.token_builder = GetTokenizer(
+        self.token_builder = DaGetTokenizer(
             fixed_local_size=feature_size,
             variable_local_size=VARIABLE_LOCAL_SIZE,
             variable_global_size=VARIABLE_GLOBAL_SIZE,

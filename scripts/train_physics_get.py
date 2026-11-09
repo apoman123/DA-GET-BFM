@@ -31,7 +31,7 @@ if str(ROOT) not in sys.path:
 
 from transformers import HfArgumentParser, TrainingArguments, set_seed  # noqa: E402
 
-from model.configuration_get import GetConfig  # noqa: E402
+from model.configuration_get import DaGetConfig  # noqa: E402
 from model.pretraining import (  # noqa: E402
     GetForPhysicsPretraining,
     GetPhysicsPretrainingConfig,
@@ -78,7 +78,7 @@ class DataArguments:
     rebuild_cache: bool = field(default=False, metadata={"help": "Recompute features and labels."})
 
 
-def encoder_config(arguments: ModelArguments, input_size: int) -> GetConfig:
+def encoder_config(arguments: ModelArguments, input_size: int) -> DaGetConfig:
     """Build the encoder configuration from the preset and overrides."""
     if arguments.preset == "get_zero":
         values = {"hidden_size": 512, "num_hidden_layers": 8, "num_attention_heads": 16,
@@ -96,7 +96,7 @@ def encoder_config(arguments: ModelArguments, input_size: int) -> GetConfig:
     layers = None
     if arguments.physics_layers:
         layers = tuple(int(item) for item in arguments.physics_layers.split(","))
-    return GetConfig(
+    return DaGetConfig(
         input_size=input_size,
         use_mass_encoding=arguments.mass_encoding,
         use_physics_cross_attention=arguments.physics_cross_attention,

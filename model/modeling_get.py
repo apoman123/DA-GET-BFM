@@ -18,7 +18,7 @@ import torch
 from torch import nn
 from torch.nn import functional
 
-from model.configuration_get import GetConfig
+from model.configuration_get import DaGetConfig
 from model.physics_schema import feature_scales
 from model.transformer import AttentionBlock, CrossAttentionBlock
 
@@ -211,7 +211,7 @@ class PhysicsCrossAttention(nn.Module):
     describes, plus a per-head bias per feature group, so a joint can focus on
     its own physics and that of nearby joints. Keys and values of the rigid-body
     and actuator tokens depend only on the embodiment and can be cached with
-    ``GetEncoder.build_physics_memory``.
+    ``DaGetEncoder.build_physics_memory``.
 
     Attributes:
         query_norm (nn.LayerNorm): Pre-norm of observation tokens.
@@ -224,11 +224,11 @@ class PhysicsCrossAttention(nn.Module):
         group_bias (nn.Parameter): ``[3, heads]`` per-group bias.
     """
 
-    def __init__(self, config: GetConfig) -> None:
+    def __init__(self, config: DaGetConfig) -> None:
         """Build one Physics Cross Attention block.
 
         Args:
-            config (GetConfig): Encoder configuration.
+            config (DaGetConfig): Encoder configuration.
 
         Returns:
             None: Registers parameters.
@@ -339,7 +339,7 @@ class PhysicsMemory:
 
     Rigid-body and actuator features do not change while a robot runs, so their
     tokens and their per-layer keys and values can be computed once and reused
-    every control step. Build it with ``GetEncoder.build_physics_memory`` and
+    every control step. Build it with ``DaGetEncoder.build_physics_memory`` and
     pass it as ``physics_memory``. It records the versions of the parameters it
     was computed from; the encoder rejects it after those parameters change
     (for example after an optimizer step), so a stale cache cannot be used by
@@ -362,7 +362,7 @@ class GetGraphAttentionBias(nn.Module):
     """Learn per-head spatial, parent, child, and normalized mass logit biases.
 
     Attributes:
-        config (GetConfig): Encoder configuration controlling enabled biases.
+        config (DaGetConfig): Encoder configuration controlling enabled biases.
         spatial_embedding (nn.Embedding | None): Undirected distance table.
         parent_embedding (nn.Embedding | None): Query-to-ancestor distance table.
         child_embedding (nn.Embedding | None): Query-to-descendant distance table.
@@ -370,11 +370,11 @@ class GetGraphAttentionBias(nn.Module):
             entry to one bias value per attention head.
     """
 
-    def __init__(self, config: GetConfig) -> None:
+    def __init__(self, config: DaGetConfig) -> None:
         """Initialize independent bias parameters for one encoder layer.
 
         Args:
-            config (GetConfig): Validated encoder configuration.
+            config (DaGetConfig): Validated encoder configuration.
 
         Returns:
             None: Registers trainable graph and dynamics projections.
@@ -493,12 +493,12 @@ class GetEncoderLayer(nn.Module):
     """
 
     def __init__(
-        self, config: GetConfig, use_cross_attention: bool, use_physics_attention: bool = False
+        self, config: DaGetConfig, use_cross_attention: bool, use_physics_attention: bool = False
     ) -> None:
         """Build one independently parameterized transformer layer.
 
         Args:
-            config (GetConfig): Validated dimensions and bias options.
+            config (DaGetConfig): Validated dimensions and bias options.
             use_cross_attention (bool): Whether this layer attends to context.
             use_physics_attention (bool): Whether this layer has Physics Cross
                 Attention.
@@ -591,11 +591,11 @@ class GetEncoderLayer(nn.Module):
         return hidden_states.masked_fill(~joint_mask.unsqueeze(-1), 0)
 
 
-class GetEncoder(nn.Module):
+class DaGetEncoder(nn.Module):
     """Encode variable-length robot joint tokens with graph and dynamics biases.
 
     Attributes:
-        config (GetConfig): Encoder dimensions and enabled mechanisms.
+        config (DaGetConfig): Encoder dimensions and enabled mechanisms.
         input_norm (nn.LayerNorm | None): Per-token feature normalization applied
             before the projection when ``config.use_input_layer_norm`` is set.
         input_projection (nn.Linear): Joint feature to hidden-state projection.
@@ -603,11 +603,11 @@ class GetEncoder(nn.Module):
         final_norm (nn.LayerNorm): Output normalization.
     """
 
-    def __init__(self, config: GetConfig) -> None:
+    def __init__(self, config: DaGetConfig) -> None:
         """Create a GET-style encoder from its configuration.
 
         Args:
-            config (GetConfig): Validated model configuration.
+            config (DaGetConfig): Validated model configuration.
 
         Returns:
             None: Registers projections and all encoder layers.
@@ -742,7 +742,7 @@ class GetEncoder(nn.Module):
         Args:
             input_values (torch.Tensor): Float joint tokens of shape
                 ``[batch, joints, config.input_size]``, one token per DoF. Build
-                them with ``GetTokenizer`` to follow the GET-Zero layout.
+                them with ``DaGetTokenizer`` to follow the GET-Zero layout.
             parent_indices (torch.Tensor): Direct parent indices of shape
                 ``[batch, joints]``; -1 denotes roots or padding.
             mass_matrix (torch.Tensor | None): Joint-space inertia matrix

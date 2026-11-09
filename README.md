@@ -138,7 +138,7 @@ Encoder only, for a floating-base robot, with Physics Cross Attention:
 import torch
 
 from model import (
-    EmbodimentGraph, GetConfig, GetEncoder, GetTokenizer,
+    EmbodimentGraph, DaGetConfig, DaGetEncoder, DaGetTokenizer,
     JointFeatureConfig, collate_embodiments,
 )
 from model.physics import PhysicsFeatureCache, actuator_specs
@@ -162,15 +162,15 @@ q = torch.zeros(len(graphs), H, J)
 qd = torch.zeros(len(graphs), H, J)
 gravity = torch.tensor([[0.0, 0.0, -9.81]] * len(graphs))   # IMU projected gravity x 9.81
 gyro = torch.zeros(len(graphs), 3)                          # base angular velocity (base frame)
-tokenizer = GetTokenizer(fixed_local_size=features.size, variable_local_size=2, history_size=H)
+tokenizer = DaGetTokenizer(fixed_local_size=features.size, variable_local_size=2, history_size=H)
 tokens = tokenizer(
     batch.joint_features, batch.joint_mask,
     variable_local=torch.stack((batch.normalize_joint_positions(q), qd), dim=-1),
 )
 
 # 4. Encode.
-encoder = GetEncoder(
-    GetConfig.get_zero(input_size=tokenizer.token_size, use_physics_cross_attention=True)
+encoder = DaGetEncoder(
+    DaGetConfig.get_zero(input_size=tokenizer.token_size, use_physics_cross_attention=True)
 ).eval()
 memory = encoder.build_physics_memory(               # cache rigid-body and actuator keys/values
     physics.rigid_body_features, physics.actuator_features, batch.joint_mask
@@ -204,10 +204,10 @@ URDF ──parse_urdf──▶ UrdfRobot ──EmbodimentGraph.from_urdf──�
            actuator_specs / rigid_body_features ◀──────────────┤
                      several graphs ──collate_embodiments──▶ EmbodimentBatch
                                                                │
- joint + base observations ──GetTokenizer──▶ observation tokens [B, J, F]
+ joint + base observations ──DaGetTokenizer──▶ observation tokens [B, J, F]
  rigid body │ actuator │ dynamics ──physics tokenizers──▶ physics tokens [B, 3J, hidden]
                                                                │
- tokens, M(q), graph, physics ──GetEncoder──▶ joint embeddings H [B, J, hidden]
+ tokens, M(q), graph, physics ──DaGetEncoder──▶ joint embeddings H [B, J, hidden]
                                                                │
                         auxiliary heads A–F (pretraining only) ┘
 ```
@@ -285,7 +285,7 @@ the observation tokens.
 
 ### 4. Token assembly
 
-`GetTokenizer` builds token `j` exactly as GET-Zero does:
+`DaGetTokenizer` builds token `j` exactly as GET-Zero does:
 
 ```text
 T_j = [ o_vg^{t-H+1..t},  o_fg,  o_vl,j^{t-H+1..t},  o_fl,j ]
@@ -304,7 +304,7 @@ oldest first. Padded joints get all-zero tokens.
 
 ### 5. Encoder and attention bias
 
-`GetEncoder` (`model/modeling_get.py`) runs:
+`DaGetEncoder` (`model/modeling_get.py`) runs:
 
 1. A LayerNorm over each raw token, as in GET-Zero, because token features have
    very different scales.
@@ -1012,7 +1012,7 @@ two references:
 - [GET-Zero](https://get-zero-paper.github.io/) (Patel and Song, ICRA 2025).
 
 BFM-Zero's networks read one flat state vector of a single robot (the G1).
-Here the actor and the critics read the per-DoF embeddings of `GetEncoder`.
+Here the actor and the critics read the per-DoF embeddings of `DaGetEncoder`.
 Those embeddings already carry the graph, the hardware features, and (with
 Physics Cross Attention) the dynamics. As a result, one policy outputs one
 action per joint for any robot the encoder can tokenize.
@@ -1022,7 +1022,7 @@ action per joint for any robot the encoder can tokenize.
                  flat state s ─┐                       │
                                └► Discriminator D(s,z) ◄┤
                                                        ▼
-URDF + q, q̇, … ─► GetEncoder ─► H [B, J, 512] ─► LatentMemory(z, context) ─► K/V tokens
+URDF + q, q̇, … ─► DaGetEncoder ─► H [B, J, 512] ─► LatentMemory(z, context) ─► K/V tokens
                                       │                               │
                                       ▼                               ▼
                         joint tokens (+ action embedding for F/Q) ── cross-attn → self-attn → FFN  × N
@@ -1082,7 +1082,7 @@ exists):
 
 | Field | Default | Meaning |
 |---|---|---|
-| `embedding_size` | required | `GetConfig.hidden_size` |
+| `embedding_size` | required | `DaGetConfig.hidden_size` |
 | `backward_input_size` | required | Flat state width read by B (and by D unless `discriminator_input_size` is set) |
 | `backward_input_keys`, `discriminator_input_keys` | `("state", "privileged_state")` | Keys concatenated when the observation is a dict |
 | `z_dim`, `norm_z` | 256, `True` | Latent size and its projection to the sphere |
@@ -1104,7 +1104,7 @@ Open questions for cross-embodiment training:
   natural next step, but here it is deliberately left as in BFM-Zero.
 - **Inputs to the GET tokens.** BFM-Zero's actor sees `state`, `last_action`,
   and a proprioceptive history. Here those go into the GET tokens: joint
-  history via `GetTokenizer`, and the last applied torque via the dynamics
+  history via `DaGetTokenizer`, and the last applied torque via the dynamics
   features. Base-level signals can go in as context tokens.
 - **What is not included.**
   - The training agent (replay buffers, FB, critic, discriminator, and actor
@@ -1119,11 +1119,11 @@ BY-NC 4.0); see `THIRD_PARTY_NOTICES.md`.
 
 ## Configuration reference
 
-`GetConfig` fields:
+`DaGetConfig` fields:
 
-| Field | Default | `GetConfig.get_zero` | Meaning |
+| Field | Default | `DaGetConfig.get_zero` | Meaning |
 |---|---|---|---|
-| `input_size` | required | required | Raw token width, `GetTokenizer.token_size` |
+| `input_size` | required | required | Raw token width, `DaGetTokenizer.token_size` |
 | `hidden_size` | 128 | 512 | Model width |
 | `num_hidden_layers` | 4 | 8 | Transformer layers |
 | `num_attention_heads` | 4 | 16 | Attention heads |
@@ -1167,9 +1167,9 @@ DA-GET-BFM/
 │   │                          # rotor thrust, torque estimation
 │   ├── physics_schema.py      # physics feature symbols, units, frames, scales, update tiers
 │   ├── physics.py             # ActuatorSpec, feature extraction, motor labels, PhysicsFeatureCache
-│   ├── tokenization_get.py    # GetTokenizer: GET-Zero token layout
-│   ├── configuration_get.py   # GetConfig and the get_zero preset
-│   ├── modeling_get.py        # GetEncoder, graph attention bias, Physics Cross Attention,
+│   ├── tokenization_get.py    # DaGetTokenizer: GET-Zero token layout
+│   ├── configuration_get.py   # DaGetConfig and the get_zero preset
+│   ├── modeling_get.py        # DaGetEncoder, graph attention bias, Physics Cross Attention,
 │   │                          # physics tokenizers, PhysicsMemory
 │   ├── pretraining.py         # GetForPhysicsPretraining (HF PreTrainedModel), heads A–F
 │   ├── configuration_bfm.py   # BfmConfig

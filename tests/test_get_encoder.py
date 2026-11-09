@@ -4,8 +4,8 @@ import unittest
 
 import torch
 
-from model.configuration_get import GetConfig
-from model.modeling_get import GetEncoder, GetGraphAttentionBias, graph_distances
+from model.configuration_get import DaGetConfig
+from model.modeling_get import DaGetEncoder, GetGraphAttentionBias, graph_distances
 
 
 class GetEncoderTest(unittest.TestCase):
@@ -18,7 +18,7 @@ class GetEncoderTest(unittest.TestCase):
             None: Resets the PyTorch random seed for this test.
         """
         torch.manual_seed(11)
-        self.config = GetConfig(
+        self.config = DaGetConfig(
             input_size=3,
             hidden_size=8,
             num_hidden_layers=2,
@@ -68,7 +68,7 @@ class GetEncoderTest(unittest.TestCase):
         Returns:
             None: Asserts the exact dynamic bias for a known matrix.
         """
-        config = GetConfig(
+        config = DaGetConfig(
             input_size=1,
             hidden_size=2,
             num_hidden_layers=1,
@@ -96,7 +96,7 @@ class GetEncoderTest(unittest.TestCase):
         Returns:
             None: Asserts output shape, padding, and gradient flow.
         """
-        encoder = GetEncoder(self.config).eval()
+        encoder = DaGetEncoder(self.config).eval()
         values = torch.randn(1, 4, 3, requires_grad=True)
         context = torch.randn(1, 3, 6)
         context_mask = torch.tensor([[True, True, False]])
@@ -151,14 +151,14 @@ class GetEncoderTest(unittest.TestCase):
         Returns:
             None: Asserts the graph encoding does not depend on token order.
         """
-        config = GetConfig(
+        config = DaGetConfig(
             input_size=3,
             hidden_size=8,
             num_hidden_layers=1,
             num_attention_heads=2,
             intermediate_size=16,
         )
-        encoder = GetEncoder(config).eval()
+        encoder = DaGetEncoder(config).eval()
         values = torch.randn(1, 3, 3)
         parents = torch.tensor([[-1, 0, 1]])
         mass = torch.eye(3).unsqueeze(0) + 0.2
@@ -179,7 +179,7 @@ class GetEncoderTest(unittest.TestCase):
         Returns:
             None: Asserts dynamic bias affects valid joint representations.
         """
-        config = GetConfig(
+        config = DaGetConfig(
             input_size=3,
             hidden_size=8,
             num_hidden_layers=1,
@@ -188,7 +188,7 @@ class GetEncoderTest(unittest.TestCase):
             use_spatial_encoding=False,
             use_parent_child_encoding=False,
         )
-        encoder = GetEncoder(config).eval()
+        encoder = DaGetEncoder(config).eval()
         values = torch.randn(1, 3, 3)
         parents = torch.tensor([[-1, 0, 1]])
         mass = torch.eye(3).unsqueeze(0)
@@ -204,7 +204,7 @@ class GetEncoderTest(unittest.TestCase):
         Returns:
             None: Asserts finite input mass gradients after backpropagation.
         """
-        encoder = GetEncoder(self.config)
+        encoder = DaGetEncoder(self.config)
         values = torch.randn(1, 4, 3)
         mass = self.mass.clone().requires_grad_()
         context = torch.randn(1, 2, 6)

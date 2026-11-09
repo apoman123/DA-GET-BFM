@@ -51,6 +51,9 @@ in the GET-Zero paper:
      LAFAN1.
    - **A config generator** that reads a URDF (and a dataset) and fills in the
      floating base, feet, rotors, propeller coefficients, and column mapping.
+6. **A cross-embodiment behavior foundation model.** BFM-Zero's FB-CPR
+   networks, with an actor and critics that read the GET joint embeddings,
+   cross-attend to the latent z, and output one action per DoF.
 
 ## Contents
 
@@ -74,6 +77,7 @@ in the GET-Zero paper:
 - [Writing data configs automatically](#writing-data-configs-automatically)
 - [Converting datasets](#converting-datasets)
 - [Recommended training datasets](#recommended-training-datasets)
+- [Behavior foundation model (BFM-Zero on GET)](#behavior-foundation-model-bfm-zero-on-get)
 - [Configuration reference](#configuration-reference)
 - [Repository layout](#repository-layout)
 - [Testing and validation](#testing-and-validation)
@@ -994,6 +998,122 @@ G1, H1, H1_2, Go1, and Go2 (`scripts/download_urdfs.py` fetches three).
   (exact torques, probes, limits);
 - held-out robots or randomized variants for evaluation.
 
+## Behavior foundation model (BFM-Zero on GET)
+
+This repo studies **cross-embodiment behavior foundation models**. It combines
+two references:
+- [BFM-Zero](https://lecar-lab.github.io/BFM-Zero/) (Li et al., 2025), a
+  promptable humanoid controller trained with FB-CPR (Tirinzoni et al., ICLR
+  2025) on forward-backward representations (Touati and Ollivier, NeurIPS
+  2021);
+- [GET-Zero](https://get-zero-paper.github.io/) (Patel and Song, ICRA 2025).
+
+BFM-Zero's networks read one flat state vector of a single robot (the G1).
+Here the actor and the critics read the per-DoF embeddings of `GetEncoder`.
+Those embeddings already carry the graph, the hardware features, and (with
+Physics Cross Attention) the dynamics. As a result, one policy outputs one
+action per joint for any robot the encoder can tokenize.
+
+```text
+                 flat state s ──► BackwardMap B(s) ──► z  (goal / tracking / reward prompt)
+                 flat state s ─┐                       │
+                               └► Discriminator D(s,z) ◄┤
+                                                       ▼
+URDF + q, q̇, … ─► GetEncoder ─► H [B, J, 512] ─► LatentMemory(z, context) ─► K/V tokens
+                                      │                               │
+                                      ▼                               ▼
+                        joint tokens (+ action embedding for F/Q) ── cross-attn → self-attn → FFN  × N
+                                      │
+                    ┌─────────────────┴────────────────────┐
+     actor: per-joint head → tanh → a [B, J]     F / critics: readout query + mean → [P, B, z_dim or 1]
+```
+
+| Network | BFM-Zero | Here |
+|---|---|---|
+| Backward map `B(s)` | MLP: Linear → LayerNorm → Tanh → Linear, normalized to radius `√z_dim` | **Unchanged** (`BackwardMap`) |
+| Discriminator `D(s, z)` | MLP on `[z, s]`, reward `log D − log(1−D)` | **Unchanged** (`Discriminator`) |
+| Actor `π(a \| s, z)` | Residual MLP on `[s, z]` → `tanh` mean, truncated normal | `GetBfmActor`: joint tokens cross-attend to latent tokens, then a per-DoF head gives a `tanh` mean and a truncated normal |
+| Forward map `F(s, a, z)` | Residual MLP, ensemble of 2, `z_dim` outputs | `GetForwardMap`: each joint token gets its own action, cross-attends to latent tokens, then the joints are pooled; ensemble of `num_parallel` |
+| Critic, aux critic `Q(s, a, z)` | Same as F with one output | `GetForwardMap(config, 1)` |
+
+Design details:
+- **Latent tokens.** A single z would give cross-attention just one key: the
+  softmax would then be constant and attention could not pick out anything.
+  So each latent is mapped to `num_latent_tokens` tokens, each with a learned
+  slot embedding.
+  - A latent sequence `[B, L, z_dim]` (for example `B(s)` of upcoming
+    reference frames) also gets sinusoidal positions.
+  - Optional context tokens (base state, history) are appended to the same
+    memory (`context_size`).
+- **Padding and order.** Padded joints are masked everywhere and output zero
+  actions. There are no joint positions, so permuting the joints permutes the
+  actions and leaves `F` and `Q` unchanged (both are tested).
+- **Unchanged from BFM-Zero:**
+  - output layouts (`[num_parallel, batch, out]`);
+  - `TruncatedNormal.sample(clip=…)`;
+  - orthogonal initialization (`init_weights`);
+  - latent sampling on the sphere;
+  - goal, reward, weighted-reward, and tracking inference.
+
+  The FB-CPR training losses can therefore be ported as they are.
+
+```python
+from model import BfmConfig, GetBfmModel
+
+# hidden, batch from the quick start above
+config = BfmConfig(embedding_size=hidden.shape[-1], backward_input_size=state_dim)
+bfm = GetBfmModel(config)
+bfm.init_weights()
+
+z = bfm.goal_inference(goal_state)                       # or tracking_inference / reward_inference
+action = bfm.act(hidden, z, batch.joint_mask)            # [2, 19], one command per DoF, padded = 0
+dist = bfm.actor(hidden, z, config.actor_std, batch.joint_mask)
+F = bfm.forward_map(hidden, z, dist.sample(clip=0.3), batch.joint_mask)   # [2, 2, 256]
+q_fb = bfm.fb_q_value(F, z)                              # Fᵀz, [2, 2]
+q_cpr = bfm.critic(hidden, z, action, batch.joint_mask)  # [2, 2, 1]
+reward = bfm.discriminator.compute_reward(state, z)      # CPR reward
+```
+
+`BfmConfig` fields (defaults follow BFM-Zero's G1 configuration where one
+exists):
+
+| Field | Default | Meaning |
+|---|---|---|
+| `embedding_size` | required | `GetConfig.hidden_size` |
+| `backward_input_size` | required | Flat state width read by B (and by D unless `discriminator_input_size` is set) |
+| `backward_input_keys`, `discriminator_input_keys` | `("state", "privileged_state")` | Keys concatenated when the observation is a dict |
+| `z_dim`, `norm_z` | 256, `True` | Latent size and its projection to the sphere |
+| `hidden_size`, `num_attention_heads`, `intermediate_size` | 256, 4, 1024 | Actor and critic token width |
+| `num_latent_tokens` | 8 | Tokens per latent vector |
+| `actor_layers`, `forward_layers` | 4, 4 | Latent-conditioned blocks |
+| `num_parallel` | 2 | Ensemble size of F and the critics |
+| `action_size_per_joint` | 1 | Action entries per DoF |
+| `context_size` | `None` | Width of extra context tokens |
+| `backward_hidden_size`, `backward_hidden_layers`, `backward_norm` | 256, 1, `True` | B MLP (BFM-Zero) |
+| `discriminator_hidden_size`, `discriminator_hidden_layers` | 1024, 3 | D MLP (BFM-Zero) |
+| `actor_std`, `seq_length` | 0.05, 8 | Policy std, tracking window |
+
+Open questions for cross-embodiment training:
+- **B and D are unchanged, so they still need one flat state layout.** For
+  several robots, use either an embodiment-agnostic state (for example base
+  and keypoint features in a shared frame) or a padded layout. Only then do
+  all robots share one z space. Replacing B with a GET-based set encoder is a
+  natural next step, but here it is deliberately left as in BFM-Zero.
+- **Inputs to the GET tokens.** BFM-Zero's actor sees `state`, `last_action`,
+  and a proprioceptive history. Here those go into the GET tokens: joint
+  history via `GetTokenizer`, and the last applied torque via the dynamics
+  features. Base-level signals can go in as context tokens.
+- **What is not included.**
+  - The training agent (replay buffers, FB, critic, discriminator, and actor
+    updates, and target networks) is not part of this module. The update rules
+    are those of FB-CPR / BFM-Zero.
+  - BFM-Zero's observation normalizer (`BatchNorm` with momentum 0.01 on each
+    observation key) is also left out. Normalize the flat states before
+    passing them to B and D.
+
+The B, D, and truncated-normal code is adapted from BFM-Zero (Meta's code, CC
+BY-NC 4.0); see `THIRD_PARTY_NOTICES.md`.
+
 ## Configuration reference
 
 `GetConfig` fields:
@@ -1049,6 +1169,8 @@ DA-GET-BFM/
 │   ├── modeling_get.py        # GetEncoder, graph attention bias, Physics Cross Attention,
 │   │                          # physics tokenizers, PhysicsMemory
 │   ├── pretraining.py         # GetForPhysicsPretraining (HF PreTrainedModel), heads A–F
+│   ├── configuration_bfm.py   # BfmConfig
+│   ├── modeling_bfm.py        # BFM-Zero B, D, and GET-conditioned actor, F, critics; GetBfmModel
 │   ├── transformer.py         # attention and cross-attention blocks
 │   ├── robot_analysis.py      # infer floating base, feet, rotors, propellers from a URDF
 │   ├── conversion/
@@ -1075,6 +1197,7 @@ DA-GET-BFM/
 ├── tests/                     # unit tests (see below)
 ├── raw/                       # source material (the GET-Zero project page)
 ├── graphify-out/              # knowledge graph of the code and paper
+├── THIRD_PARTY_NOTICES.md     # attribution for adapted code
 ├── pyproject.toml
 └── uv.lock
 ```
@@ -1086,7 +1209,7 @@ uv sync --all-extras
 uv run pytest
 ```
 
-The suite has 75 tests (the MuJoCo and HDF5 tests are skipped without the
+The suite has 84 tests (the MuJoCo and HDF5 tests are skipped without the
 `sim` and `validation` extras):
 
 - `test_embodiment.py`: URDF graphs, features, kinematics, mass matrix,
@@ -1124,6 +1247,14 @@ The suite has 75 tests (the MuJoCo and HDF5 tests are skipped without the
   - column-to-joint matching;
   - the URDF analysis of quadrupeds, bipeds, multirotors, and arms;
   - the config generator, end to end into a dataset.
+- `test_bfm.py`:
+  - shapes and BFM-Zero conventions of B, D, the actor, F, and the critics;
+  - dict observations;
+  - padding invariance and joint-permutation equivariance;
+  - conditioning on z, latent sequences, and context tokens;
+  - goal, reward, and tracking inference;
+  - straight-through truncated-normal gradients;
+  - an FB actor loss that reaches the GET encoder.
 - `test_pretraining.py`:
   - both data sources and caching;
   - collation and masks;
@@ -1241,6 +1372,25 @@ with `/graphify . --update`.
 - Austin Patel and Shuran Song. *GET-Zero: Graph Embodiment Transformer for
   Zero-shot Embodiment Generalization.* ICRA 2025.
   [Project page](https://get-zero-paper.github.io/).
+- Yitang Li, Zhengyi Luo, Tonghe Zhang, Cunxi Dai, Anssi Kanervisto, Andrea
+  Tirinzoni, Haoyang Weng, Kris Kitani, Mateusz Guzek, Ahmed Touati, Alessandro
+  Lazaric, Matteo Pirotta, and Guanya Shi. *BFM-Zero: A Promptable Behavioral
+  Foundation Model for Humanoid Control Using Unsupervised Reinforcement
+  Learning.* arXiv:2511.04131, 2025.
+  [Project page](https://lecar-lab.github.io/BFM-Zero/),
+  [code](https://github.com/LeCAR-Lab/BFM-Zero).
+- Andrea Tirinzoni, Ahmed Touati, Jesse Farebrother, Mateusz Guzek, Anssi
+  Kanervisto, Yingchen Xu, Alessandro Lazaric, and Matteo Pirotta. *Zero-Shot
+  Whole-Body Humanoid Control via Behavioral Foundation Models.* ICLR 2025,
+  arXiv:2504.11054 (FB-CPR, Meta Motivo).
+- Ahmed Touati and Yann Ollivier. *Learning One Representation to Optimize All
+  Rewards.* NeurIPS 2021 (forward-backward representations).
+- Denis Yarats, Rob Fergus, Alessandro Lazaric, and Lerrel Pinto. *Mastering
+  Visual Continuous Control: Improved Data-Augmented Reinforcement Learning.*
+  ICLR 2022 (truncated-normal policy).
+- Scott Fujimoto, Herke van Hoof, and David Meger. *Addressing Function
+  Approximation Error in Actor-Critic Methods.* ICML 2018 (clipped policy
+  noise).
 - Roy Featherstone. *Rigid Body Dynamics Algorithms.* Springer, 2008 (RNEA,
   floating-base dynamics).
 - Taeyoung Lee, Melvin Leok, and N. Harris McClamroch. *Geometric Tracking
@@ -1249,3 +1399,24 @@ with `/graphify . --update`.
   IROS 2023 (MIPO data used for validation).
 - Yi Zhou et al. *On the Continuity of Rotation Representations in Neural
   Networks.* CVPR 2019 (6D rotations).
+
+BibTeX for the two main references:
+
+```bibtex
+@inproceedings{patel2025getzero,
+  title     = {{GET-Zero}: Graph Embodiment Transformer for Zero-shot Embodiment Generalization},
+  author    = {Patel, Austin and Song, Shuran},
+  booktitle = {IEEE International Conference on Robotics and Automation (ICRA)},
+  year      = {2025}
+}
+
+@misc{li2025bfmzero,
+  title         = {{BFM-Zero}: A Promptable Behavioral Foundation Model for Humanoid Control Using Unsupervised Reinforcement Learning},
+  author        = {Yitang Li and Zhengyi Luo and Tonghe Zhang and Cunxi Dai and Anssi Kanervisto and Andrea Tirinzoni and Haoyang Weng and Kris Kitani and Mateusz Guzek and Ahmed Touati and Alessandro Lazaric and Matteo Pirotta and Guanya Shi},
+  year          = {2025},
+  eprint        = {2511.04131},
+  archivePrefix = {arXiv},
+  primaryClass  = {cs.RO},
+  url           = {https://arxiv.org/abs/2511.04131}
+}
+```

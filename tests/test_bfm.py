@@ -124,7 +124,7 @@ class BfmNetworksTest(unittest.TestCase):
         torch.testing.assert_close(loc.grad, torch.ones_like(loc))
 
 
-class GetEncoderToActorTest(unittest.TestCase):
+class DaGetEncoderToActorTest(unittest.TestCase):
     """The actor and F train end to end through the GET encoder."""
 
     def test_td3_style_update_reaches_encoder(self) -> None:

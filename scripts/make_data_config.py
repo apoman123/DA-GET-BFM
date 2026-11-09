@@ -108,7 +108,7 @@ def build_config(arguments: argparse.Namespace) -> dict:
             print("mujoco ground-contact source added (needs `uv sync --extra sim`)")
     if not sources:
         raise SystemExit("nothing to write: pass --dataset and/or --synthetic")
-    return {"history_size": 3, "joint_features": "get_zero", "eval_fraction": 0.05, "seed": 0, "sources": sources}
+    return {"history_size": 3, "joint_features": "da_get_zero", "eval_fraction": 0.05, "seed": 0, "sources": sources}
 
 
 def main() -> None:

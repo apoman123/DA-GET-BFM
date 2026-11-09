@@ -18,7 +18,7 @@ import torch
 from torch import nn
 from torch.nn import functional
 
-from model.configuration_get import DaGetConfig
+from model.configuration_da_get import DaGetConfig
 from model.physics_schema import feature_scales
 from model.transformer import AttentionBlock, CrossAttentionBlock
 
@@ -358,7 +358,7 @@ class PhysicsMemory:
     parameter_versions: tuple[int, ...]
 
 
-class GetGraphAttentionBias(nn.Module):
+class DaGetGraphAttentionBias(nn.Module):
     """Learn per-head spatial, parent, child, and normalized mass logit biases.
 
     Attributes:
@@ -477,11 +477,11 @@ class GetGraphAttentionBias(nn.Module):
         )
 
 
-class GetEncoderLayer(nn.Module):
+class DaGetEncoderLayer(nn.Module):
     """Apply graph self-attention, optional context attention, and an MLP.
 
     Attributes:
-        graph_bias (GetGraphAttentionBias): Per-head logit bias module.
+        graph_bias (DaGetGraphAttentionBias): Per-head logit bias module.
         self_attention (AttentionBlock): Pre-normalized joint self-attention.
         physics_attention (PhysicsCrossAttention | None): Physics Cross Attention.
         cross_attention (CrossAttentionBlock | None): Optional context attention.
@@ -507,7 +507,7 @@ class GetEncoderLayer(nn.Module):
             None: Registers attention and feed-forward modules.
         """
         super().__init__()
-        self.graph_bias = GetGraphAttentionBias(config)
+        self.graph_bias = DaGetGraphAttentionBias(config)
         self.self_attention = AttentionBlock(
             config.hidden_size, config.num_attention_heads, config.hidden_dropout_prob
         )
@@ -620,7 +620,7 @@ class DaGetEncoder(nn.Module):
         self.input_projection = nn.Linear(config.input_size, config.hidden_size)
         physics_layers = config.physics_layers
         self.layers = nn.ModuleList(
-            GetEncoderLayer(
+            DaGetEncoderLayer(
                 config,
                 index in config.cross_attention_layers,
                 index in physics_layers,

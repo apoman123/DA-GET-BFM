@@ -310,11 +310,11 @@ class FloatingPipelineTest(unittest.TestCase):
         for name, value in batch.items():
             self.assertTrue(torch.isfinite(value.float()).all(), name)
         from model import DaGetConfig
-        from model.pretraining import GetForPhysicsPretraining, GetPhysicsPretrainingConfig
+        from model.pretraining import DaGetForPhysicsPretraining, DaGetPhysicsPretrainingConfig
 
         encoder = DaGetConfig(input_size=datasets.token_size, hidden_size=32, num_attention_heads=4,
                             num_hidden_layers=1, intermediate_size=64, use_physics_cross_attention=True)
-        model = GetForPhysicsPretraining(GetPhysicsPretrainingConfig.from_encoder_config(encoder))
+        model = DaGetForPhysicsPretraining(DaGetPhysicsPretrainingConfig.from_encoder_config(encoder))
         output = model(**batch)
         self.assertIn("fd_base_acceleration", output.predictions)
         self.assertTrue(torch.isfinite(output.loss))

@@ -61,7 +61,7 @@ class DaGetConfig:
     physics_tokenizer_hidden_size: int | None = None
 
     @classmethod
-    def get_zero(cls, input_size: int, **overrides: object) -> "DaGetConfig":
+    def da_get_zero(cls, input_size: int, **overrides: object) -> "DaGetConfig":
         """Return the GET-Zero LEAP Hand architecture for a token width.
 
         The paper's model uses 8 layers, 16 heads, width 512, feed-forward

@@ -1,7 +1,7 @@
 """Pretrain the GET encoder with auxiliary physics heads (Hugging Face compatible).
 
 The encoder produces one embedding ``H_{t,i}`` per joint. Six auxiliary tasks
-train it; their weights are set in ``GetPhysicsPretrainingConfig``:
+train it; their weights are set in ``DaGetPhysicsPretrainingConfig``:
 
 A. Forward kinematics: ``f_FK(H_i) -> (p_i, R_i)`` of every joint frame in the
    root frame. Positions are divided by the robot's characteristic length so
@@ -46,8 +46,8 @@ from torch.nn import functional
 from transformers import PretrainedConfig, PreTrainedModel
 from transformers.utils import ModelOutput
 
-from model.configuration_get import DaGetConfig
-from model.modeling_get import DaGetEncoder, GetEncoderLayer
+from model.configuration_da_get import DaGetConfig
+from model.modeling_da_get import DaGetEncoder, DaGetEncoderLayer
 
 LOSS_NAMES = ("fk", "fd", "id", "motor", "effect", "rbd")
 MOTOR_FLAG_COUNT = 2
@@ -55,7 +55,7 @@ MOTOR_MARGIN_COUNT = 5
 ACTION_FEATURE_SIZE = 3
 
 
-class GetPhysicsPretrainingConfig(PretrainedConfig):
+class DaGetPhysicsPretrainingConfig(PretrainedConfig):
     """Configure the encoder, the auxiliary heads, and the loss weights.
 
     Attributes:
@@ -141,7 +141,7 @@ class GetPhysicsPretrainingConfig(PretrainedConfig):
         return DaGetConfig(**{key: value for key, value in self.encoder.items() if key in valid})
 
     @classmethod
-    def from_encoder_config(cls, encoder: DaGetConfig, **kwargs: Any) -> GetPhysicsPretrainingConfig:
+    def from_encoder_config(cls, encoder: DaGetConfig, **kwargs: Any) -> DaGetPhysicsPretrainingConfig:
         """Build from a ``DaGetConfig``.
 
         Args:
@@ -149,14 +149,14 @@ class GetPhysicsPretrainingConfig(PretrainedConfig):
             **kwargs (Any): Other fields.
 
         Returns:
-            GetPhysicsPretrainingConfig: Configuration.
+            DaGetPhysicsPretrainingConfig: Configuration.
         """
         return cls(encoder=asdict(encoder), **kwargs)
 
 
 @dataclass
-class GetPhysicsPretrainingOutput(ModelOutput):
-    """Outputs of ``GetForPhysicsPretraining``.
+class DaGetPhysicsPretrainingOutput(ModelOutput):
+    """Outputs of ``DaGetForPhysicsPretraining``.
 
     Attributes:
         loss (torch.Tensor | None): Weighted total loss.
@@ -269,7 +269,7 @@ class GraphActionMixer(nn.Module):
             use_physics_cross_attention=False,
             physics_cross_attention_layers=None,
         )
-        self.layers = nn.ModuleList(GetEncoderLayer(mixing_config, False) for _ in range(layers))
+        self.layers = nn.ModuleList(DaGetEncoderLayer(mixing_config, False) for _ in range(layers))
         self.norm = nn.LayerNorm(hidden)
 
     def forward(
@@ -297,7 +297,7 @@ class GraphActionMixer(nn.Module):
         return self.norm(hidden)
 
 
-class GetForPhysicsPretraining(PreTrainedModel):
+class DaGetForPhysicsPretraining(PreTrainedModel):
     """GET encoder with the auxiliary physics heads A-F.
 
     ``forward`` takes the batch produced by
@@ -306,15 +306,15 @@ class GetForPhysicsPretraining(PreTrainedModel):
     only, for downstream use.
     """
 
-    config_class = GetPhysicsPretrainingConfig
+    config_class = DaGetPhysicsPretrainingConfig
     base_model_prefix = "encoder"
     main_input_name = "input_values"
 
-    def __init__(self, config: GetPhysicsPretrainingConfig) -> None:
+    def __init__(self, config: DaGetPhysicsPretrainingConfig) -> None:
         """Build the encoder and heads.
 
         Args:
-            config (GetPhysicsPretrainingConfig): Configuration.
+            config (DaGetPhysicsPretrainingConfig): Configuration.
         """
         super().__init__(config)
         encoder_config = config.encoder_config
@@ -392,7 +392,7 @@ class GetForPhysicsPretraining(PreTrainedModel):
             physics_memory=physics_memory,
         )
 
-    def forward(self, **batch: torch.Tensor) -> GetPhysicsPretrainingOutput:
+    def forward(self, **batch: torch.Tensor) -> DaGetPhysicsPretrainingOutput:
         """Encode a batch and compute every auxiliary loss with labels present.
 
         Args:
@@ -400,7 +400,7 @@ class GetForPhysicsPretraining(PreTrainedModel):
                 each task's loss is computed only if its labels are present.
 
         Returns:
-            GetPhysicsPretrainingOutput: Loss, components, embeddings, predictions.
+            DaGetPhysicsPretrainingOutput: Loss, components, embeddings, predictions.
         """
         config = self.config
         eps = config.epsilon
@@ -525,7 +525,7 @@ class GetForPhysicsPretraining(PreTrainedModel):
         loss = None
         if losses:
             loss = sum(config.loss_weights.get(name, 0.0) * value for name, value in losses.items())
-        return GetPhysicsPretrainingOutput(
+        return DaGetPhysicsPretrainingOutput(
             loss=loss,
             joint_embeddings=embeddings,
             pooled_embedding=pooled,

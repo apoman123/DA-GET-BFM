@@ -4,7 +4,7 @@ A JSON data config lists trajectory sources and the observation layout::
 
     {
       "history_size": 3,
-      "joint_features": "get_zero",
+      "joint_features": "da_get_zero",
       "eval_fraction": 0.05,
       "seed": 0,
       "allow_estimated_torque_for_fd": true,
@@ -45,7 +45,7 @@ from torch.utils.data import Dataset
 
 from model.embodiment import JointFeatureConfig, collate_embodiments
 from model.physics import EPSILON
-from model.tokenization_get import DaGetTokenizer
+from model.tokenization_da_get import DaGetTokenizer
 from model.training.episodes import (
     BASE_FEATURE_SIZE,
     EmbodimentRecord,
@@ -64,14 +64,14 @@ def joint_feature_config(value: str | dict | None) -> JointFeatureConfig:
     """Parse the ``joint_features`` entry of a data config.
 
     Args:
-        value (str | dict | None): ``"get_zero"``, ``"cross_embodiment"``, or
+        value (str | dict | None): ``"da_get_zero"``, ``"cross_embodiment"``, or
             ``JointFeatureConfig`` fields.
 
     Returns:
         JointFeatureConfig: Hardware features of observation tokens.
     """
-    if value in (None, "get_zero"):
-        return JointFeatureConfig.get_zero()
+    if value in (None, "da_get_zero"):
+        return JointFeatureConfig.da_get_zero()
     if value == "cross_embodiment":
         return JointFeatureConfig.cross_embodiment()
     if isinstance(value, dict):
@@ -345,7 +345,7 @@ def _pad(values: Sequence[torch.Tensor], joint_count: int, dims: int = 1, fill: 
 
 
 class PhysicsDataCollator:
-    """Pad samples of different robots into one batch for ``GetForPhysicsPretraining``.
+    """Pad samples of different robots into one batch for ``DaGetForPhysicsPretraining``.
 
     The output holds encoder inputs (tokens, graph structure, mass matrix,
     physics features) and, for each task, normalized targets and masks.
@@ -407,7 +407,7 @@ class PhysicsDataCollator:
             samples (Sequence[dict]): Dataset items.
 
         Returns:
-            dict[str, torch.Tensor]: Batch for ``GetForPhysicsPretraining.forward``.
+            dict[str, torch.Tensor]: Batch for ``DaGetForPhysicsPretraining.forward``.
         """
         embodiments = [sample["embodiment"] for sample in samples]
         graphs = [self.records[index].graph for index in embodiments]

@@ -4,13 +4,13 @@ Examples::
 
     # Synthetic, domain-randomized data for three Unitree robots
     uv run python scripts/download_urdfs.py
-    uv run python scripts/train_physics_get.py \\
+    uv run python scripts/train_physics_da_get.py \\
         --data_config configs/data/synthetic_unitree.json \\
         --output_dir runs/synthetic --max_steps 2000 --per_device_train_batch_size 64
 
     # Recorded Unitree G1 teleoperation data from the Hugging Face Hub, mixed
     # with synthetic data
-    uv run python scripts/train_physics_get.py \\
+    uv run python scripts/train_physics_da_get.py \\
         --data_config configs/data/g1_hub_plus_synthetic.json --output_dir runs/g1
 
 Every ``transformers.TrainingArguments`` option works (``--learning_rate``,
@@ -31,10 +31,10 @@ if str(ROOT) not in sys.path:
 
 from transformers import HfArgumentParser, TrainingArguments, set_seed  # noqa: E402
 
-from model.configuration_get import DaGetConfig  # noqa: E402
+from model.configuration_da_get import DaGetConfig  # noqa: E402
 from model.pretraining import (  # noqa: E402
-    GetForPhysicsPretraining,
-    GetPhysicsPretrainingConfig,
+    DaGetForPhysicsPretraining,
+    DaGetPhysicsPretrainingConfig,
 )
 from model.training import PhysicsPretrainingTrainer, build_physics_datasets  # noqa: E402
 
@@ -45,7 +45,7 @@ class ModelArguments:
 
     preset: str = field(
         default="small",
-        metadata={"help": "'small' (128 wide, 4 layers) or 'get_zero' (paper size, 512 wide, 8 layers)."},
+        metadata={"help": "'small' (128 wide, 4 layers) or 'da_get_zero' (paper size, 512 wide, 8 layers)."},
     )
     hidden_size: int | None = field(default=None, metadata={"help": "Override the preset width."})
     num_hidden_layers: int | None = field(default=None, metadata={"help": "Override the preset depth."})
@@ -80,14 +80,14 @@ class DataArguments:
 
 def encoder_config(arguments: ModelArguments, input_size: int) -> DaGetConfig:
     """Build the encoder configuration from the preset and overrides."""
-    if arguments.preset == "get_zero":
+    if arguments.preset == "da_get_zero":
         values = {"hidden_size": 512, "num_hidden_layers": 8, "num_attention_heads": 16,
                   "intermediate_size": 1024, "hidden_dropout_prob": 0.1}
     elif arguments.preset == "small":
         values = {"hidden_size": 128, "num_hidden_layers": 4, "num_attention_heads": 4,
                   "intermediate_size": 512, "hidden_dropout_prob": 0.0}
     else:
-        raise ValueError("preset must be 'small' or 'get_zero'")
+        raise ValueError("preset must be 'small' or 'da_get_zero'")
     for name in ("hidden_size", "num_hidden_layers", "num_attention_heads", "intermediate_size"):
         if getattr(arguments, name) is not None:
             values[name] = getattr(arguments, name)
@@ -125,11 +125,11 @@ def main() -> None:
         f"eval samples: {len(datasets.eval) if datasets.eval else 0}, token size: {datasets.token_size}"
     )
     if model_args.init_from:
-        model = GetForPhysicsPretraining.from_pretrained(model_args.init_from)
+        model = DaGetForPhysicsPretraining.from_pretrained(model_args.init_from)
         if model.config.encoder["input_size"] != datasets.token_size:
             raise ValueError("checkpoint token size does not match the data config")
     else:
-        config = GetPhysicsPretrainingConfig.from_encoder_config(
+        config = DaGetPhysicsPretrainingConfig.from_encoder_config(
             encoder_config(model_args, datasets.token_size),
             head_hidden_size=model_args.head_hidden_size,
             mixing_layers=model_args.mixing_layers,
@@ -144,7 +144,7 @@ def main() -> None:
             },
             token_layout=datasets.token_layout(),
         )
-        model = GetForPhysicsPretraining(config)
+        model = DaGetForPhysicsPretraining(config)
     print(f"parameters: {sum(parameter.numel() for parameter in model.parameters()) / 1e6:.2f}M")
     trainer = PhysicsPretrainingTrainer(
         model=model,

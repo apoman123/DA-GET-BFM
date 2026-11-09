@@ -33,7 +33,7 @@ from typing import Literal, Mapping, Sequence
 
 import torch
 
-from model.modeling_get import graph_distances
+from model.modeling_da_get import graph_distances
 from model.urdf import (
     UrdfJoint,
     UrdfRobot,
@@ -95,7 +95,7 @@ class JointFeatureConfig:
             raise ValueError("rotation_representation must be 'rpy' or 'rot6d'")
 
     @classmethod
-    def get_zero(cls) -> JointFeatureConfig:
+    def da_get_zero(cls) -> JointFeatureConfig:
         """Return the paper's hardware features: joint origin and rotation.
 
         Returns:

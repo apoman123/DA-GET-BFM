@@ -10,7 +10,7 @@ from transformers import Trainer
 
 
 class PhysicsPretrainingTrainer(Trainer):
-    """Trainer for ``GetForPhysicsPretraining``.
+    """Trainer for ``DaGetForPhysicsPretraining``.
 
     Besides the weighted total ``loss``, it logs the running mean of each task
     loss as ``loss_fk``, ``loss_fd``, ``loss_id``, ``loss_motor``,

@@ -145,7 +145,7 @@ from model.physics import PhysicsFeatureCache, actuator_specs
 
 # 1. One graph per robot, built from URDF. Legged URDFs usually start at the
 #    trunk without a floating joint, so say that the base is floating.
-features = JointFeatureConfig.get_zero()
+features = JointFeatureConfig.da_get_zero()
 graphs = [
     EmbodimentGraph.from_urdf("assets/urdf/go1.urdf", features, floating_base=True),  # quadruped, 12 DoF
     EmbodimentGraph.from_urdf("assets/urdf/h1.urdf", features, floating_base=True),   # humanoid, 19 DoF
@@ -170,7 +170,7 @@ tokens = tokenizer(
 
 # 4. Encode.
 encoder = DaGetEncoder(
-    DaGetConfig.get_zero(input_size=tokenizer.token_size, use_physics_cross_attention=True)
+    DaGetConfig.da_get_zero(input_size=tokenizer.token_size, use_physics_cross_attention=True)
 ).eval()
 memory = encoder.build_physics_memory(               # cache rigid-body and actuator keys/values
     physics.rigid_body_features, physics.actuator_features, batch.joint_mask
@@ -190,7 +190,7 @@ hidden = encoder(
 Pretraining in one command (details below):
 
 ```bash
-uv run python scripts/train_physics_get.py \
+uv run python scripts/train_physics_da_get.py \
     --data_config configs/data/synthetic_unitree.json \
     --output_dir runs/synthetic --max_steps 2000 --per_device_train_batch_size 64
 ```
@@ -304,7 +304,7 @@ oldest first. Padded joints get all-zero tokens.
 
 ### 5. Encoder and attention bias
 
-`DaGetEncoder` (`model/modeling_get.py`) runs:
+`DaGetEncoder` (`model/modeling_da_get.py`) runs:
 
 1. A LayerNorm over each raw token, as in GET-Zero, because token features have
    very different scales.
@@ -639,7 +639,7 @@ therefore lies in things kinematics cannot fix:
 
 ## Physics pretraining
 
-`GetForPhysicsPretraining` (`model/pretraining.py`) is a Hugging Face
+`DaGetForPhysicsPretraining` (`model/pretraining.py`) is a Hugging Face
 `PreTrainedModel`, so `save_pretrained`, `from_pretrained`, and `push_to_hub`
 all work. It wraps the encoder with six heads. `N_e` is the number of valid
 joints of a sample's robot. Every per-joint loss is averaged per robot first,
@@ -688,7 +688,7 @@ Notes on the design:
 
 Weights: `--fk_weight`, `--fd_weight`, `--id_weight`, `--motor_weight`,
 `--effect_weight`, `--rbd_weight`, plus the `lambda_*` fields of
-`GetPhysicsPretrainingConfig` (including `lambda_base_acceleration`).
+`DaGetPhysicsPretrainingConfig` (including `lambda_base_acceleration`).
 
 ## Training with the Hugging Face Trainer
 
@@ -696,18 +696,18 @@ Weights: `--fk_weight`, `--fd_weight`, `--id_weight`, `--motor_weight`,
 uv run python scripts/download_urdfs.py
 
 # 1. Synthetic Go1, H1, and G1, each with fixed-base and floating-base episodes
-uv run python scripts/train_physics_get.py \
+uv run python scripts/train_physics_da_get.py \
     --data_config configs/data/synthetic_unitree.json \
     --output_dir runs/synthetic --max_steps 2000 \
     --per_device_train_batch_size 64 --learning_rate 5e-4 --warmup_steps 100 \
     --eval_strategy steps --eval_steps 500 --logging_steps 50
 
 # 2. Real floating-base humanoid data (Unitree G1 whole-body teleoperation) + synthetic G1
-uv run python scripts/train_physics_get.py \
+uv run python scripts/train_physics_da_get.py \
     --data_config configs/data/g1_wbt_floating.json --output_dir runs/g1_wbt
 
 # 3. Multirotor flight (synthetic quadrotor with randomized size and mass)
-uv run python scripts/train_physics_get.py \
+uv run python scripts/train_physics_da_get.py \
     --data_config configs/data/quadrotor_flight.json --output_dir runs/quadrotor
 ```
 
@@ -715,7 +715,7 @@ Several data configs can be merged into one by listing all their sources, for
 example to pretrain on legged, humanoid, and flying robots together. Every
 `TrainingArguments` flag works, including multi-GPU runs through
 `accelerate launch`. The script adds model flags:
-- `--preset small|get_zero`, plus width, depth, and head overrides;
+- `--preset small|da_get_zero`, plus width, depth, and head overrides;
 - `--physics_cross_attention false` for an ablation;
 - `--physics_layers 0,2`, `--mass_encoding`, `--mixing_layers`;
 - `--fk_orientation false`, and the task weights.
@@ -726,8 +726,8 @@ The Trainer logs `loss_fk`, `loss_fd`, `loss_id`, `loss_motor`, `loss_effect`,
 Load the encoder for downstream use with:
 
 ```python
-from model.pretraining import GetForPhysicsPretraining
-model = GetForPhysicsPretraining.from_pretrained("runs/g1_wbt")
+from model.pretraining import DaGetForPhysicsPretraining
+model = DaGetForPhysicsPretraining.from_pretrained("runs/g1_wbt")
 embeddings = model.encode(**batch)          # [B, J, hidden]; or model.encoder directly
 ```
 
@@ -738,7 +738,7 @@ A data config is JSON. Relative paths start from the config file.
 ```json
 {
   "history_size": 3,
-  "joint_features": "get_zero",
+  "joint_features": "da_get_zero",
   "eval_fraction": 0.05,
   "allow_estimated_torque_for_fd": true,
   "use_estimated_previous_torque": true,
@@ -834,7 +834,7 @@ estimation is needed.
 
 ```bash
 uv sync --extra sim
-uv run python scripts/train_physics_get.py --data_config configs/data/ground_contact.json --output_dir runs/ground
+uv run python scripts/train_physics_da_get.py --data_config configs/data/ground_contact.json --output_dir runs/ground
 ```
 
 `configs/data/ground_contact.json` has standing poses and foot geometry for
@@ -1121,7 +1121,7 @@ BY-NC 4.0); see `THIRD_PARTY_NOTICES.md`.
 
 `DaGetConfig` fields:
 
-| Field | Default | `DaGetConfig.get_zero` | Meaning |
+| Field | Default | `DaGetConfig.da_get_zero` | Meaning |
 |---|---|---|---|
 | `input_size` | required | required | Raw token width, `DaGetTokenizer.token_size` |
 | `hidden_size` | 128 | 512 | Model width |
@@ -1167,11 +1167,11 @@ DA-GET-BFM/
 │   │                          # rotor thrust, torque estimation
 │   ├── physics_schema.py      # physics feature symbols, units, frames, scales, update tiers
 │   ├── physics.py             # ActuatorSpec, feature extraction, motor labels, PhysicsFeatureCache
-│   ├── tokenization_get.py    # DaGetTokenizer: GET-Zero token layout
-│   ├── configuration_get.py   # DaGetConfig and the get_zero preset
-│   ├── modeling_get.py        # DaGetEncoder, graph attention bias, Physics Cross Attention,
+│   ├── tokenization_da_get.py # DaGetTokenizer: GET-Zero token layout
+│   ├── configuration_da_get.py # DaGetConfig and the da_get_zero preset
+│   ├── modeling_da_get.py     # DaGetEncoder, graph attention bias, Physics Cross Attention,
 │   │                          # physics tokenizers, PhysicsMemory
-│   ├── pretraining.py         # GetForPhysicsPretraining (HF PreTrainedModel), heads A–F
+│   ├── pretraining.py         # DaGetForPhysicsPretraining (HF PreTrainedModel), heads A–F
 │   ├── configuration_bfm.py   # BfmConfig
 │   ├── modeling_bfm.py        # BFM-Zero B, D, and GET-conditioned actor, F, critics; DaGetBfmModel
 │   ├── transformer.py         # attention and cross-attention blocks
@@ -1190,7 +1190,7 @@ DA-GET-BFM/
 │   │   └── trainer.py         # Trainer that logs each task loss
 │   └── README.md              # module-level technical notes
 ├── scripts/
-│   ├── train_physics_get.py          # HF Trainer entry point
+│   ├── train_physics_da_get.py       # HF Trainer entry point
 │   ├── make_data_config.py           # write a data config from a URDF and a dataset
 │   ├── convert_dataset.py            # convert public datasets to the table format
 │   ├── validate_torque_estimation.py # estimated vs measured torques on a real Go1
@@ -1217,7 +1217,7 @@ The suite has 84 tests (the MuJoCo and HDF5 tests are skipped without the
 
 - `test_embodiment.py`: URDF graphs, features, kinematics, mass matrix,
   batching, padding invariance.
-- `test_get_encoder.py`, `test_transformer.py`: the encoder and its building
+- `test_da_get_encoder.py`, `test_transformer.py`: the encoder and its building
   blocks.
 - `test_physics.py`:
   - RNEA against closed forms and identities;

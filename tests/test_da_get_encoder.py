@@ -4,11 +4,11 @@ import unittest
 
 import torch
 
-from model.configuration_get import DaGetConfig
-from model.modeling_get import DaGetEncoder, GetGraphAttentionBias, graph_distances
+from model.configuration_da_get import DaGetConfig
+from model.modeling_da_get import DaGetEncoder, DaGetGraphAttentionBias, graph_distances
 
 
-class GetEncoderTest(unittest.TestCase):
+class DaGetEncoderTest(unittest.TestCase):
     """Exercise structural and dynamic encoder behavior with small robot graphs."""
 
     def setUp(self) -> None:
@@ -78,7 +78,7 @@ class GetEncoderTest(unittest.TestCase):
             use_parent_child_encoding=False,
             mass_epsilon=1e-8,
         )
-        bias_module = GetGraphAttentionBias(config)
+        bias_module = DaGetGraphAttentionBias(config)
         with torch.no_grad():
             bias_module.mass_projection.weight.fill_(2.0)
         mask = torch.ones(1, 2, dtype=torch.bool)

@@ -404,9 +404,9 @@ class TokenizationAndEncoderTest(unittest.TestCase):
         c = encoder(padded.joint_features, padded.parent_indices, joint_mask=padded.joint_mask)
         torch.testing.assert_close(a, c[:, :12])
 
-    def test_get_zero_config(self) -> None:
+    def test_da_get_zero_config(self) -> None:
         """The paper preset uses the published architecture sizes."""
-        config = DaGetConfig.get_zero(input_size=20)
+        config = DaGetConfig.da_get_zero(input_size=20)
         self.assertEqual(
             (config.hidden_size, config.num_hidden_layers, config.num_attention_heads, config.intermediate_size),
             (512, 8, 16, 1024),

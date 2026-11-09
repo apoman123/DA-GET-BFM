@@ -13,8 +13,8 @@ from transformers import TrainingArguments
 from model import DaGetConfig
 from model.pretraining import (
     LOSS_NAMES,
-    GetForPhysicsPretraining,
-    GetPhysicsPretrainingConfig,
+    DaGetForPhysicsPretraining,
+    DaGetPhysicsPretrainingConfig,
     geodesic_distance,
     masked_joint_mean,
     rotation_from_6d,
@@ -98,7 +98,7 @@ class PretrainingPipelineTest(unittest.TestCase):
         """Remove temporary files."""
         cls.directory.cleanup()
 
-    def model(self, **overrides) -> GetForPhysicsPretraining:
+    def model(self, **overrides) -> DaGetForPhysicsPretraining:
         """Return a small pretraining model for the test data."""
         encoder = DaGetConfig(
             input_size=self.datasets.token_size,
@@ -109,10 +109,10 @@ class PretrainingPipelineTest(unittest.TestCase):
             use_physics_cross_attention=True,
         )
         torch.manual_seed(0)
-        config = GetPhysicsPretrainingConfig.from_encoder_config(
+        config = DaGetPhysicsPretrainingConfig.from_encoder_config(
             encoder, loss_weights={"rbd": 0.1}, token_layout=self.datasets.token_layout(), **overrides
         )
-        return GetForPhysicsPretraining(config)
+        return DaGetForPhysicsPretraining(config)
 
     def batch(self, count: int = 12) -> dict:
         """Collate samples from both embodiments."""
@@ -189,7 +189,7 @@ class PretrainingPipelineTest(unittest.TestCase):
                 intermediate_size=64,
                 **{"use_physics_cross_attention": True, **overrides},
             )
-            model = GetForPhysicsPretraining(GetPhysicsPretrainingConfig.from_encoder_config(encoder))
+            model = DaGetForPhysicsPretraining(DaGetPhysicsPretrainingConfig.from_encoder_config(encoder))
             self.assertTrue(torch.isfinite(model(**batch).loss))
 
     def test_save_and_reload(self) -> None:
@@ -198,7 +198,7 @@ class PretrainingPipelineTest(unittest.TestCase):
         batch = self.batch()
         with tempfile.TemporaryDirectory() as folder:
             model.save_pretrained(folder)
-            loaded = GetForPhysicsPretraining.from_pretrained(folder).eval()
+            loaded = DaGetForPhysicsPretraining.from_pretrained(folder).eval()
         with torch.no_grad():
             torch.testing.assert_close(model(**batch).joint_embeddings, loaded(**batch).joint_embeddings)
         self.assertEqual(loaded.config.encoder_config, model.config.encoder_config)

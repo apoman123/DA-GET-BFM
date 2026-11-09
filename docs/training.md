@@ -8,6 +8,7 @@ The six auxiliary tasks that train the encoder, how to run them with the Hugging
 
 - [Physics pretraining](#physics-pretraining)
 - [Training with the Hugging Face Trainer](#training-with-the-hugging-face-trainer)
+  - [Watching training in TensorBoard](#watching-training-in-tensorboard)
   - [Data config](#data-config)
 
 ## Physics pretraining
@@ -72,8 +73,7 @@ uv run python scripts/download_urdfs.py
 uv run python scripts/train_physics_da_get.py \
     --data_config configs/data/synthetic_unitree.json \
     --output_dir runs/synthetic --max_steps 2000 \
-    --per_device_train_batch_size 64 --learning_rate 5e-4 --warmup_steps 100 \
-    --eval_strategy steps --eval_steps 500 --logging_steps 50
+    --per_device_train_batch_size 64 --learning_rate 5e-4 --warmup_steps 100
 
 # 2. Real floating-base humanoid data (Unitree G1 whole-body teleoperation) + synthetic G1
 uv run python scripts/train_physics_da_get.py \
@@ -103,6 +103,37 @@ from model.pretraining import DaGetForPhysicsPretraining
 model = DaGetForPhysicsPretraining.from_pretrained("runs/g1_wbt")
 embeddings = model.encode(**batch)          # [B, J, hidden]; or model.encoder directly
 ```
+
+### Watching training in TensorBoard
+
+The script records every run in TensorBoard, under
+`<output_dir>/runs/<date>_<host>/`. While it trains, or afterwards:
+
+```bash
+uv run tensorboard --logdir runs    # then open http://localhost:6006
+```
+
+Pointing `--logdir` at the parent folder lets you compare several runs on one
+chart, for example with and without Physics Cross Attention.
+
+| Tag | Meaning |
+|---|---|
+| `train/loss`, `eval/loss` | Weighted total loss |
+| `train/loss_fk`, `_fd`, `_id`, `_motor`, `_effect`, `_rbd` | Mean of each task loss since the last log |
+| `eval/loss_fk`, `_fd`, `_id`, `_motor`, `_effect`, `_rbd` | Each task loss on held-out episodes |
+| `train/learning_rate`, `train/grad_norm`, `train/epoch` | Optimizer state |
+| `eval/runtime`, `eval/samples_per_second`, `eval/steps_per_second` | Evaluation speed |
+
+The **Text** tab holds the training arguments and the model config of the run.
+
+The script changes these `TrainingArguments` defaults so that the curves are
+useful without extra flags:
+
+| Flag | Script default | Why |
+|---|---|---|
+| `--report_to` | `tensorboard` | `none` turns it off; other integrations such as `wandb` also work |
+| `--logging_steps` | 50 | The `transformers` default of 500 leaves few points on a short run |
+| `--eval_strategy`, `--eval_steps` | `steps`, 500 | Gives a held-out curve during training. Evaluation is skipped when the data config has no eval split |
 
 ### Data config
 

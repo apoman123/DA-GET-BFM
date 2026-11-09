@@ -14,8 +14,11 @@ Examples::
         --data_config configs/data/g1_hub_plus_synthetic.json --output_dir runs/g1
 
 Every ``transformers.TrainingArguments`` option works (``--learning_rate``,
-``--report_to``, ``--push_to_hub``, ...). A single JSON file with all arguments
-can be passed instead of flags.
+``--push_to_hub``, ...). A single JSON file with all arguments can be passed
+instead of flags.
+
+Runs are recorded in TensorBoard under ``<output_dir>/runs/``. Watch them with
+``uv run tensorboard --logdir runs``, or turn this off with ``--report_to none``.
 """
 
 from __future__ import annotations
@@ -29,7 +32,7 @@ ROOT = Path(__file__).resolve().parents[1]
 if str(ROOT) not in sys.path:
     sys.path.insert(0, str(ROOT))
 
-from transformers import HfArgumentParser, TrainingArguments, set_seed  # noqa: E402
+from transformers import HfArgumentParser, IntervalStrategy, TrainingArguments, set_seed  # noqa: E402
 
 from model.configuration_da_get import DaGetConfig  # noqa: E402
 from model.pretraining import (  # noqa: E402
@@ -78,6 +81,20 @@ class DataArguments:
     rebuild_cache: bool = field(default=False, metadata={"help": "Recompute features and labels."})
 
 
+@dataclass
+class PretrainingArguments(TrainingArguments):
+    """``TrainingArguments`` whose defaults record train and eval curves in TensorBoard."""
+
+    report_to: None | str | list[str] = field(
+        default="tensorboard", metadata={"help": "Where to log; 'none' turns logging integrations off."}
+    )
+    logging_steps: float = field(default=50, metadata={"help": "Log the training losses every X steps."})
+    eval_strategy: IntervalStrategy | str = field(
+        default="steps", metadata={"help": "When to evaluate: 'no', 'steps', or 'epoch'."}
+    )
+    eval_steps: float | None = field(default=500, metadata={"help": "Evaluate every X steps."})
+
+
 def encoder_config(arguments: ModelArguments, input_size: int) -> DaGetConfig:
     """Build the encoder configuration from the preset and overrides."""
     if arguments.preset == "da_get_zero":
@@ -107,7 +124,7 @@ def encoder_config(arguments: ModelArguments, input_size: int) -> DaGetConfig:
 
 def main() -> None:
     """Parse arguments, build data and model, and train."""
-    parser = HfArgumentParser((ModelArguments, DataArguments, TrainingArguments))
+    parser = HfArgumentParser((ModelArguments, DataArguments, PretrainingArguments))
     if len(sys.argv) == 2 and sys.argv[1].endswith(".json"):
         model_args, data_args, training_args = parser.parse_json_file(sys.argv[1])
     else:
@@ -120,6 +137,8 @@ def main() -> None:
     set_seed(training_args.seed)
 
     datasets = build_physics_datasets(data_args.data_config, data_args.cache_dir, data_args.rebuild_cache)
+    if datasets.eval is None:
+        training_args.eval_strategy = IntervalStrategy.NO
     print(
         f"embodiments: {len(datasets.records)}, train samples: {len(datasets.train)}, "
         f"eval samples: {len(datasets.eval) if datasets.eval else 0}, token size: {datasets.token_size}"
@@ -153,6 +172,8 @@ def main() -> None:
         eval_dataset=datasets.eval,
         data_collator=datasets.collator(),
     )
+    if "tensorboard" in training_args.report_to:
+        print(f"TensorBoard: uv run tensorboard --logdir {training_args.output_dir}")
     trainer.train(resume_from_checkpoint=training_args.resume_from_checkpoint)
     trainer.save_model()
     output = Path(training_args.output_dir)

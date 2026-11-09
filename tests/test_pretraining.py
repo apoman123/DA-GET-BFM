@@ -1,9 +1,12 @@
 """Test the physics pretraining data pipeline, heads, losses, and Trainer."""
 
+import importlib.util
 import json
+import sys
 import tempfile
 import unittest
 from pathlib import Path
+from unittest import mock
 
 import numpy as np
 import torch
@@ -202,6 +205,41 @@ class PretrainingPipelineTest(unittest.TestCase):
         with torch.no_grad():
             torch.testing.assert_close(model(**batch).joint_embeddings, loaded(**batch).joint_embeddings)
         self.assertEqual(loaded.config.encoder_config, model.config.encoder_config)
+
+    def test_script_records_curves_in_tensorboard(self) -> None:
+        """The training script writes train and eval task losses to TensorBoard by default."""
+        from tensorboard.backend.event_processing.event_accumulator import EventAccumulator
+
+        path = Path(__file__).resolve().parents[1] / "scripts" / "train_physics_da_get.py"
+        spec = importlib.util.spec_from_file_location("train_physics_da_get", path)
+        script = importlib.util.module_from_spec(spec)
+        sys.modules[spec.name] = script
+        self.addCleanup(sys.modules.pop, spec.name)
+        spec.loader.exec_module(script)
+        with tempfile.TemporaryDirectory() as folder:
+            defaults = script.PretrainingArguments(output_dir=folder)
+            self.assertEqual(list(defaults.report_to), ["tensorboard"])
+            self.assertEqual(defaults.logging_steps, 50)
+            self.assertEqual(str(defaults.eval_strategy.value), "steps")
+            arguments = [
+                str(path), "--data_config", str(self.config_path), "--cache_dir", str(Path(folder, "cache")),
+                "--output_dir", folder, "--preset", "small", "--hidden_size", "32", "--num_hidden_layers", "1",
+                "--intermediate_size", "64", "--max_steps", "4", "--logging_steps", "1", "--eval_steps", "2",
+                "--per_device_train_batch_size", "8", "--per_device_eval_batch_size", "8",
+                "--save_strategy", "no", "--use_cpu", "true",
+            ]
+            with mock.patch.object(sys, "argv", arguments):
+                script.main()
+            folders = {event.parent for event in Path(folder, "runs").rglob("events.out.tfevents.*")}
+            self.assertEqual(len(folders), 1)
+            events = EventAccumulator(str(folders.pop()))
+            events.Reload()
+            tags = set(events.Tags()["scalars"])
+            for tag in ("train/loss", "train/loss_fk", "train/loss_fd", "train/learning_rate", "eval/loss", "eval/loss_fk"):
+                self.assertIn(tag, tags)
+            steps = [event.step for event in events.Scalars("train/loss_fk")]
+            self.assertEqual(steps, [1, 2, 3, 4])
+            self.assertEqual({event.step for event in events.Scalars("eval/loss_fk")}, {2, 4})
 
     def test_trainer_runs_and_logs_task_losses(self) -> None:
         """The HF Trainer trains, evaluates, and logs per-task losses."""

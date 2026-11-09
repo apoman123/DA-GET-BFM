@@ -70,7 +70,7 @@ uv sync --all-extras
 uv run pytest
 ```
 
-The suite has 84 tests (the MuJoCo and HDF5 tests are skipped without the
+The suite has 85 tests (the MuJoCo and HDF5 tests are skipped without the
 `sim` and `validation` extras):
 
 - `test_embodiment.py`: URDF graphs, features, kinematics, mass matrix,
@@ -123,6 +123,7 @@ The suite has 84 tests (the MuJoCo and HDF5 tests are skipped without the
   - ablations;
   - `save_pretrained`/`from_pretrained`;
   - a Trainer run with per-task logging.
+  - the training script recording train and eval curves in TensorBoard.
 
 Checks outside the test suite:
 

@@ -61,7 +61,8 @@ uv run python scripts/download_urdfs.py  # Unitree Go1, H1, G1 and ANYmal D URDF
 ```
 
 URDF parsing and the dynamics need only PyTorch and the Python standard library.
-The training pipeline also uses `transformers`, `datasets`, and `accelerate`.
+The training pipeline also uses `transformers`, `datasets`,
+`accelerate`, and `tensorboard`.
 `uv sync` alone installs the core, and tests that need an extra are skipped
 without it:
 
@@ -151,6 +152,8 @@ action = bfm.act(hidden, z, batch.joint_mask)        # [2, 19]; values in [-1, 1
 uv run python scripts/train_physics_da_get.py \
     --data_config configs/data/synthetic_unitree.json \
     --output_dir runs/synthetic --max_steps 2000 --per_device_train_batch_size 64
+
+uv run tensorboard --logdir runs    # watch the losses at http://localhost:6006
 ```
 
 ## Documentation
@@ -159,7 +162,7 @@ uv run python scripts/train_physics_da_get.py \
 |---|---|
 | [The DA-GET encoder](docs/encoder.md) | URDF to tokens, attention bias, Physics Cross Attention, batching, all encoder options |
 | [Dynamics and torque estimation](docs/dynamics.md) | Rigid-body dynamics, estimating missing torques, why the error is large |
-| [Physics pretraining](docs/training.md) | The six tasks, training commands, data config format |
+| [Physics pretraining](docs/training.md) | The six tasks, training commands, TensorBoard, data config format |
 | [Training data](docs/data.md) | MuJoCo ground contact, automatic configs, dataset converters, recommended datasets |
 | [Behavior foundation model](docs/bfm.md) | Actor, critics, B, and D; design choices and open questions |
 | [Development notes](docs/development.md) | Full repository layout, test coverage, validation results, detailed limitations |
@@ -177,7 +180,7 @@ model/                     library code
 scripts/                   training, data config generator, converters, validation
 configs/data/              example data configs
 docs/                      documentation by topic
-tests/                     test suite (84 tests)
+tests/                     test suite (85 tests)
 ```
 
 ## Limitations

@@ -1,7 +1,7 @@
 [project]
 name = "da-get-bfm"
 version = "0.1.0"
-description = "GET (Graph Embodiment Transformer) encoder with per-DoF tokens built from URDF"
+description = "Dynamic-aware Graph Embodiment Transformer and cross-embodiment behavior foundation model"
 readme = "README.md"
 requires-python = ">=3.10"
 dependencies = [

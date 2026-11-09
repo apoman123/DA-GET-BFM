@@ -1,0 +1,70 @@
+{
+  "history_size": 3,
+  "joint_features": "da_get_zero",
+  "seed": 0,
+  "sources": [
+    {
+      "type": "mujoco",
+      "name": "go1_ground",
+      "urdf": "../../assets/urdf/go1.urdf",
+      "contact_links": [
+        "FR_foot",
+        "FL_foot",
+        "RR_foot",
+        "RL_foot"
+      ],
+      "contact_geometry": {
+        "radius": 0.02
+      },
+      "nominal_pose": {
+        "FR_thigh_joint": 0.9,
+        "FL_thigh_joint": 0.9,
+        "RR_thigh_joint": 0.9,
+        "RL_thigh_joint": 0.9,
+        "FR_calf_joint": -1.8,
+        "FL_calf_joint": -1.8,
+        "RR_calf_joint": -1.8,
+        "RL_calf_joint": -1.8
+      },
+      "randomized_embodiments": 0,
+      "episodes_per_embodiment": 8,
+      "steps": 300,
+      "seed": 21,
+      "probe_torques": 0
+    },
+    {
+      "type": "mujoco",
+      "name": "h1_ground",
+      "urdf": "../../assets/urdf/h1.urdf",
+      "contact_links": [
+        "left_ankle_link",
+        "right_ankle_link"
+      ],
+      "contact_geometry": {
+        "radius": 0.01,
+        "sole_offset": [
+          0.04,
+          0.0,
+          -0.07
+        ],
+        "foot_size": [
+          0.22,
+          0.07
+        ]
+      },
+      "nominal_pose": {
+        "left_hip_pitch_joint": -0.4,
+        "right_hip_pitch_joint": -0.4,
+        "left_knee_joint": 0.8,
+        "right_knee_joint": 0.8,
+        "left_ankle_joint": -0.4,
+        "right_ankle_joint": -0.4
+      },
+      "randomized_embodiments": 0,
+      "episodes_per_embodiment": 8,
+      "steps": 300,
+      "seed": 24,
+      "probe_torques": 0
+    }
+  ]
+}

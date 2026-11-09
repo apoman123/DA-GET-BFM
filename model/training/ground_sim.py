@@ -108,8 +108,10 @@ def build_mjcf(
 ) -> str:
     """Write MJCF for a robot with foot contacts and position actuators.
 
+    The root gets a free joint only if the graph has a floating base.
+
     Args:
-        record (EmbodimentRecord): Robot with ``contact_links``.
+        record (EmbodimentRecord): Robot, with ``contact_links`` if it has feet.
         kp (np.ndarray): ``[J]`` position gains.
         kd (np.ndarray): ``[J]`` velocity gains.
         geometry (ContactGeometry): Foot geometry.
@@ -150,11 +152,10 @@ def build_mjcf(
         lines.append(f"{indent}</body>")
         return "\n".join(lines)
 
-    base_lines = [
-        '    <body name="base" pos="0 0 1">',
-        "      <freejoint/>",
-        "      " + _inertial(max(graph.base_mass, 1e-3), graph.base_com.numpy(), graph.base_inertia.numpy()),
-    ]
+    base_lines = ['    <body name="base" pos="0 0 1">']
+    if graph.floating_base:
+        base_lines.append("      <freejoint/>")
+    base_lines.append("      " + _inertial(max(graph.base_mass, 1e-3), graph.base_com.numpy(), graph.base_inertia.numpy()))
     base_lines += [f"      {geom}" for geom in spheres.get(-1, [])]
     base_lines += [body_xml(child, "      ") for child in children.get(-1, [])]
     base_lines.append("    </body>")

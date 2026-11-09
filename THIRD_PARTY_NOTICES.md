@@ -2,12 +2,13 @@
 
 ## BFM-Zero / Meta Motivo (CC BY-NC 4.0)
 
-`model/modeling_bfm.py` adapts code from
+`model/modeling_bfm.py` and `model/rl/` adapt code from
 [LeCAR-Lab/BFM-Zero](https://github.com/LeCAR-Lab/BFM-Zero), which builds on
 Meta's FB-CPR / Meta Motivo implementation:
 
-- Source files: `humanoidverse/agents/nn_models.py` and
-  `humanoidverse/agents/fb/model.py`.
+- Source files: `humanoidverse/agents/nn_models.py`, `agents/fb/model.py`,
+  `agents/fb/agent.py`, `agents/fb_cpr/agent.py`, `agents/fb_cpr_aux/agent.py`,
+  `agents/misc/zbuffer.py`, and `humanoidverse/train.py`.
 - Copyright (c) Meta Platforms, Inc. and affiliates.
 - License: Creative Commons Attribution-NonCommercial 4.0 International
   (<https://creativecommons.org/licenses/by-nc/4.0/>). This license does not
@@ -27,7 +28,13 @@ Changes:
 - a padding mask on `TruncatedNormal`;
 - vectorized tracking inference.
 
-The GET-conditioned actor and forward map are new. Their design follows the
+In `model/rl/`, the adapted parts are the FB, discriminator, critic, and actor
+losses, the ensemble pessimism, the z mixture and rollout logic, the z buffer, the
+reward normalizer, the online loop, and the hyperparameter values. The
+environment settings and penalty definitions follow BFM-Zero's configuration.
+
+The GET-conditioned actor and forward map, the per-robot training, and the MuJoCo
+environments are new. Their design follows the
 BFM-Zero / FB-CPR interfaces.
 
 Please cite:

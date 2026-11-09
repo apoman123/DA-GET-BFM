@@ -35,8 +35,8 @@ flat state ─► BackwardMap ─► latent z ─── cross-attention ──�
 | Physics pretraining (six tasks, Hugging Face `Trainer`) | Done; short training runs only |
 | Training data: synthetic, MuJoCo ground contact, Hub datasets, converters | Done |
 | BFM networks: backward map, discriminator, actor, forward map, critics | Done and unit tested |
-| **FB-CPR training agent** (replay buffer, losses, target networks) | **Not implemented, so no policy has been trained yet** |
-| **Shared state for B and D across robots** | **Open design question** ([details](docs/bfm.md#open-questions-for-cross-embodiment-training)) |
+| Online off-policy FB-CPR training across robots (MuJoCo) | Done and tested; **only short runs so far, so no policy is trained yet** |
+| **Prompting one robot with another's motion** | **Open design question** ([details](docs/bfm.md#open-questions-for-cross-embodiment-training)) |
 
 ## What comes from where
 
@@ -46,6 +46,7 @@ flat state ─► BackwardMap ─► latent z ─── cross-attention ──�
 | Mass-matrix attention bias, Physics Cross Attention, physics pretraining | This repo | |
 | Backward map, discriminator, truncated-normal policy, latent inference | BFM-Zero / FB-CPR | Dictionary inputs, padding mask |
 | Actor and forward map interfaces | BFM-Zero / FB-CPR | Rebuilt to read joint embeddings and cross-attend to z; one action per joint |
+| Training losses, z mixture, rollout logic, hyperparameters | BFM-Zero / FB-CPR | Per-robot simulators, buffers, and prompts |
 
 ## Installation
 
@@ -156,6 +157,19 @@ uv run python scripts/train_physics_da_get.py \
 uv run tensorboard --logdir runs    # watch the losses at http://localhost:6006
 ```
 
+### 4. Train the behavior foundation model
+
+```bash
+uv run python scripts/train_bfm.py \
+    --data_config configs/rl/go1_h1_ground.json \
+    --encoder_checkpoint runs/synthetic --output_dir runs/bfm
+```
+
+Each `source` in the data config is one robot: its motions are the expert data, and
+a MuJoCo environment built from its URDF collects the replay data. The encoder
+checkpoint must use the same `joint_features` and `history_size`. See
+[Training](docs/bfm.md#training-online-off-policy-fb-cpr).
+
 ## Documentation
 
 | Read this | To learn |
@@ -164,7 +178,7 @@ uv run tensorboard --logdir runs    # watch the losses at http://localhost:6006
 | [Dynamics and torque estimation](docs/dynamics.md) | Rigid-body dynamics, estimating missing torques, why the error is large |
 | [Physics pretraining](docs/training.md) | The six tasks, training commands, TensorBoard, data config format |
 | [Training data](docs/data.md) | MuJoCo ground contact, automatic configs, dataset converters, recommended datasets |
-| [Behavior foundation model](docs/bfm.md) | Actor, critics, B, and D; design choices and open questions |
+| [Behavior foundation model](docs/bfm.md) | Actor, critics, B, and D; RL training; what differs from BFM-Zero; open questions |
 | [Development notes](docs/development.md) | Full repository layout, test coverage, validation results, detailed limitations |
 | [Module notes](model/README.md) | Technical notes on the encoder code |
 
@@ -174,13 +188,14 @@ uv run tensorboard --logdir runs    # watch the losses at http://localhost:6006
 model/                     library code
   modeling_da_get.py         DaGetEncoder and Physics Cross Attention
   modeling_bfm.py            backward map, discriminator, actor, forward map, critics
+  rl/                        FB-CPR agent, MuJoCo environments, replay buffers, training loop
   pretraining.py             physics pretraining model (heads A-F)
   dynamics.py                rigid-body dynamics and torque estimation
   training/, conversion/     data pipeline and dataset converters
 scripts/                   training, data config generator, converters, validation
 configs/data/              example data configs
 docs/                      documentation by topic
-tests/                     test suite (85 tests)
+tests/                     test suite (114 tests)
 ```
 
 ## Limitations
@@ -191,6 +206,8 @@ tests/                     test suite (85 tests)
   on ANYmal D. Prefer datasets with measured torques.
 - **Simulated ground contact covers standing, not walking.** Locomotion comes
   from recorded datasets.
+- **RL training runs MuJoCo on CPU**, without body collisions, fall starts, or
+  rotor robots ([differences from BFM-Zero](docs/bfm.md#what-differs-from-bfm-zero)).
 - **Automatic configs and actuator defaults are guesses.** Check them, and use
   measured values when you have them.
 
@@ -198,8 +215,8 @@ See [the full list](docs/development.md#limitations).
 
 ## License and attribution
 
-The backward map, discriminator, truncated-normal policy, and latent inference
-are adapted from [BFM-Zero](https://github.com/LeCAR-Lab/BFM-Zero) (Copyright
+The backward map, discriminator, truncated-normal policy, latent inference, and
+FB-CPR training code are adapted from [BFM-Zero](https://github.com/LeCAR-Lab/BFM-Zero) (Copyright
 Meta Platforms, Inc. and affiliates) under
 [CC BY-NC 4.0](https://creativecommons.org/licenses/by-nc/4.0/), which does not
 allow commercial use. See [THIRD_PARTY_NOTICES.md](THIRD_PARTY_NOTICES.md).

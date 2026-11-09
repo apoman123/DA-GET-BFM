@@ -31,6 +31,13 @@ DA-GET-BFM/
 │   ├── pretraining.py         # DaGetForPhysicsPretraining (HF PreTrainedModel), heads A–F
 │   ├── configuration_bfm.py   # BfmConfig
 │   ├── modeling_bfm.py        # BFM-Zero B, D, and GET-conditioned actor, F, critics; DaGetBfmModel
+│   ├── rl/
+│   │   ├── configuration_fb_cpr.py # FbCprConfig: BFM-Zero's training hyperparameters
+│   │   ├── observation.py     # tokens, physics features, and flat state of one robot
+│   │   ├── envs.py            # parallel MuJoCo worlds, randomization, auxiliary rewards
+│   │   ├── buffers.py         # per-robot replay buffer and expert motions
+│   │   ├── agent.py           # DaGetFbCprAgent: discriminator, F, B, critics, actor updates
+│   │   └── trainer.py         # online training loop, evaluation, checkpoints, TensorBoard
 │   ├── transformer.py         # attention and cross-attention blocks
 │   ├── robot_analysis.py      # infer floating base, feet, rotors, propellers from a URDF
 │   ├── conversion/
@@ -48,12 +55,14 @@ DA-GET-BFM/
 │   └── README.md              # module-level technical notes
 ├── scripts/
 │   ├── train_physics_da_get.py       # HF Trainer entry point
+│   ├── train_bfm.py                  # online off-policy FB-CPR across robots
 │   ├── make_data_config.py           # write a data config from a URDF and a dataset
 │   ├── convert_dataset.py            # convert public datasets to the table format
 │   ├── validate_torque_estimation.py # estimated vs measured torques on a real Go1
 │   └── download_urdfs.py             # fetch Unitree and ANYmal D URDFs into assets/urdf
 ├── assets/robots/quadrotor_x.urdf    # X quadrotor for synthetic flight
 ├── configs/data/              # example data configs
+├── configs/rl/                # example RL training config
 ├── tests/                     # unit tests (see below)
 ├── docs/                      # documentation by topic
 ├── raw/                       # source material (the GET-Zero project page)
@@ -70,7 +79,7 @@ uv sync --all-extras
 uv run pytest
 ```
 
-The suite has 85 tests (the MuJoCo and HDF5 tests are skipped without the
+The suite has 114 tests (the MuJoCo and HDF5 tests are skipped without the
 `sim` and `validation` extras):
 
 - `test_embodiment.py`: URDF graphs, features, kinematics, mass matrix,
@@ -116,6 +125,14 @@ The suite has 85 tests (the MuJoCo and HDF5 tests are skipped without the
   - goal, reward, and tracking inference;
   - straight-through truncated-normal gradients;
   - an FB actor loss that reaches the GET encoder.
+- `test_fb_cpr.py`:
+  - the FB, orthonormality, and pessimism formulas against explicit computations;
+  - each update changes only its own networks, and targets move by exactly `tau`;
+  - prompts pair only with transitions of the same robot;
+  - tokens, dynamics features, and mass matrix equal the pretraining pipeline's;
+  - environment resets reproduce a motion's flat state, a quadruped holds its pose,
+    falls end episodes, and auxiliary rewards follow their formulas;
+  - motion resampling, checkpoints, and the training script on two robots.
 - `test_pretraining.py`:
   - both data sources and caching;
   - collation and masks;

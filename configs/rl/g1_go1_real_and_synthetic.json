@@ -1,0 +1,184 @@
+{
+  "history_size": 3,
+  "joint_features": "da_get_zero",
+  "eval_fraction": 0.05,
+  "seed": 0,
+  "sources": [
+    {
+      "type": "huggingface",
+      "name": "g1_wbt_pick_up_fruit",
+      "repo_id": "unitreerobotics/G1_WBT_Inspire_Pick_Up_Fruit",
+      "data_files": "data/*/*.parquet",
+      "urdf": "../../assets/urdf/g1_29dof.urdf",
+      "floating_base": true,
+      "joint_names": [
+        "left_hip_pitch_joint",
+        "left_hip_roll_joint",
+        "left_hip_yaw_joint",
+        "left_knee_joint",
+        "left_ankle_pitch_joint",
+        "left_ankle_roll_joint",
+        "right_hip_pitch_joint",
+        "right_hip_roll_joint",
+        "right_hip_yaw_joint",
+        "right_knee_joint",
+        "right_ankle_pitch_joint",
+        "right_ankle_roll_joint",
+        "waist_yaw_joint",
+        "waist_roll_joint",
+        "waist_pitch_joint",
+        "left_shoulder_pitch_joint",
+        "left_shoulder_roll_joint",
+        "left_shoulder_yaw_joint",
+        "left_elbow_joint",
+        "left_wrist_yaw_joint",
+        "left_wrist_roll_joint",
+        "left_wrist_pitch_joint",
+        "right_shoulder_pitch_joint",
+        "right_shoulder_roll_joint",
+        "right_shoulder_yaw_joint",
+        "right_elbow_joint",
+        "right_wrist_yaw_joint",
+        "right_wrist_roll_joint",
+        "right_wrist_pitch_joint"
+      ],
+      "state_key": [
+        "observation.state.lower_body",
+        "observation.state.left_arm",
+        "observation.state.right_arm"
+      ],
+      "action_key": [
+        "action.lower_body",
+        "action.left_arm",
+        "action.right_arm"
+      ],
+      "action_type": "position",
+      "base_position_key": "observation.state.state_base_pose",
+      "base_position_indices": [
+        0,
+        1,
+        2
+      ],
+      "base_orientation_key": "observation.state.state_base_pose",
+      "base_orientation_indices": [
+        3,
+        4,
+        5,
+        6
+      ],
+      "base_orientation_format": "xyzw",
+      "base_angular_velocity_key": "observation.state.state_base_rot",
+      "base_angular_velocity_indices": [
+        3,
+        4,
+        5
+      ],
+      "contact_links": [
+        "left_ankle_roll_link",
+        "right_ankle_roll_link"
+      ],
+      "surface_contacts": true,
+      "contact_height_tolerance": 0.03,
+      "fps": 30,
+      "smoothing_window": 3,
+      "max_episodes": 40,
+      "end_effectors": [
+        "left_wrist_pitch_joint",
+        "right_wrist_pitch_joint",
+        "left_ankle_roll_joint",
+        "right_ankle_roll_joint"
+      ],
+      "actuator_defaults": {
+        "kp": 80.0,
+        "kd": 2.0
+      },
+      "robot": "g1",
+      "nominal_pose": {
+        "left_hip_pitch_joint": -0.2,
+        "right_hip_pitch_joint": -0.2,
+        "left_knee_joint": 0.4,
+        "right_knee_joint": 0.4,
+        "left_ankle_pitch_joint": -0.2,
+        "right_ankle_pitch_joint": -0.2
+      },
+      "contact_geometry": {
+        "radius": 0.01,
+        "sole_offset": [
+          0.03,
+          0.0,
+          -0.03
+        ],
+        "foot_size": [
+          0.18,
+          0.06
+        ]
+      }
+    },
+    {
+      "type": "synthetic",
+      "name": "g1_synthetic",
+      "robot": "g1",
+      "urdf": "../../assets/urdf/g1_29dof.urdf",
+      "floating_base": true,
+      "contact_links": [
+        "left_ankle_roll_link",
+        "right_ankle_roll_link"
+      ],
+      "randomized_embodiments": 2,
+      "episodes_per_embodiment": 4,
+      "steps": 200,
+      "base_modes": [
+        "floating"
+      ]
+    },
+    {
+      "type": "mujoco",
+      "name": "go1_ground",
+      "urdf": "../../assets/urdf/go1.urdf",
+      "contact_links": [
+        "FR_foot",
+        "FL_foot",
+        "RR_foot",
+        "RL_foot"
+      ],
+      "contact_geometry": {
+        "radius": 0.02
+      },
+      "nominal_pose": {
+        "FR_thigh_joint": 0.9,
+        "FL_thigh_joint": 0.9,
+        "RR_thigh_joint": 0.9,
+        "RL_thigh_joint": 0.9,
+        "FR_calf_joint": -1.8,
+        "FL_calf_joint": -1.8,
+        "RR_calf_joint": -1.8,
+        "RL_calf_joint": -1.8
+      },
+      "randomized_embodiments": 0,
+      "episodes_per_embodiment": 8,
+      "steps": 300,
+      "seed": 21,
+      "robot": "go1",
+      "probe_torques": 2
+    },
+    {
+      "type": "synthetic",
+      "name": "go1_synthetic",
+      "robot": "go1",
+      "urdf": "../../assets/urdf/go1.urdf",
+      "floating_base": true,
+      "contact_links": [
+        "FR_foot",
+        "FL_foot",
+        "RR_foot",
+        "RL_foot"
+      ],
+      "randomized_embodiments": 2,
+      "episodes_per_embodiment": 4,
+      "steps": 200,
+      "base_modes": [
+        "floating"
+      ]
+    }
+  ]
+}

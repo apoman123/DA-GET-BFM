@@ -30,14 +30,16 @@ DA-GET-BFM/
 │   │                          # physics tokenizers, PhysicsMemory
 │   ├── pretraining.py         # DaGetForPhysicsPretraining (HF PreTrainedModel), heads A–F
 │   ├── configuration_bfm.py   # BfmConfig
-│   ├── modeling_bfm.py        # BFM-Zero B, D, and GET-conditioned actor, F, critics; DaGetBfmModel
+│   ├── modeling_bfm.py        # per-DoF B, D, actor, F and critics; DaGetBfmModel
 │   ├── rl/
 │   │   ├── configuration_fb_cpr.py # FbCprConfig: BFM-Zero's training hyperparameters
-│   │   ├── observation.py     # tokens, physics features, and flat state of one robot
-│   │   ├── envs.py            # parallel MuJoCo worlds, randomization, auxiliary rewards
+│   │   ├── observation.py     # policy and state views of one robot
+│   │   ├── envs.py            # simulator-independent environment logic and MuJoCo worlds
+│   │   ├── isaac_env.py       # Isaac Lab worlds; several robots in one simulation
 │   │   ├── buffers.py         # per-robot replay buffer and expert motions
-│   │   ├── agent.py           # DaGetFbCprAgent: discriminator, F, B, critics, actor updates
-│   │   └── trainer.py         # online training loop, evaluation, checkpoints, TensorBoard
+│   │   ├── agent.py           # DaGetFbCprAgent: D, F, B, critics, encoder and actor updates
+│   │   ├── evaluation.py      # tracking, goal and getting-up tasks, EMD, motion priorities
+│   │   └── trainer.py         # online training loop, checkpoints, TensorBoard
 │   ├── transformer.py         # attention and cross-attention blocks
 │   ├── robot_analysis.py      # infer floating base, feet, rotors, propellers from a URDF
 │   ├── conversion/
@@ -79,7 +81,7 @@ uv sync --all-extras
 uv run pytest
 ```
 
-The suite has 114 tests (the MuJoCo and HDF5 tests are skipped without the
+The suite has 145 tests (the MuJoCo and HDF5 tests are skipped without the
 `sim` and `validation` extras):
 
 - `test_embodiment.py`: URDF graphs, features, kinematics, mass matrix,
@@ -126,13 +128,18 @@ The suite has 114 tests (the MuJoCo and HDF5 tests are skipped without the
   - straight-through truncated-normal gradients;
   - an FB actor loss that reaches the GET encoder.
 - `test_fb_cpr.py`:
-  - the FB, orthonormality, and pessimism formulas against explicit computations;
-  - each update changes only its own networks, and targets move by exactly `tau`;
+  - the FB, orthonormality, and pessimism formulas against explicit computations,
+    including that states of other robots do not enter them;
+  - each update changes only its own networks, RL and physics losses reach the encoder
+    but the actor's does not, and targets move by exactly `tau`;
   - prompts pair only with transitions of the same robot;
   - tokens, dynamics features, and mass matrix equal the pretraining pipeline's;
-  - environment resets reproduce a motion's flat state, a quadruped holds its pose,
-    falls end episodes, and auxiliary rewards follow their formulas;
-  - motion resampling, checkpoints, and the training script on two robots.
+  - environment resets reproduce a motion's state tokens, lying starts and fall
+    behavior, motion priorities, EMD, and auxiliary rewards;
+  - real and synthetic sources sharing a robot, and the training script on two robots.
+- `test_isaac_env.py`: the Isaac Lab adapter against a fake of its API: joint and
+  body orders, quaternions and frames, contact penalties, randomization, batched writes,
+  and stepping several robots. It does not run Isaac Lab.
 - `test_pretraining.py`:
   - both data sources and caching;
   - collation and masks;

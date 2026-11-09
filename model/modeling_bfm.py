@@ -3,13 +3,13 @@
 "Da" stands for dynamic-aware: the GET embeddings these networks read carry the
 robot's dynamics.
 
-* ``BackwardMap`` B(s) and ``Discriminator`` D(s, z) keep the BFM-Zero MLPs.
-* ``DaGetBfmActor`` π(a | s, z) and ``DaGetForwardMap`` F(s, a, z) (also used for
-  the discriminator critic and the auxiliary critic, with one output) replace
-  the flat-state MLPs. They take the ``[batch, joints, hidden]`` output of
-  ``DaGetEncoder``, cross-attend from joint tokens to latent tokens made from z
-  (and optional context tokens), mix joints with self-attention, and either
-  decode one action per DoF (actor) or pool the joints (forward map, critics).
+* ``DaGetBackwardMap`` B(s) and ``DaGetDiscriminator`` D(s, z) read per-DoF state
+  tokens through their own ``DaGetEncoder``, pool the joints, and keep BFM-Zero's MLP head.
+* ``DaGetBfmActor`` pi(a | s, z) and ``DaGetForwardMap`` F(s, a, z) (also used for
+  the discriminator critic and the auxiliary critic, with one output) take the
+  ``[batch, joints, hidden]`` output of ``DaGetEncoder``, cross-attend from joint tokens
+  to latent tokens made from z (and optional context tokens), mix joints with
+  self-attention, and either decode one action per DoF (actor) or pool the joints.
 
 Nothing depends on the joint count or order, so one set of weights serves any
 embodiment the GET encoder can tokenize.
@@ -26,17 +26,17 @@ References and attribution:
   Representation to Optimize All Rewards." NeurIPS 2021.
 * GET-Zero: A. Patel, S. Song. "GET-Zero: Graph Embodiment Transformer for
   Zero-shot Embodiment Generalization." ICRA 2025.
-* ``BackwardMap``, ``Discriminator``, ``TruncatedNormal``, ``bfm_weight_init``,
-  the z projection and the inference methods of ``DaGetBfmModel`` are adapted
-  from ``humanoidverse/agents/nn_models.py`` and ``agents/fb/model.py`` of
+* The MLP heads of ``DaGetBackwardMap`` and ``DaGetDiscriminator``, ``TruncatedNormal``,
+  ``bfm_weight_init``, the z projection and the inference methods of ``DaGetBfmModel``
+  are adapted from ``humanoidverse/agents/nn_models.py`` and ``agents/fb/model.py`` of
   https://github.com/LeCAR-Lab/BFM-Zero (Copyright (c) Meta Platforms, Inc.
   and affiliates, CC BY-NC 4.0, https://creativecommons.org/licenses/by-nc/4.0/).
-  Changes: rewritten in this repo's style, dict inputs selected by config keys,
-  a padding mask on ``TruncatedNormal``, vectorized ``tracking_inference``.
+  Changes: rewritten in this repo's style, a padding mask on ``TruncatedNormal``,
+  vectorized ``tracking_inference``, per-DoF inputs.
   The truncated normal itself follows DrQ-v2 (Yarats et al., ICLR 2022) and
   the clipped target noise follows TD3 (Fujimoto et al., ICML 2018).
-* The GET-conditioned actor and forward map (latent tokens, joint-to-latent
-  cross-attention, per-DoF action head, joint readout) are new in this repo.
+* The per-DoF networks (latent tokens, joint-to-latent cross-attention, per-DoF
+  action head, joint readout, state encoders of B and D) are new in this repo.
 """
 
 from __future__ import annotations
@@ -51,21 +51,15 @@ from torch import nn
 from torch.distributions.utils import _standard_normal
 
 from model.configuration_bfm import BfmConfig
+from model.modeling_da_get import DaGetEncoder
 from model.transformer import AttentionBlock, CrossAttentionBlock, NumericTokenizer, SinusoidalPositionEmbedding
 
-Observation = torch.Tensor | Mapping[str, torch.Tensor]
+StateInputs = Mapping[str, torch.Tensor]
 
 
 def project_to_sphere(values: torch.Tensor) -> torch.Tensor:
     """Scale the last dimension to norm ``sqrt(dim)`` (BFM-Zero's z projection)."""
     return math.sqrt(values.shape[-1]) * F.normalize(values, dim=-1)
-
-
-def select_inputs(observation: Observation, keys: tuple[str, ...]) -> torch.Tensor:
-    """Concatenate ``keys`` of a dict observation; return a tensor unchanged."""
-    if isinstance(observation, Mapping):
-        return torch.cat([observation[key] for key in keys], dim=-1)
-    return observation
 
 
 def bfm_weight_init(module: nn.Module) -> None:
@@ -126,59 +120,95 @@ class TruncatedNormal(pyd.Normal):
         return action if self.mask is None else action.masked_fill(~self.mask, 0)
 
 
-class BackwardMap(nn.Module):
-    """Backward representation B(s) → z: BFM-Zero's MLP on the flat (privileged) state.
+class JointReadout(nn.Module):
+    """Pool joint tokens: a learned query attends over them, concatenated with their masked mean."""
 
-    Linear → LayerNorm → Tanh, then ``backward_hidden_layers - 1`` Linear → ReLU,
-    then Linear to ``z_dim`` and an optional projection to the sphere.
+    def __init__(self, hidden_size: int, num_heads: int, dropout: float = 0.0) -> None:
+        super().__init__()
+        self.query = nn.Parameter(torch.randn(1, 1, hidden_size) * 0.02)
+        self.attention = CrossAttentionBlock(hidden_size, num_heads, dropout=dropout)
+
+    def forward(self, hidden_states: torch.Tensor, joint_mask: torch.Tensor) -> torch.Tensor:
+        """Return ``[batch, 2 * hidden]`` from ``[batch, joints, hidden]`` and a bool mask."""
+        query = self.query.expand(hidden_states.shape[0], -1, -1)
+        pooled = self.attention(query, hidden_states, context_padding_mask=~joint_mask)[:, 0]
+        count = joint_mask.sum(1, keepdim=True).clamp(min=1).to(hidden_states.dtype)
+        return torch.cat((pooled, (hidden_states * joint_mask[..., None]).sum(1) / count), dim=-1)
+
+
+class StateEncoder(nn.Module):
+    """``DaGetEncoder`` over state tokens followed by a joint readout: any robot to one vector."""
+
+    def __init__(self, config: BfmConfig) -> None:
+        super().__init__()
+        self.encoder = DaGetEncoder(config.state_encoder_config)
+        self.readout = JointReadout(config.state_hidden_size, config.state_num_heads)
+        self.output_size = 2 * config.state_hidden_size
+
+    def forward(self, state: StateInputs) -> torch.Tensor:
+        """Encode ``DaGetEncoder`` keyword inputs into ``[batch, output_size]``."""
+        return self.readout(self.encoder(**state), state["joint_mask"])
+
+
+class DaGetBackwardMap(nn.Module):
+    """Backward representation B(s) -> z, shared across robots.
+
+    A ``StateEncoder`` replaces BFM-Zero's flat input. BFM-Zero's head follows:
+    Linear -> LayerNorm -> Tanh, ``backward_hidden_layers - 1`` Linear -> ReLU, then Linear
+    to ``z_dim`` and an optional projection to the sphere.
     """
 
     def __init__(self, config: BfmConfig) -> None:
         super().__init__()
         self.config = config
+        self.state_encoder = StateEncoder(config)
         width = config.backward_hidden_size
-        layers: list[nn.Module] = [nn.Linear(config.backward_input_size, width), nn.LayerNorm(width), nn.Tanh()]
+        layers: list[nn.Module] = [nn.Linear(self.state_encoder.output_size, width), nn.LayerNorm(width), nn.Tanh()]
         for _ in range(config.backward_hidden_layers - 1):
             layers += [nn.Linear(width, width), nn.ReLU()]
         layers.append(nn.Linear(width, config.z_dim))
         if config.backward_norm:
             layers.append(SphereNorm())
-        self.net = nn.Sequential(*layers)
+        self.head = nn.Sequential(*layers)
 
-    def forward(self, observation: Observation) -> torch.Tensor:
-        """Embed states ``[..., backward_input_size]`` (or a dict of them) into ``[..., z_dim]``."""
-        return self.net(select_inputs(observation, self.config.backward_input_keys))
+    def forward(self, state: StateInputs) -> torch.Tensor:
+        """Embed state tokens of one or several same-size robots into ``[batch, z_dim]``."""
+        return self.head(self.state_encoder(state))
 
 
-class Discriminator(nn.Module):
-    """FB-CPR discriminator D(s, z): BFM-Zero's MLP on the flat state and the latent.
+class DaGetDiscriminator(nn.Module):
+    """FB-CPR discriminator D(s, z), shared across robots.
 
-    Linear → LayerNorm → Tanh, then ``discriminator_hidden_layers - 1`` Linear → ReLU,
-    then Linear to one logit. ``compute_reward`` gives the CPR reward log D / (1 - D).
+    A ``StateEncoder`` replaces BFM-Zero's flat input. BFM-Zero's head follows on the pooled
+    state and z. ``compute_reward`` gives the CPR reward ``log D - log(1 - D)``.
     """
 
     def __init__(self, config: BfmConfig) -> None:
         super().__init__()
         self.config = config
+        self.state_encoder = StateEncoder(config)
         width = config.discriminator_hidden_size
-        layers: list[nn.Module] = [nn.Linear(config.discriminator_size + config.z_dim, width), nn.LayerNorm(width), nn.Tanh()]
+        layers: list[nn.Module] = [nn.Linear(self.state_encoder.output_size + config.z_dim, width), nn.LayerNorm(width), nn.Tanh()]
         for _ in range(config.discriminator_hidden_layers - 1):
             layers += [nn.Linear(width, width), nn.ReLU()]
         layers.append(nn.Linear(width, 1))
         self.trunk = nn.Sequential(*layers)
 
-    def compute_logits(self, observation: Observation, z: torch.Tensor) -> torch.Tensor:
+    def logits_from_features(self, features: torch.Tensor, z: torch.Tensor) -> torch.Tensor:
+        """Return logits from pooled state features ``[batch, output_size]``."""
+        return self.trunk(torch.cat([z, features], dim=-1))
+
+    def compute_logits(self, state: StateInputs, z: torch.Tensor) -> torch.Tensor:
         """Return logits ``[batch, 1]`` that (s, z) comes from the expert data."""
-        state = select_inputs(observation, self.config.discriminator_input_keys)
-        return self.trunk(torch.cat([z, state], dim=-1))
+        return self.logits_from_features(self.state_encoder(state), z)
 
-    def forward(self, observation: Observation, z: torch.Tensor) -> torch.Tensor:
+    def forward(self, state: StateInputs, z: torch.Tensor) -> torch.Tensor:
         """Return the expert probability ``[batch, 1]``."""
-        return torch.sigmoid(self.compute_logits(observation, z))
+        return torch.sigmoid(self.compute_logits(state, z))
 
-    def compute_reward(self, observation: Observation, z: torch.Tensor, eps: float = 1e-7) -> torch.Tensor:
+    def compute_reward(self, state: StateInputs, z: torch.Tensor, eps: float = 1e-7) -> torch.Tensor:
         """Return the CPR reward ``log D - log(1 - D)`` of shape ``[batch, 1]``."""
-        probability = self.forward(observation, z).clamp(eps, 1 - eps)
+        probability = self.forward(state, z).clamp(eps, 1 - eps)
         return probability.log() - (1 - probability).log()
 
 
@@ -196,9 +226,7 @@ class LatentMemory(nn.Module):
         self.latent_projection = nn.Linear(config.z_dim, config.num_latent_tokens * config.hidden_size)
         self.slot_embedding = nn.Parameter(torch.randn(config.num_latent_tokens, config.hidden_size) * 0.02)
         self.position_embedding = SinusoidalPositionEmbedding(config.hidden_size)
-        self.context_projection = (
-            nn.Linear(config.context_size, config.hidden_size) if config.context_size is not None else None
-        )
+        self.context_projection = nn.Linear(config.state_token_size, config.hidden_size)
         self.norm = nn.LayerNorm(config.hidden_size)
 
     def forward(
@@ -213,7 +241,7 @@ class LatentMemory(nn.Module):
         Args:
             z (torch.Tensor): ``[batch, z_dim]`` or a latent sequence ``[batch, L, z_dim]``.
             latent_mask (torch.Tensor | None): Bool ``[batch, L]`` of valid latents.
-            context_states (torch.Tensor | None): ``[batch, C, context_size]`` extra tokens.
+            context_states (torch.Tensor | None): ``[batch, C, state_token_size]`` extra tokens.
             context_mask (torch.Tensor | None): Bool ``[batch, C]`` of valid context tokens.
 
         Returns:
@@ -231,8 +259,6 @@ class LatentMemory(nn.Module):
             latent_mask = torch.ones(batch, length, dtype=torch.bool, device=z.device)
         mask = latent_mask.repeat_interleave(self.num_tokens, dim=1)
         if context_states is not None:
-            if self.context_projection is None:
-                raise ValueError("context_states given but config.context_size is None")
             if context_mask is None:
                 context_mask = torch.ones(context_states.shape[:2], dtype=torch.bool, device=z.device)
             tokens = torch.cat([tokens, self.context_projection(context_states)], dim=1)
@@ -314,7 +340,7 @@ class DaGetBfmActor(nn.Module):
             z (torch.Tensor): Latent ``[batch, z_dim]`` or latent sequence ``[batch, L, z_dim]``.
             std (float): Policy standard deviation.
             joint_mask (torch.Tensor | None): Bool ``[batch, joints]`` of real DoFs.
-            context_states (torch.Tensor | None): Optional ``[batch, C, context_size]`` tokens.
+            context_states (torch.Tensor | None): Optional ``[batch, C, state_token_size]`` tokens.
             context_mask (torch.Tensor | None): Bool ``[batch, C]``.
             latent_mask (torch.Tensor | None): Bool ``[batch, L]``.
 
@@ -350,8 +376,7 @@ class DaGetForwardNetwork(nn.Module):
         self.action_embedding = NumericTokenizer(config.action_size_per_joint, width, width)
         self.memory = LatentMemory(config)
         self.layers = nn.ModuleList(LatentConditionedBlock(config) for _ in range(config.forward_layers))
-        self.readout_query = nn.Parameter(torch.randn(1, 1, width) * 0.02)
-        self.readout = CrossAttentionBlock(width, config.num_attention_heads, dropout=config.dropout)
+        self.readout = JointReadout(width, config.num_attention_heads, config.dropout)
         self.output_head = nn.Sequential(
             nn.LayerNorm(2 * width), nn.Linear(2 * width, config.intermediate_size), nn.Mish(),
             nn.Linear(config.intermediate_size, output_size),
@@ -375,11 +400,7 @@ class DaGetForwardNetwork(nn.Module):
         hidden_states = hidden_states.masked_fill(~joint_mask[..., None], 0)
         for layer in self.layers:
             hidden_states = layer(hidden_states, joint_mask, memory, memory_mask)
-        query = self.readout_query.expand(hidden_states.shape[0], -1, -1)
-        pooled = self.readout(query, hidden_states, context_padding_mask=~joint_mask)[:, 0]
-        count = joint_mask.sum(1, keepdim=True).clamp(min=1).to(hidden_states.dtype)
-        mean = hidden_states.sum(1) / count
-        return self.output_head(torch.cat([pooled, mean], dim=-1))
+        return self.output_head(self.readout(hidden_states, joint_mask))
 
 
 class DaGetForwardMap(nn.Module):
@@ -412,7 +433,7 @@ class DaGetForwardMap(nn.Module):
             z (torch.Tensor): Latent ``[batch, z_dim]`` or ``[batch, L, z_dim]``.
             action (torch.Tensor): Per-DoF action ``[batch, joints]`` or ``[batch, joints, A]``.
             joint_mask (torch.Tensor | None): Bool ``[batch, joints]``.
-            context_states (torch.Tensor | None): Optional ``[batch, C, context_size]``.
+            context_states (torch.Tensor | None): Optional ``[batch, C, state_token_size]``.
             context_mask (torch.Tensor | None): Bool ``[batch, C]``.
             latent_mask (torch.Tensor | None): Bool ``[batch, L]``.
 
@@ -436,25 +457,25 @@ class DaGetBfmModel(nn.Module):
 
     Holds B, F, the actor, the discriminator critic, the discriminator and an
     optional auxiliary critic, plus BFM-Zero's latent sampling and inference.
-    Actor and critics take ``DaGetEncoder`` embeddings; B and D take flat states.
+    Actor and critics take ``DaGetEncoder`` embeddings; B and D take state tokens.
 
     Attributes:
-        backward_map (BackwardMap): B(s).
+        backward_map (DaGetBackwardMap): B(s).
         forward_map (DaGetForwardMap): F(s, a, z) with ``z_dim`` outputs.
         actor (DaGetBfmActor): π(a | s, z).
         critic (DaGetForwardMap): Discriminator-reward critic Q(s, a, z).
-        discriminator (Discriminator): D(s, z).
+        discriminator (DaGetDiscriminator): D(s, z).
         aux_critic (DaGetForwardMap | None): Auxiliary-reward critic.
     """
 
     def __init__(self, config: BfmConfig, use_aux_critic: bool = True) -> None:
         super().__init__()
         self.config = config
-        self.backward_map = BackwardMap(config)
+        self.backward_map = DaGetBackwardMap(config)
         self.forward_map = DaGetForwardMap(config, config.z_dim)
         self.actor = DaGetBfmActor(config)
         self.critic = DaGetForwardMap(config, 1)
-        self.discriminator = Discriminator(config)
+        self.discriminator = DaGetDiscriminator(config)
         self.aux_critic = DaGetForwardMap(config, 1) if use_aux_critic else None
 
     def init_weights(self) -> None:
@@ -488,18 +509,16 @@ class DaGetBfmModel(nn.Module):
         return distribution.mean if mean else distribution.sample()
 
     @torch.no_grad()
-    def goal_inference(self, next_observation: Observation) -> torch.Tensor:
+    def goal_inference(self, goal: StateInputs) -> torch.Tensor:
         """Goal reaching: ``z = B(s_goal)``."""
-        return self.project_z(self.backward_map(next_observation))
+        return self.project_z(self.backward_map(goal))
 
     @torch.no_grad()
-    def reward_inference(
-        self, next_observation: Observation, reward: torch.Tensor, weight: torch.Tensor | None = None
-    ) -> torch.Tensor:
-        """Reward optimization: ``z = Σ_i w_i r_i B(s_i)`` over buffer states, in chunks.
+    def reward_inference(self, next_state: StateInputs, reward: torch.Tensor, weight: torch.Tensor | None = None) -> torch.Tensor:
+        """Reward optimization: ``z = sum_i w_i r_i B(s_i)`` over one robot's buffer states, in chunks.
 
         Args:
-            next_observation (Observation): States ``[N, ...]`` (tensor or dict).
+            next_state (StateInputs): State tokens of ``N`` frames.
             reward (torch.Tensor): Rewards ``[N, 1]``.
             weight (torch.Tensor | None): Optional per-sample weights ``[N, 1]``.
 
@@ -510,28 +529,28 @@ class DaGetBfmModel(nn.Module):
         size, step = weighted.shape[0], self.config.inference_batch_size
         z = 0
         for start in range(0, size, step):
-            chunk = _slice(next_observation, start, start + step)
+            chunk = _slice_inputs(next_state, start, start + step)
             z = z + weighted[start:start + step].T @ self.backward_map(chunk)
         return self.project_z(z)
 
-    def reward_wr_inference(self, next_observation: Observation, reward: torch.Tensor) -> torch.Tensor:
+    def reward_wr_inference(self, next_state: StateInputs, reward: torch.Tensor) -> torch.Tensor:
         """Reward inference with softmax(10 r) weights, as BFM-Zero."""
-        return self.reward_inference(next_observation, reward, F.softmax(10 * reward, dim=0))
+        return self.reward_inference(next_state, reward, F.softmax(10 * reward, dim=0))
 
     @torch.no_grad()
-    def tracking_inference(self, next_observation: Observation) -> torch.Tensor:
+    def tracking_inference(self, next_state: StateInputs) -> torch.Tensor:
         """Motion tracking: ``z_t`` = mean of B over the next ``seq_length`` frames of one motion ``[T, ...]``."""
-        embeddings = self.backward_map(next_observation)
+        embeddings = self.backward_map(next_state)
         prefix = torch.cat([embeddings.new_zeros(1, embeddings.shape[-1]), embeddings.cumsum(0)])
-        ends = torch.clamp(torch.arange(embeddings.shape[0], device=embeddings.device) + self.config.seq_length,
-                           max=embeddings.shape[0])
         starts = torch.arange(embeddings.shape[0], device=embeddings.device)
+        ends = torch.clamp(starts + self.config.seq_length, max=embeddings.shape[0])
         z = (prefix[ends] - prefix[starts]) / (ends - starts)[:, None].to(embeddings.dtype)
         return self.project_z(z)
 
 
-def _slice(observation: Observation, start: int, end: int) -> Observation:
-    """Slice a tensor or every entry of a dict observation along the batch."""
-    if isinstance(observation, Mapping):
-        return {key: value[start:end] for key, value in observation.items()}
-    return observation[start:end]
+def _slice_inputs(state: StateInputs, start: int, end: int) -> dict:
+    """Slice encoder keyword inputs along the batch; graph distances are a tuple of tensors."""
+    return {
+        key: tuple(item[start:end] for item in value) if isinstance(value, tuple) else value[start:end]
+        for key, value in state.items()
+    }

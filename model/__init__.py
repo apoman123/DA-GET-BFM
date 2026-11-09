@@ -9,11 +9,11 @@ from model.embodiment import (
     collate_embodiments,
 )
 from model.modeling_bfm import (
-    BackwardMap,
+    DaGetBackwardMap,
     DaGetBfmActor,
     DaGetBfmModel,
+    DaGetDiscriminator,
     DaGetForwardMap,
-    Discriminator,
     TruncatedNormal,
 )
 from model.modeling_da_get import DaGetEncoder, PhysicsMemory
@@ -32,15 +32,15 @@ from model.urdf import UrdfRobot, parse_urdf
 __all__ = [
     "ActuatorDefaults",
     "ActuatorSpec",
-    "BackwardMap",
     "BfmConfig",
+    "DaGetBackwardMap",
     "DaGetBfmActor",
     "DaGetBfmModel",
     "DaGetConfig",
+    "DaGetDiscriminator",
     "DaGetEncoder",
     "DaGetForwardMap",
     "DaGetTokenizer",
-    "Discriminator",
     "EmbodimentBatch",
     "EmbodimentGraph",
     "JointFeatureConfig",

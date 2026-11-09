@@ -1,15 +1,15 @@
 """Observations of the cross-embodiment FB-CPR agent, built the same way from simulation and data.
 
-Each robot state gives two views, matching BFM-Zero's asymmetric inputs:
+Each robot state gives two per-DoF views, matching BFM-Zero's asymmetric inputs:
 
-* **Policy view:** ``DaGetEncoder`` inputs (tokens with history, dynamics features,
-  mass matrix), identical to what physics pretraining feeds the encoder. As in
-  BFM-Zero, the policy does not see the base linear velocity by default.
-* **Flat state:** one fixed-size vector for B, D and the critics' privileged token,
-  padded to ``max_joints``: gravity direction (3), base angular velocity (3), base
-  linear velocity / size (3), base height / size (1), normalized joint positions,
-  velocities and valid-joint mask (3 x J), and joint-frame positions in the base
-  frame / size (3 x J, the counterpart of BFM-Zero's body positions).
+* **Policy view:** ``DaGetEncoder`` inputs (tokens with history and last actions, dynamics
+  features with the last torque, mass matrix), identical to what physics pretraining
+  feeds the encoder. It carries sensor noise and, as in BFM-Zero, no base linear velocity.
+* **State view:** tokens for B, D and the critics' privileged context. Each joint token has
+  the normalized position and velocity and the joint-frame position in the base frame,
+  and repeats the base state (gravity direction, angular velocity, linear velocity /
+  size, height / size). It has no history, action or noise, because motion data has none:
+  otherwise D could spot simulated states by those signals alone.
 """
 
 from __future__ import annotations
@@ -33,13 +33,9 @@ from model.training.episodes import (
     reconstruct_base,
 )
 
-FLAT_GLOBAL_SIZE = 10
 VARIABLE_LOCAL_SIZE = 5
-
-
-def flat_state_size(max_joints: int) -> int:
-    """Return the flat-state width for robots of up to ``max_joints`` DoF."""
-    return FLAT_GLOBAL_SIZE + 6 * max_joints
+STATE_LOCAL_SIZE = 5
+STATE_GLOBAL_SIZE = 10
 
 
 def pad_joints(values: torch.Tensor, max_joints: int, dim: int = 1) -> torch.Tensor:
@@ -80,43 +76,72 @@ class RobotState:
 
 
 @dataclass
+class StateView:
+    """Action-free state tokens' variable parts (``float32``).
+
+    Attributes:
+        local (torch.Tensor): ``[..., J, 5]`` per-joint features.
+        global_features (torch.Tensor): ``[..., 10]`` base features.
+        dynamics (torch.Tensor): ``[..., J, 7]`` dynamics features without a last torque.
+    """
+
+    local: torch.Tensor
+    global_features: torch.Tensor
+    dynamics: torch.Tensor
+
+    def select(self, indices: torch.Tensor) -> StateView:
+        """Return some entries along the first dimension."""
+        return StateView(self.local[indices], self.global_features[indices], self.dynamics[indices])
+
+
+@dataclass
 class Observation:
     """Everything stored per step (``float32``).
 
     Attributes:
-        tokens (torch.Tensor): ``[N, J, F]`` encoder tokens.
-        dynamics (torch.Tensor): ``[N, J, 7]`` dynamics features.
-        mass (torch.Tensor): ``[N, J, J]`` mass matrix.
-        flat (torch.Tensor): ``[N, S]`` flat state.
+        local (torch.Tensor): ``[N, H, J, 5]`` policy joint history.
+        global_features (torch.Tensor): ``[N, H, 11]`` policy base history.
+        dynamics (torch.Tensor): ``[N, J, 7]`` policy dynamics features.
+        mass (torch.Tensor): ``[N, J, J]`` mass matrix at the sensed configuration.
+        state (StateView): True state, for B, D and the critics.
     """
 
-    tokens: torch.Tensor
+    local: torch.Tensor
+    global_features: torch.Tensor
     dynamics: torch.Tensor
     mass: torch.Tensor
-    flat: torch.Tensor
+    state: StateView
 
     def select(self, indices: torch.Tensor) -> Observation:
         """Return the observation of some environments."""
-        return Observation(self.tokens[indices], self.dynamics[indices], self.mass[indices], self.flat[indices])
+        return Observation(self.local[indices], self.global_features[indices], self.dynamics[indices], self.mass[indices], self.state.select(indices))
+
+    def assign(self, indices: torch.Tensor, other: Observation) -> None:
+        """Overwrite some environments in place."""
+        self.local[indices] = other.local
+        self.global_features[indices] = other.global_features
+        self.dynamics[indices] = other.dynamics
+        self.mass[indices] = other.mass
+        self.state.local[indices] = other.state.local
+        self.state.global_features[indices] = other.state.global_features
+        self.state.dynamics[indices] = other.state.dynamics
 
 
 class EmbodimentObserver:
-    """Build tokens, physics features and flat states of one robot.
+    """Build policy and state views of one robot.
 
     Args:
         record (EmbodimentRecord): Robot, with position-mode actuator specs.
-        history_size (int): Observation history length H of the tokens.
-        max_joints (int): Padded joint count of the flat state.
+        history_size (int): Observation history length H of the policy tokens.
         observe_base_linear_velocity (bool): Show the base linear velocity to the policy.
-        use_height (bool): Fill the height in the flat state (off if the motions lack it).
-        use_linear_velocity (bool): Fill the linear velocity in the flat state (same).
+        use_height (bool): Fill the height in the state view (off if the motions lack it).
+        use_linear_velocity (bool): Fill the linear velocity in the state view (same).
     """
 
     def __init__(
         self,
         record: EmbodimentRecord,
         history_size: int,
-        max_joints: int,
         observe_base_linear_velocity: bool = False,
         use_height: bool = True,
         use_linear_velocity: bool = True,
@@ -124,7 +149,6 @@ class EmbodimentObserver:
         self.record = record
         self.graph = record.graph
         self.history_size = history_size
-        self.max_joints = max_joints
         self.observe_base_linear_velocity = observe_base_linear_velocity
         self.use_height = use_height
         self.use_linear_velocity = use_linear_velocity
@@ -132,42 +156,54 @@ class EmbodimentObserver:
         self.floating = bool(self.graph.floating_base)
         self.length = float(self.graph.characteristic_length)
         self.structure = collate_embodiments([self.graph])
-        self.tokenizer = DaGetTokenizer(
-            fixed_local_size=record.joint_features.shape[1],
-            variable_local_size=VARIABLE_LOCAL_SIZE,
-            variable_global_size=BASE_FEATURE_SIZE,
-            history_size=history_size,
-        )
+        features = record.joint_features.shape[1]
+        self.tokenizer = DaGetTokenizer(fixed_local_size=features, variable_local_size=VARIABLE_LOCAL_SIZE,
+                                        variable_global_size=BASE_FEATURE_SIZE, history_size=history_size)
+        self.state_tokenizer = DaGetTokenizer(fixed_local_size=features, variable_local_size=STATE_LOCAL_SIZE,
+                                              variable_global_size=STATE_GLOBAL_SIZE, history_size=1)
         speed = self.actuator["max_velocity"]
         self.speed_scale = torch.where(speed > 0, speed, torch.full_like(speed, 10.0))
+        self._cached: dict[str, dict] = {}
 
     @property
     def token_size(self) -> int:
-        """Return the encoder input width."""
+        """Return the policy encoder's input width."""
         return self.tokenizer.token_size
 
-    def flat_state(self, state: RobotState) -> torch.Tensor:
-        """Return the padded ``[N, S]`` flat state."""
-        count = state.q.shape[0]
+    @property
+    def state_token_size(self) -> int:
+        """Return the width of the state tokens."""
+        return self.state_tokenizer.token_size
+
+    def state_view(self, state: RobotState) -> StateView:
+        """Return the view of the true state read by B, D and the critics."""
         linear = state.linear_velocity if self.use_linear_velocity else torch.zeros_like(state.linear_velocity)
         height = state.height if self.use_height else torch.zeros_like(state.height)
         positions = self.graph.forward_kinematics(state.q)[..., :3, 3] / self.length
-        mask = torch.ones_like(state.q)
-        parts = (
-            state.gravity_direction,
-            state.angular_velocity,
-            linear / self.length,
-            height[:, None] / self.length,
-            pad_joints(self.graph.normalize_joint_positions(state.q), self.max_joints),
-            pad_joints(state.qd / self.speed_scale, self.max_joints),
-            pad_joints(mask, self.max_joints),
-            pad_joints(positions, self.max_joints).reshape(count, -1),
+        local = torch.cat(
+            (
+                self.graph.normalize_joint_positions(state.q)[..., None],
+                (state.qd / self.speed_scale)[..., None],
+                positions,
+            ),
+            dim=-1,
         )
-        return torch.cat(parts, dim=-1).float()
+        global_features = torch.cat((state.gravity_direction, state.angular_velocity, linear / self.length, height[:, None] / self.length), dim=-1)
+        return StateView(local.float(), global_features.float(), self._dynamics(state, linear, None, 0.0).float())
+
+    def _dynamics(self, state: RobotState, linear: torch.Tensor, previous_torque: torch.Tensor | None, source: float) -> torch.Tensor:
+        """Return dynamics features; ``source`` is the torque-source flag (0 means unknown)."""
+        q, qd = state.q, state.qd
+        mass_diagonal, gravity_term = configuration_terms(self.graph, q, STANDARD_GRAVITY * state.gravity_direction)
+        coriolis, friction = velocity_terms(
+            self.graph, q, qd, linear if self.floating else None, state.angular_velocity if self.floating else None, self.actuator
+        )
+        previous = torch.zeros_like(q) if previous_torque is None else previous_torque
+        return assemble_dynamics_features(mass_diagonal, coriolis, gravity_term, friction, previous, self.actuator["continuous_torque"], source)
 
     def policy_step(self, state: RobotState, previous_target: torch.Tensor | None, previous_q: torch.Tensor | None,
                     previous_qd: torch.Tensor | None) -> tuple[torch.Tensor, torch.Tensor]:
-        """Return one history step of tokens: local ``[N, J, 5]`` and global ``[N, 11]``.
+        """Return one history step of policy tokens: local ``[N, J, 5]`` and global ``[N, 11]``.
 
         ``previous_*`` describe the command at t-1 with the state it was issued in;
         ``None`` (first frame of an episode) gives zero action features, as in pretraining.
@@ -188,10 +224,7 @@ class EmbodimentObserver:
         )
         linear = state.linear_velocity if self.observe_base_linear_velocity else torch.zeros_like(state.linear_velocity)
         flag = torch.full((count, 1), 1.0 if self.floating else 0.0, dtype=state.q.dtype)
-        global_features = torch.cat(
-            (state.gravity_direction, state.angular_velocity, linear / self.length, flag, flag), dim=-1
-        )
-        return local, global_features
+        return local, torch.cat((state.gravity_direction, state.angular_velocity, linear / self.length, flag, flag), dim=-1)
 
     def observation(
         self,
@@ -206,35 +239,70 @@ class EmbodimentObserver:
         Args:
             local_history (torch.Tensor): ``[N, H, J, 5]``, oldest first.
             global_history (torch.Tensor): ``[N, H, 11]``, oldest first.
-            state (RobotState): True state, for the flat view.
-            policy_state (RobotState): State the policy perceives (with sensor noise).
+            state (RobotState): True state, for the state view.
+            policy_state (RobotState): State the policy senses.
             previous_torque (torch.Tensor | None): ``[N, J]`` torque applied at t-1.
 
         Returns:
             Observation: Stored tensors.
         """
-        count = state.q.shape[0]
-        q, qd = policy_state.q, policy_state.qd
-        gravity = STANDARD_GRAVITY * policy_state.gravity_direction
-        mass_diagonal, gravity_term = configuration_terms(self.graph, q, gravity)
-        floating = self.floating
-        linear = policy_state.linear_velocity if self.observe_base_linear_velocity else torch.zeros_like(q[:, :3])
-        coriolis, friction = velocity_terms(
-            self.graph, q, qd, linear if floating else None,
-            policy_state.angular_velocity if floating else None, self.actuator,
+        linear = policy_state.linear_velocity if self.observe_base_linear_velocity else torch.zeros_like(policy_state.linear_velocity)
+        dynamics = self._dynamics(policy_state, linear, previous_torque, 1.0)
+        return Observation(
+            local_history.float(), global_history.float(), dynamics.float(),
+            self.graph.mass_matrix(policy_state.q).float(), self.state_view(state),
         )
-        dynamics = assemble_dynamics_features(
-            mass_diagonal, coriolis, gravity_term, friction,
-            torch.zeros_like(q) if previous_torque is None else previous_torque,
-            self.actuator["continuous_torque"], 1.0,
+
+    def _static(self, device: torch.device) -> dict:
+        """Return the robot's per-sample encoder inputs on a device, with a batch of one."""
+        key = str(device)
+        if key not in self._cached:
+            structure = self.structure
+            self._cached[key] = {
+                "parent_indices": structure.parent_indices.to(device),
+                "joint_mask": structure.joint_mask.to(device),
+                "adjacency_matrix": structure.adjacency_matrix.to(device),
+                "graph_distances": tuple(item.to(device) for item in structure.graph_distances),
+                "rigid_body_features": self.record.rigid_body_features.float().to(device)[None],
+                "actuator_features": self.record.actuator_features.float().to(device)[None],
+                "joint_features": self.record.joint_features.float().to(device)[None],
+            }
+        return self._cached[key]
+
+    def structure_inputs(self, count: int, device: torch.device) -> dict:
+        """Return the graph and hardware inputs of the encoder for ``count`` samples."""
+        static = self._static(device)
+
+        def expand(values: torch.Tensor) -> torch.Tensor:
+            return values.expand(count, *values.shape[1:])
+
+        return {
+            "parent_indices": expand(static["parent_indices"]),
+            "joint_mask": expand(static["joint_mask"]),
+            "adjacency_matrix": expand(static["adjacency_matrix"]),
+            "graph_distances": tuple(expand(item) for item in static["graph_distances"]),
+            "rigid_body_features": expand(static["rigid_body_features"]),
+            "actuator_features": expand(static["actuator_features"]),
+        }
+
+    def _joint_features(self, count: int, device: torch.device) -> torch.Tensor:
+        return self._static(device)["joint_features"].expand(count, -1, -1)
+
+    def policy_tokens(self, local: torch.Tensor, global_features: torch.Tensor) -> torch.Tensor:
+        """Return policy tokens ``[N, J, F]``, as physics pretraining builds them."""
+        count, _, joints, _ = local.shape
+        mask = torch.ones((count, joints), dtype=torch.bool, device=local.device)
+        return self.tokenizer(self._joint_features(count, local.device), mask, variable_local=local, variable_global=global_features)
+
+    def state_inputs(self, view: StateView) -> dict:
+        """Return keyword inputs of a state encoder for ``N`` state views."""
+        count, joints, _ = view.local.shape
+        device = view.local.device
+        mask = torch.ones((count, joints), dtype=torch.bool, device=device)
+        tokens = self.state_tokenizer(
+            self._joint_features(count, device), mask, variable_local=view.local[:, None], variable_global=view.global_features[:, None]
         )
-        tokens = self.tokenizer(
-            self.record.joint_features.float().expand(count, -1, -1),
-            torch.ones((count, q.shape[1]), dtype=torch.bool),
-            variable_local=local_history.float(),
-            variable_global=global_history.float(),
-        )
-        return Observation(tokens, dynamics.float(), self.graph.mass_matrix(q).float(), self.flat_state(state))
+        return {"input_values": tokens, "dynamics_features": view.dynamics, **self.structure_inputs(count, device)}
 
 
 def trajectory_state(record: EmbodimentRecord, trajectory: Trajectory) -> tuple[RobotState, bool, bool]:

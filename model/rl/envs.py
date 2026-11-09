@@ -1,10 +1,11 @@
-"""Parallel MuJoCo environments of one robot, built from its embodiment graph.
+"""Parallel environments of one robot, with one implementation per simulator.
 
-Follows BFM-Zero's environment: 200 Hz physics and 50 Hz PD position control around a
-nominal pose, 500-step episodes that start from random motion frames, domain
-randomization (friction, link mass, base center of mass, nominal pose, pushes), and
-embodiment-independent auxiliary rewards. Only the feet collide in the generated
-model, so a falling robot ends its episode instead of recovering from the ground.
+``EmbodimentEnv`` holds what BFM-Zero's environment defines independently of the simulator:
+PD position control around a nominal pose at 50 Hz, 500-step episodes without fall
+termination, starts from prioritized motion frames with 30% lying-down starts, domain
+randomization (nominal pose, pushes; simulators add friction, mass, center of mass), and
+the auxiliary rewards. ``MujocoEmbodimentEnv`` runs on CPU from an embodiment graph, for
+tests and small checks. Training at scale uses ``model.rl.isaac_env``.
 """
 
 from __future__ import annotations
@@ -20,10 +21,10 @@ import torch
 from model.physics_schema import ACTUATOR_MODES
 from model.rl.observation import RobotState
 from model.training.episodes import EmbodimentRecord
-from model.training.ground_sim import ContactGeometry, build_mjcf, foot_points
+from model.training.ground_sim import ContactGeometry, build_mjcf
 
-UP = np.array([0.0, 0.0, 1.0])
 SOFT_LIMIT = 0.95  # BFM-Zero's soft_dof_pos_limit
+QUARTER_TURN = np.array([[1.0, 0.0, 0.0], [0.0, 0.0, -1.0], [0.0, 1.0, 0.0]])
 
 
 @dataclass
@@ -42,7 +43,7 @@ class DomainRandomization:
 
 @dataclass
 class EnvConfig:
-    """Settings of ``MujocoEmbodimentEnv``.
+    """Settings of an environment.
 
     Attributes:
         num_envs (int): Parallel worlds.
@@ -50,10 +51,14 @@ class EnvConfig:
         physics_dt (float): Physics step in s (BFM-Zero: 200 Hz).
         max_episode_steps (int): Episode length in control steps.
         action_scale (float): Target offset in rad at ``|action| = 1`` (BFM-Zero: 0.25 x 5).
-        min_height_ratio (float): Episode ends below this fraction of the nominal height.
-        max_tilt_degrees (float): Episode ends above this base tilt.
+        fall_start_probability (float): Episodes that start lying down (BFM-Zero: 0.3).
+        terminate_on_fall (bool): End episodes when fallen (BFM-Zero: no, it must get up).
+        min_height_ratio (float): Fallen below this fraction of the nominal height.
+        max_tilt_degrees (float): Fallen above this base tilt.
+        armature (float): Rotor inertia of every joint in kg m^2, which URDFs lack. Without
+            it, light links with stiff gains make MuJoCo diverge (G1 wrists at 200 Hz).
         nominal_pose (dict[str, float]): Joint name to nominal position; others are 0.
-        geometry (ContactGeometry): Foot collision geometry.
+        geometry (ContactGeometry): Foot collision geometry (MuJoCo only).
         randomization (DomainRandomization): Domain randomization.
         seed (int): Random seed.
     """
@@ -63,8 +68,11 @@ class EnvConfig:
     physics_dt: float = 0.005
     max_episode_steps: int = 500
     action_scale: float = 1.25
+    fall_start_probability: float = 0.3
+    terminate_on_fall: bool = False
     min_height_ratio: float = 0.4
     max_tilt_degrees: float = 70.0
+    armature: float = 0.01
     nominal_pose: dict[str, float] = field(default_factory=dict)
     geometry: ContactGeometry = field(default_factory=ContactGeometry)
     randomization: DomainRandomization = field(default_factory=DomainRandomization)
@@ -79,7 +87,7 @@ class EnvStep:
         state (RobotState): Next state of every world.
         torque (torch.Tensor): ``[N, J]`` applied joint torques.
         target (torch.Tensor): ``[N, J]`` joint targets that were commanded.
-        terminated (torch.Tensor): Bool ``[N]``: fell or diverged.
+        terminated (torch.Tensor): Bool ``[N]``: diverged, or fell if that ends episodes.
         truncated (torch.Tensor): Bool ``[N]``: reached the time limit.
         aux_rewards (dict[str, torch.Tensor]): ``[N]`` unscaled auxiliary rewards.
     """
@@ -92,8 +100,186 @@ class EnvStep:
     aux_rewards: dict[str, torch.Tensor]
 
 
-class MujocoEmbodimentEnv:
-    """Batch of independent MuJoCo worlds of one robot, stepped by a thread pool.
+class EmbodimentEnv:
+    """Simulator-independent logic of one robot's worlds.
+
+    Simulators implement ``_write_state``, ``_apply_targets``, ``_push``, ``read_state``,
+    ``_torque``, ``_diverged``, ``_slippage``, ``_undesired_contact`` and ``_feet_orientation``.
+    Stepping has three phases so that several robots can share one simulation:
+    ``prepare`` (all robots), one physics advance, ``collect`` (all robots).
+
+    Args:
+        record (EmbodimentRecord): Robot with position-mode actuators.
+        config (EnvConfig): Settings.
+    """
+
+    def __init__(self, record: EmbodimentRecord, config: EnvConfig) -> None:
+        self.record = record
+        self.config = config
+        self.graph = record.graph
+        self.num_envs = config.num_envs
+        self.joints = self.graph.num_joints
+        self.floating = bool(self.graph.floating_base)
+        self.rng = np.random.default_rng(config.seed)
+        if bool((record.actuator["mode"] == ACTUATOR_MODES.index("thrust")).any()):
+            raise NotImplementedError(f"{record.name}: rotor (thrust) robots are not supported by the RL environments")
+        self.lower, self.upper = self.graph.lower.numpy(), self.graph.upper.numpy()
+        self.limited = np.array([kind != "continuous" for kind in self.graph.joint_types]) & (self.upper > self.lower)
+        nominal = np.zeros(self.joints)
+        for name, value in config.nominal_pose.items():
+            nominal[self.graph.joint_names.index(name)] = value
+        self.nominal = np.where(self.limited, np.clip(nominal, self.lower, self.upper), nominal)
+        self.world_nominal = np.stack([self._world_nominal() for _ in range(self.num_envs)])
+        self.previous_action = np.zeros((self.num_envs, self.joints))
+        self.steps = np.zeros(self.num_envs, dtype=np.int64)
+        self.next_push = np.zeros(self.num_envs)
+        self.evaluating = False
+        self.motions: list[dict[str, np.ndarray]] = []
+        self.motion_weights: np.ndarray | None = None
+        self.reference_height = 0.0
+        self._targets = np.zeros((self.num_envs, self.joints))
+        self._actions = np.zeros((self.num_envs, self.joints))
+
+    def _world_nominal(self) -> np.ndarray:
+        """Return one world's nominal pose, with its random joint offset."""
+        settings = self.config.randomization
+        if not settings.enabled:
+            return self.nominal.copy()
+        return self.nominal + self.rng.uniform(-settings.nominal_offset, settings.nominal_offset, self.joints)
+
+    def set_motions(self, motions: list[dict[str, np.ndarray]], weights: np.ndarray | None = None) -> None:
+        """Set the motions episodes start from, with optional sampling weights."""
+        self.motions = motions
+        self.set_motion_weights(weights)
+
+    def set_motion_weights(self, weights: np.ndarray | None) -> None:
+        """Set how often each motion starts an episode (prioritization by tracking error)."""
+        if weights is None:
+            self.motion_weights = None
+            return
+        weights = np.asarray(weights, dtype=np.float64)
+        self.motion_weights = weights / weights.sum()
+
+    def _lie_down(self, frame: dict[str, np.ndarray]) -> dict[str, np.ndarray]:
+        """Turn a motion frame by a quarter turn about x, onto the back or the front (BFM-Zero's start)."""
+        sign = 1.0 if self.rng.uniform() < 0.5 else -1.0
+        turn = QUARTER_TURN.copy()
+        turn[1, 2] *= sign
+        turn[2, 1] *= sign
+        return {**frame, "rotation": turn @ frame["rotation"], "lying": True}
+
+    def sample_frame(self) -> dict[str, np.ndarray] | None:
+        """Sample a start frame: a prioritized motion, a uniform time, maybe lying down."""
+        if not self.motions:
+            return None
+        motion = self.motions[int(self.rng.choice(len(self.motions), p=self.motion_weights))]
+        time = int(self.rng.integers(len(motion["q"])))
+        frame = {key: value[time] for key, value in motion.items()}
+        if self.floating and self.rng.uniform() < self.config.fall_start_probability:
+            frame = self._lie_down(frame)
+        return frame
+
+    def reset(self, indices: np.ndarray | None = None, frames: list[dict | None] | None = None) -> None:
+        """Reset worlds to given frames, or to sampled ones."""
+        indices = np.arange(self.num_envs) if indices is None else indices
+        for position, index in enumerate(indices):
+            frame = frames[position] if frames is not None else self.sample_frame()
+            self._write_state(int(index), frame)
+            self.previous_action[index] = 0.0
+            self.steps[index] = 0
+            low, high = self.config.randomization.push_interval
+            self.next_push[index] = self.rng.uniform(low, high)
+        self._after_reset()
+
+    def _after_reset(self) -> None:
+        """Let the simulator refresh its state after writes."""
+
+    def prepare(self, actions: np.ndarray) -> None:
+        """Turn normalized actions ``[N, J]`` in [-1, 1] into PD targets and apply pushes."""
+        actions = np.clip(np.nan_to_num(actions), -1.0, 1.0)
+        targets = self.world_nominal + self.config.action_scale * actions
+        self._targets = np.where(self.limited, np.clip(targets, self.lower, self.upper), targets)
+        self._actions = actions
+        self._apply_targets(self._targets)
+        settings = self.config.randomization
+        if self.floating and settings.enabled and not self.evaluating:
+            elapsed = self.steps * self.config.control_dt
+            for index in np.nonzero(elapsed >= self.next_push)[0]:
+                linear = self.rng.uniform(-settings.push_linear_velocity, settings.push_linear_velocity, 2)
+                angular = self.rng.uniform(-settings.push_angular_velocity, settings.push_angular_velocity, 3)
+                self._push(int(index), linear, angular)
+                self.next_push[index] = elapsed[index] + self.rng.uniform(*settings.push_interval)
+
+    def fallen(self, state: RobotState) -> np.ndarray:
+        """Return which worlds' base is down or tilted."""
+        if not self.floating:
+            return np.zeros(self.num_envs, dtype=bool)
+        minimum_up = math.cos(math.radians(self.config.max_tilt_degrees))
+        low = state.height.numpy() < self.config.min_height_ratio * self.reference_height
+        return low | (-state.gravity_direction[:, 2].numpy() < minimum_up)
+
+    def collect(self) -> EnvStep:
+        """Read the results of the physics advance."""
+        self.steps += 1
+        diverged = self._diverged()
+        for index in np.nonzero(diverged)[0]:
+            self._write_state(int(index), None)  # Keep the buffer finite.
+        if diverged.any():
+            self._after_reset()
+        state = self.read_state()
+        terminated = diverged | (self.fallen(state) if self.config.terminate_on_fall else False)
+        truncated = (self.steps >= self.config.max_episode_steps) & ~terminated
+        span = np.where(self.limited, self.upper - self.lower, np.inf)
+        middle = np.where(self.limited, 0.5 * (self.upper + self.lower), 0.0)
+        soft_lower = np.where(self.limited, middle - 0.5 * span * SOFT_LIMIT, -np.inf)
+        soft_upper = np.where(self.limited, middle + 0.5 * span * SOFT_LIMIT, np.inf)
+        q = state.q.numpy()
+        outside = np.clip(soft_lower - q, 0.0, None) + np.clip(q - soft_upper, 0.0, None)
+        aux_rewards = {
+            "limits_dof_pos": torch.from_numpy(outside.sum(axis=1)),
+            "penalty_action_rate": torch.from_numpy(((self._actions - self.previous_action) ** 2).sum(axis=1)),
+            "penalty_slippage": torch.from_numpy(self._slippage()),
+            "penalty_undesired_contact": torch.from_numpy(self._undesired_contact().astype(np.float64)),
+            "penalty_feet_ori": torch.from_numpy(self._feet_orientation()),
+        }
+        self.previous_action = self._actions.copy()
+        return EnvStep(state, self._torque(), torch.from_numpy(self._targets.copy()), torch.from_numpy(terminated), torch.from_numpy(truncated), aux_rewards)
+
+    def _write_state(self, index: int, frame: dict[str, np.ndarray] | None) -> None:
+        raise NotImplementedError
+
+    def _apply_targets(self, targets: np.ndarray) -> None:
+        raise NotImplementedError
+
+    def _push(self, index: int, linear: np.ndarray, angular: np.ndarray) -> None:
+        raise NotImplementedError
+
+    def read_state(self) -> RobotState:
+        """Return the current state of every world."""
+        raise NotImplementedError
+
+    def _torque(self) -> torch.Tensor:
+        raise NotImplementedError
+
+    def _diverged(self) -> np.ndarray:
+        raise NotImplementedError
+
+    def _slippage(self) -> np.ndarray:
+        raise NotImplementedError
+
+    def _undesired_contact(self) -> np.ndarray:
+        raise NotImplementedError
+
+    def _feet_orientation(self) -> np.ndarray:
+        raise NotImplementedError
+
+
+class MujocoEmbodimentEnv(EmbodimentEnv):
+    """Worlds in MuJoCo, built from the embodiment graph.
+
+    Links collide with the floor through one sphere each, and feet through their contact
+    geometry. Meshes are not used and links do not collide with each other, so self-contact
+    needs ``model.rl.isaac_env``.
 
     Args:
         record (EmbodimentRecord): Robot with position-mode actuators.
@@ -104,43 +290,23 @@ class MujocoEmbodimentEnv:
     def __init__(self, record: EmbodimentRecord, config: EnvConfig, pool: ThreadPoolExecutor | None = None) -> None:
         import mujoco
 
+        super().__init__(record, config)
         self.mujoco = mujoco
-        self.record = record
-        self.config = config
         self.pool = pool
-        self.graph = record.graph
-        self.num_envs = config.num_envs
-        self.joints = self.graph.num_joints
-        self.floating = bool(self.graph.floating_base)
-        self.rng = np.random.default_rng(config.seed)
-        actuator = record.actuator
-        if bool((actuator["mode"] == ACTUATOR_MODES.index("thrust")).any()):
-            raise NotImplementedError(f"{record.name}: rotor (thrust) robots are not supported by the MuJoCo RL environment yet")
         self.substeps = max(1, int(round(config.control_dt / config.physics_dt)))
-        self.lower, self.upper = self.graph.lower.numpy(), self.graph.upper.numpy()
-        self.limited = np.array([kind != "continuous" for kind in self.graph.joint_types]) & (self.upper > self.lower)
-        nominal = np.zeros(self.joints)
-        for name, value in config.nominal_pose.items():
-            nominal[self.graph.joint_names.index(name)] = value
-        self.nominal = np.where(self.limited, np.clip(nominal, self.lower, self.upper), nominal)
-        surface = record.surface_contacts if record.surface_contacts is not None else len(record.contact_links) <= 2
-        self.feet = foot_points(record, config.geometry, surface) if record.contact_links else []
-        xml = build_mjcf(record, actuator["kp"].numpy(), actuator["kd"].numpy(), config.geometry, 0.9, config.physics_dt)
+        actuator = record.actuator
+        radius = max(0.02, 0.05 * float(self.graph.characteristic_length))
+        xml = build_mjcf(record, actuator["kp"].numpy(), actuator["kd"].numpy(), config.geometry, 0.9, config.physics_dt, body_collision_radius=radius, armature=config.armature)
         self.base_model = mujoco.MjModel.from_xml_string(xml)
         self._resolve_indices()
         self.models = [self._randomized_model() for _ in range(self.num_envs)]
         self.datas = [mujoco.MjData(model) for model in self.models]
         for model, data in zip(self.models, self.datas):
             mujoco.mj_setConst(model, data)
-        self.world_nominal = np.stack([self._world_nominal() for _ in range(self.num_envs)])
-        self.previous_action = np.zeros((self.num_envs, self.joints))
-        self.steps = np.zeros(self.num_envs, dtype=np.int64)
-        self.next_push = np.zeros(self.num_envs)
         self.reference_height = self._nominal_height()
-        self.motions: list[dict[str, np.ndarray]] = []
 
     def _resolve_indices(self) -> None:
-        """Look up the MuJoCo addresses of joints, actuators and feet."""
+        """Look up the MuJoCo addresses of joints, actuators and collision geoms."""
         mujoco, model, names = self.mujoco, self.base_model, self.graph.joint_names
         self.qpos_index = np.array([model.jnt_qposadr[mujoco.mj_name2id(model, mujoco.mjtObj.mjOBJ_JOINT, n)] for n in names])
         self.dof_index = np.array([model.jnt_dofadr[mujoco.mj_name2id(model, mujoco.mjtObj.mjOBJ_JOINT, n)] for n in names])
@@ -148,10 +314,16 @@ class MujocoEmbodimentEnv:
             [names.index(mujoco.mj_id2name(model, mujoco.mjtObj.mjOBJ_ACTUATOR, a)[2:]) for a in range(model.nu)], dtype=np.int64
         )
         self.foot_geoms: dict[int, int] = {}
+        self.link_geoms: set[int] = set()
         for geom in range(model.ngeom):
             name = mujoco.mj_id2name(model, mujoco.mjtObj.mjOBJ_GEOM, geom) or ""
             if name.startswith("foot"):
                 self.foot_geoms[geom] = int(model.geom_bodyid[geom])
+            elif name.startswith("link"):
+                self.link_geoms.add(geom)
+        self.foot_bodies = sorted(set(self.foot_geoms.values()))
+        surface = self.record.surface_contacts if self.record.surface_contacts is not None else len(self.record.contact_links) <= 2
+        self.flat_feet = bool(surface and self.record.contact_links)
 
     def _randomized_model(self):
         """Return a copy of the model with randomized friction, link masses and base center of mass."""
@@ -168,23 +340,11 @@ class MujocoEmbodimentEnv:
             model.body_ipos[1] += self.rng.uniform(-settings.base_com_offset, settings.base_com_offset, 3)
         return model
 
-    def _world_nominal(self) -> np.ndarray:
-        """Return one world's nominal pose, with its random joint offset."""
-        settings = self.config.randomization
-        if not settings.enabled:
-            return self.nominal.copy()
-        return self.nominal + self.rng.uniform(-settings.nominal_offset, settings.nominal_offset, self.joints)
-
-    def _foot_clearance(self, model, data) -> float:
-        """Return the base height that puts the lowest foot sphere on the floor."""
+    def _clearance(self, model, data, geoms) -> float:
+        """Return the base height that puts the lowest of some geoms on the floor."""
         self.mujoco.mj_kinematics(model, data)
-        lowest = min(
-            (data.geom_xpos[geom][2] for geom in self.foot_geoms),
-            default=None,
-        )
-        if lowest is None:
-            return float(data.qpos[2])
-        return float(data.qpos[2]) - float(lowest) + self.config.geometry.radius + 0.002
+        lowest = min((float(data.geom_xpos[geom][2] - model.geom_size[geom, 0]) for geom in geoms), default=None)
+        return float(data.qpos[2]) if lowest is None else float(data.qpos[2]) - lowest + 0.002
 
     def _nominal_height(self) -> float:
         """Return the base height of the nominal pose standing on the floor."""
@@ -192,14 +352,10 @@ class MujocoEmbodimentEnv:
             return 0.0
         data = self.mujoco.MjData(self.base_model)
         data.qpos[self.qpos_index] = self.nominal
-        return self._foot_clearance(self.base_model, data)
+        return self._clearance(self.base_model, data, self.foot_geoms or self.link_geoms)
 
-    def set_motions(self, motions: list[dict[str, np.ndarray]]) -> None:
-        """Set the motions episodes start from: dicts of ``q``, ``qd``, ``rotation``, ``linear``, ``angular``."""
-        self.motions = motions
-
-    def _set_state(self, index: int, frame: dict[str, np.ndarray] | None) -> None:
-        """Put a world in a motion frame (or the nominal pose) with its feet on the floor."""
+    def _write_state(self, index: int, frame: dict[str, np.ndarray] | None) -> None:
+        """Put a world in a frame (the nominal pose if None), resting on the floor."""
         model, data = self.models[index], self.datas[index]
         self.mujoco.mj_resetData(model, data)
         if frame is None:
@@ -213,32 +369,46 @@ class MujocoEmbodimentEnv:
             self.mujoco.mju_mat2Quat(quaternion, rotation.reshape(-1))
             data.qpos[3:7] = quaternion
             data.qpos[:3] = 0.0
-            data.qpos[2] = self._foot_clearance(model, data)
+            lying = frame is not None and frame.get("lying", False)
+            data.qpos[2] = self._clearance(model, data, set(self.foot_geoms) | self.link_geoms if lying else self.foot_geoms or self.link_geoms)
             if frame is not None:
                 data.qvel[:3] = rotation @ frame["linear"]
                 data.qvel[3:6] = frame["angular"]
         data.ctrl[:] = data.qpos[self.qpos_index][self.actuator_joint]
         self.mujoco.mj_forward(model, data)
-        self.previous_action[index] = 0.0
-        self.steps[index] = 0
-        low, high = self.config.randomization.push_interval
-        self.next_push[index] = self.rng.uniform(low, high)
 
-    def reset(self, indices: np.ndarray | None = None, frames: list[dict[str, np.ndarray]] | None = None) -> None:
-        """Reset worlds to given frames, or to random motion frames (nominal pose without motions)."""
-        indices = np.arange(self.num_envs) if indices is None else indices
-        for position, index in enumerate(indices):
-            frame = None
-            if frames is not None:
-                frame = frames[position]
-            elif self.motions:
-                motion = self.motions[int(self.rng.integers(len(self.motions)))]
-                time = int(self.rng.integers(len(motion["q"])))
-                frame = {key: value[time] for key, value in motion.items()}
-            self._set_state(int(index), frame)
+    def _apply_targets(self, targets: np.ndarray) -> None:
+        for index, data in enumerate(self.datas):
+            data.ctrl[:] = targets[index, self.actuator_joint]
 
-    def _read_state(self, index: int) -> tuple[np.ndarray, ...]:
-        """Return one world's q, qd, gravity direction, angular velocity, linear velocity and height."""
+    def _push(self, index: int, linear: np.ndarray, angular: np.ndarray) -> None:
+        data = self.datas[index]
+        data.qvel[:2] += linear
+        data.qvel[3:6] += angular
+
+    def _physics(self, index: int) -> None:
+        for _ in range(self.substeps):
+            self.mujoco.mj_step(self.models[index], self.datas[index])
+
+    def advance(self) -> None:
+        """Run the physics of one control step."""
+        if self.pool is None:
+            for index in range(self.num_envs):
+                self._physics(index)
+        else:
+            list(self.pool.map(self._physics, range(self.num_envs)))
+
+    def step(self, actions: np.ndarray) -> EnvStep:
+        """Apply actions and advance one control step."""
+        self.prepare(actions)
+        self.advance()
+        return self.collect()
+
+    def read_state(self) -> RobotState:
+        rows = [self._read_world(index) for index in range(self.num_envs)]
+        return RobotState(*(torch.from_numpy(np.stack([row[k] for row in rows])) for k in range(6)))
+
+    def _read_world(self, index: int) -> tuple[np.ndarray, ...]:
         data = self.datas[index]
         q, qd = data.qpos[self.qpos_index].copy(), data.qvel[self.dof_index].copy()
         if not self.floating:
@@ -246,89 +416,51 @@ class MujocoEmbodimentEnv:
         rotation = data.xmat[1].reshape(3, 3)
         return q, qd, -rotation[2], data.qvel[3:6].copy(), rotation.T @ data.qvel[:3], float(data.qpos[2])
 
-    def state(self) -> RobotState:
-        """Return the current state of every world."""
-        rows = [self._read_state(index) for index in range(self.num_envs)]
-        return RobotState(*(torch.from_numpy(np.stack([row[k] for row in rows])) for k in range(6)))
+    def _torque(self) -> torch.Tensor:
+        return torch.from_numpy(np.stack([data.qfrc_actuator[self.dof_index].copy() for data in self.datas]))
 
-    def _physics(self, index: int, target: np.ndarray) -> None:
-        """Advance one world by one control step."""
-        model, data = self.models[index], self.datas[index]
-        data.ctrl[:] = target[self.actuator_joint]
-        for _ in range(self.substeps):
-            self.mujoco.mj_step(model, data)
+    def _diverged(self) -> np.ndarray:
+        return np.array(
+            [not (np.isfinite(data.qpos).all() and np.isfinite(data.qvel).all()) or float(np.abs(data.qvel).max()) > 1e3 for data in self.datas]
+        )
 
-    def _apply_pushes(self) -> None:
-        """Give due worlds a random base velocity change (in the main thread, for the random generator)."""
-        settings = self.config.randomization
-        if not (self.floating and settings.enabled):
-            return
-        elapsed = self.steps * self.config.control_dt
-        for index in np.nonzero(elapsed >= self.next_push)[0]:
-            data = self.datas[index]
-            data.qvel[:2] += self.rng.uniform(-settings.push_linear_velocity, settings.push_linear_velocity, 2)
-            data.qvel[3:6] += self.rng.uniform(-settings.push_angular_velocity, settings.push_angular_velocity, 3)
-            self.next_push[index] = elapsed[index] + self.rng.uniform(*settings.push_interval)
+    def _contact_geoms(self, data) -> set[int]:
+        return {geom for contact in range(data.ncon) for geom in (data.contact[contact].geom1, data.contact[contact].geom2)}
 
-    def _diverged(self, index: int) -> bool:
-        """Return whether a world's physics blew up."""
-        data = self.datas[index]
-        return not (np.isfinite(data.qpos).all() and np.isfinite(data.qvel).all()) or float(np.abs(data.qvel).max()) > 1e3
-
-    def _fell(self, index: int) -> bool:
-        """Return whether a floating robot fell over."""
-        if not self.floating:
-            return False
-        data = self.datas[index]
-        tilt = math.degrees(math.acos(float(np.clip(data.xmat[1].reshape(3, 3)[2, 2], -1, 1))))
-        return float(data.qpos[2]) < self.config.min_height_ratio * self.reference_height or tilt > self.config.max_tilt_degrees
-
-    def _slippage(self, index: int) -> float:
+    def _slippage(self) -> np.ndarray:
         """Return the summed speed of feet in contact (BFM-Zero's ``penalty_slippage``)."""
-        model, data = self.models[index], self.datas[index]
-        bodies = set()
-        for contact in range(data.ncon):
-            item = data.contact[contact]
-            for geom in (item.geom1, item.geom2):
-                if geom in self.foot_geoms:
-                    bodies.add(self.foot_geoms[geom])
+        totals = np.zeros(self.num_envs)
         velocity = np.zeros(6)
-        total = 0.0
-        for body in bodies:
-            self.mujoco.mj_objectVelocity(model, data, self.mujoco.mjtObj.mjOBJ_BODY, body, velocity, 0)
-            total += float(np.linalg.norm(velocity[3:]))
-        return total
+        for index, (model, data) in enumerate(zip(self.models, self.datas)):
+            bodies = {self.foot_geoms[geom] for geom in self._contact_geoms(data) if geom in self.foot_geoms}
+            for body in bodies:
+                self.mujoco.mj_objectVelocity(model, data, self.mujoco.mjtObj.mjOBJ_BODY, body, velocity, 0)
+                totals[index] += float(np.linalg.norm(velocity[3:]))
+        return totals
 
-    def step(self, actions: np.ndarray) -> EnvStep:
-        """Apply normalized actions ``[N, J]`` in [-1, 1] as PD targets around the nominal pose."""
-        actions = np.clip(np.nan_to_num(actions), -1.0, 1.0)
-        targets = self.world_nominal + self.config.action_scale * actions
-        targets = np.where(self.limited, np.clip(targets, self.lower, self.upper), targets)
-        self._apply_pushes()
-        if self.pool is None:
-            for index in range(self.num_envs):
-                self._physics(index, targets[index])
-        else:
-            list(self.pool.map(lambda index: self._physics(index, targets[index]), range(self.num_envs)))
-        self.steps += 1
-        terminated = np.array([self._diverged(index) or self._fell(index) for index in range(self.num_envs)])
-        for index in np.nonzero(terminated)[0]:
-            if self._diverged(int(index)):
-                # Keep the buffer finite: report the reset state of a world that blew up.
-                self._set_state(int(index), None)
-        truncated = (self.steps >= self.config.max_episode_steps) & ~terminated
-        state = self.state()
-        torque = torch.from_numpy(np.stack([self.datas[i].qfrc_actuator[self.dof_index].copy() for i in range(self.num_envs)]))
-        span = np.where(self.limited, self.upper - self.lower, np.inf)
-        middle = 0.5 * (self.upper + self.lower)
-        soft_lower = np.where(self.limited, middle - 0.5 * span * SOFT_LIMIT, -np.inf)
-        soft_upper = np.where(self.limited, middle + 0.5 * span * SOFT_LIMIT, np.inf)
-        q = state.q.numpy()
-        outside = np.clip(soft_lower - q, 0.0, None) + np.clip(q - soft_upper, 0.0, None)
-        aux_rewards = {
-            "limits_dof_pos": torch.from_numpy(outside.sum(axis=1)),
-            "penalty_action_rate": torch.from_numpy(((actions - self.previous_action) ** 2).sum(axis=1)),
-            "penalty_slippage": torch.tensor([self._slippage(index) for index in range(self.num_envs)], dtype=torch.float64),
-        }
-        self.previous_action = actions.copy()
-        return EnvStep(state, torque, torch.from_numpy(targets), torch.from_numpy(terminated), torch.from_numpy(truncated), aux_rewards)
+    def _undesired_contact(self) -> np.ndarray:
+        """Return which worlds have a non-foot link on the floor."""
+        return np.array([bool(self._contact_geoms(data) & self.link_geoms) for data in self.datas])
+
+    def _feet_orientation(self) -> np.ndarray:
+        """Return the summed ``|g_xy|`` in the frame of each flat foot in contact (BFM-Zero's ``penalty_feet_ori``)."""
+        if not self.flat_feet:
+            return np.zeros(self.num_envs)
+        totals = np.zeros(self.num_envs)
+        for index, data in enumerate(self.datas):
+            bodies = {self.foot_geoms[geom] for geom in self._contact_geoms(data) if geom in self.foot_geoms}
+            for body in bodies:
+                totals[index] += float(np.linalg.norm(data.xmat[body].reshape(3, 3)[2, :2]))
+        return totals
+
+
+class MujocoGroup:
+    """Step several robots' MuJoCo worlds; each advances on its own."""
+
+    def __init__(self, envs: list[MujocoEmbodimentEnv]) -> None:
+        self.envs = envs
+
+    def advance(self) -> None:
+        """Run the physics of one control step for every robot."""
+        for env in self.envs:
+            env.advance()

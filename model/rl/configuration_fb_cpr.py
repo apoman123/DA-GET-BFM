@@ -5,7 +5,13 @@ from dataclasses import dataclass, field
 
 def default_aux_reward_scales() -> dict[str, float]:
     """Return BFM-Zero's weights (paper Table 4) for the embodiment-independent penalties."""
-    return {"limits_dof_pos": -10.0, "penalty_action_rate": -0.1, "penalty_slippage": -2.0}
+    return {
+        "limits_dof_pos": -10.0,
+        "penalty_action_rate": -0.1,
+        "penalty_slippage": -2.0,
+        "penalty_undesired_contact": -1.0,
+        "penalty_feet_ori": -0.4,
+    }
 
 
 @dataclass
@@ -38,7 +44,15 @@ class FbCprConfig:
         reg_coeff_aux (float): Weight of the auxiliary critic in the actor loss.
         scale_reg (bool): Scale the regularizers by ``|Q_fb|``.
         grad_penalty_discriminator (float): WGAN gradient-penalty weight; 0 disables it.
-        normalizer_momentum (float): Momentum of the flat-state BatchNorm.
+        within_robot_pairs (bool): Compare F and B only between states of the same robot.
+            A state of another robot is unreachable, so comparing them would teach B to
+            separate robots, and z could not be shared across them.
+        train_encoder (bool): Tune the policy encoder during RL (off: keep it frozen).
+        encoder_rl_gradients (bool): Let the F and critic losses reach the encoder. The
+            actor loss never does, so that the actor cannot move the critics' inputs.
+        lr_encoder (float): Policy encoder learning rate (not from BFM-Zero, which has none).
+        lr_physics_heads (float): Learning rate of the physics pretraining heads.
+        physics_loss_weight (float): Weight of the physics auxiliary losses on the encoder.
         use_mix_rollout (bool): Roll out with z from the training distribution.
         update_z_every_step (int): Control steps between rollout z changes.
         z_buffer_size (int): Stored training z per robot.
@@ -73,7 +87,12 @@ class FbCprConfig:
     reg_coeff_aux: float = 0.02
     scale_reg: bool = True
     grad_penalty_discriminator: float = 10.0
-    normalizer_momentum: float = 0.01
+    within_robot_pairs: bool = True
+    train_encoder: bool = True
+    encoder_rl_gradients: bool = True
+    lr_encoder: float = 3e-5
+    lr_physics_heads: float = 1e-4
+    physics_loss_weight: float = 1.0
     use_mix_rollout: bool = True
     update_z_every_step: int = 100
     z_buffer_size: int = 8192

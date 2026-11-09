@@ -4,8 +4,10 @@ from __future__ import annotations
 
 import torch
 
-from model.rl.observation import EmbodimentObserver, Observation, RobotState, trajectory_state
+from model.rl.observation import EmbodimentObserver, Observation, RobotState, StateView, trajectory_state
 from model.training.episodes import Trajectory
+
+CHUNK_SECONDS = 10.0  # BFM-Zero splits motions into 10 s chunks.
 
 
 def rotation_from_gravity(direction: torch.Tensor) -> torch.Tensor:
@@ -38,44 +40,62 @@ def resample_state(state: RobotState, rotation: torch.Tensor, dt: float, control
 
 
 class ExpertMotions:
-    """Action-free motions of one robot: flat states for D and z, and frames for resets.
+    """Action-free motion chunks of one robot: state views for D and z, frames for resets, priorities.
 
     Args:
         observer (EmbodimentObserver): Observer of the robot.
-        trajectories (list[Trajectory]): Motions of at least two frames.
+        trajectories (list[Trajectory]): Motions.
         control_dt (float | None): Resample to this period, so that frames match
             environment steps; keeps the recorded rate if None.
+        chunk_seconds (float | None): Split motions into chunks of this length.
     """
 
-    def __init__(self, observer: EmbodimentObserver, trajectories: list[Trajectory], control_dt: float | None = None) -> None:
-        self.flat: list[torch.Tensor] = []
+    def __init__(self, observer: EmbodimentObserver, trajectories: list[Trajectory], control_dt: float | None = None,
+                 chunk_seconds: float | None = CHUNK_SECONDS) -> None:
+        self.observer = observer
+        self.states: list[StateView] = []
         self.frames: list[dict] = []
         for trajectory in trajectories:
-            if trajectory.positions.shape[0] < 2:
-                continue
             state, _, _ = trajectory_state(observer.record, trajectory)
             rotation = trajectory.base_orientation
             rotation = rotation_from_gravity(state.gravity_direction) if rotation is None else rotation.to(torch.float64)
+            dt = trajectory.dt
             if control_dt is not None:
-                state, rotation = resample_state(state, rotation, trajectory.dt, control_dt)
-            if state.q.shape[0] < 2:
-                continue
-            self.flat.append(observer.flat_state(state))
-            self.frames.append(
-                {
-                    "q": state.q.numpy(),
-                    "qd": state.qd.numpy(),
-                    "rotation": rotation.numpy(),
-                    "linear": state.linear_velocity.numpy(),
-                    "angular": state.angular_velocity.numpy(),
-                }
-            )
-        if not self.flat:
+                state, rotation = resample_state(state, rotation, dt, control_dt)
+                dt = control_dt
+            total = state.q.shape[0]
+            size = total if chunk_seconds is None else max(int(round(chunk_seconds / dt)), 2)
+            for start in range(0, total, size):
+                indices = torch.arange(start, min(start + size, total))
+                if indices.shape[0] < 2:
+                    continue
+                chunk = state.select(indices)
+                self.states.append(observer.state_view(chunk))
+                self.frames.append(
+                    {
+                        "q": chunk.q.numpy(),
+                        "qd": chunk.qd.numpy(),
+                        "rotation": rotation[indices].numpy(),
+                        "linear": chunk.linear_velocity.numpy(),
+                        "angular": chunk.angular_velocity.numpy(),
+                    }
+                )
+        if not self.states:
             raise ValueError(f"{observer.record.name}: no motion with at least two frames")
-        self.lengths = torch.tensor([len(flat) for flat in self.flat])
+        self.priorities = torch.ones(len(self.states), dtype=torch.float64)
 
-    def sample_windows(self, windows: int, length: int, generator: torch.Generator | None = None) -> tuple[torch.Tensor, torch.Tensor]:
-        """Sample consecutive frames, with motions weighted by length.
+    def __len__(self) -> int:
+        """Return the number of motion chunks."""
+        return len(self.states)
+
+    def set_priorities(self, priorities: torch.Tensor) -> None:
+        """Set each motion's sampling weight."""
+        if priorities.shape != self.priorities.shape or not bool((priorities > 0).all()):
+            raise ValueError("priorities must be positive, one per motion")
+        self.priorities = priorities.to(torch.float64)
+
+    def sample_windows(self, windows: int, length: int, generator: torch.Generator | None = None) -> tuple[StateView, StateView]:
+        """Sample consecutive frames, with motions weighted by priority and starts uniform.
 
         Args:
             windows (int): Number of windows W.
@@ -83,32 +103,55 @@ class ExpertMotions:
             generator (torch.Generator | None): Random source.
 
         Returns:
-            tuple[torch.Tensor, torch.Tensor]: States and next states, each ``[W, L, S]``.
+            tuple[StateView, StateView]: States and next states, ``[W, L, ...]``.
         """
-        motions = torch.multinomial(self.lengths.float(), windows, replacement=True, generator=generator)
-        states, next_states = [], []
+        motions = torch.multinomial(self.priorities, windows, replacement=True, generator=generator)
+        current, following = [], []
         for motion in motions.tolist():
-            flat = self.flat[motion]
-            start = int(torch.randint(0, len(flat) - 1, (1,), generator=generator))
-            frames = torch.arange(start, start + length).clamp_max(len(flat) - 2)
-            states.append(flat[frames])
-            next_states.append(flat[frames + 1])
-        return torch.stack(states), torch.stack(next_states)
+            view = self.states[motion]
+            frames_available = view.local.shape[0]
+            start = int(torch.randint(0, frames_available - 1, (1,), generator=generator))
+            indices = torch.arange(start, start + length).clamp_max(frames_available - 2)
+            current.append(view.select(indices))
+            following.append(view.select(indices + 1))
+
+        def stack(views: list[StateView]) -> StateView:
+            return StateView(*(torch.stack([getattr(view, name) for view in views]) for name in ("local", "global_features", "dynamics")))
+
+        return stack(current), stack(following)
+
+
+def _pack_mass(mass: torch.Tensor) -> torch.Tensor:
+    """Keep the upper triangle of symmetric matrices ``[N, J, J]``."""
+    joints = mass.shape[-1]
+    rows, columns = torch.triu_indices(joints, joints, device=mass.device)
+    return mass[:, rows, columns]
+
+
+def _unpack_mass(packed: torch.Tensor, joints: int) -> torch.Tensor:
+    """Rebuild symmetric matrices from ``_pack_mass``."""
+    rows, columns = torch.triu_indices(joints, joints, device=packed.device)
+    mass = torch.zeros((packed.shape[0], joints, joints), dtype=packed.dtype, device=packed.device)
+    mass[:, rows, columns] = packed
+    mass[:, columns, rows] = packed
+    return mass
 
 
 class ReplayBuffer:
-    """Ring buffer of one robot's transitions, stored unpadded.
+    """Ring buffer of one robot's transitions, unpadded and in half precision to save memory.
 
     Args:
         capacity (int): Maximum transitions.
         reward_names (tuple[str, ...]): Auxiliary reward keys, in storage order.
+        device (torch.device | str): Storage device.
     """
 
-    def __init__(self, capacity: int, reward_names: tuple[str, ...]) -> None:
+    def __init__(self, capacity: int, reward_names: tuple[str, ...], device: torch.device | str = "cpu") -> None:
         if capacity <= 0:
             raise ValueError("capacity must be positive")
         self.capacity = capacity
         self.reward_names = reward_names
+        self.device = torch.device(device)
         self.storage: dict[str, torch.Tensor] | None = None
         self.position = 0
         self.size = 0
@@ -116,6 +159,17 @@ class ReplayBuffer:
     def __len__(self) -> int:
         """Return the number of stored transitions."""
         return self.size
+
+    def _observation_fields(self, prefix: str, observation: Observation) -> dict[str, torch.Tensor]:
+        return {
+            f"{prefix}local": observation.local.half(),
+            f"{prefix}global": observation.global_features.half(),
+            f"{prefix}dynamics": observation.dynamics.half(),
+            f"{prefix}mass": _pack_mass(observation.mass).half(),
+            f"{prefix}state_local": observation.state.local.half(),
+            f"{prefix}state_global": observation.state.global_features.half(),
+            f"{prefix}state_dynamics": observation.state.dynamics.half(),
+        }
 
     def add(
         self,
@@ -128,32 +182,51 @@ class ReplayBuffer:
     ) -> None:
         """Append a batch of ``N`` transitions."""
         values = {
-            "tokens": observation.tokens,
-            "dynamics": observation.dynamics,
-            "mass": observation.mass,
-            "flat": observation.flat,
-            "next_tokens": next_observation.tokens,
-            "next_dynamics": next_observation.dynamics,
-            "next_mass": next_observation.mass,
-            "next_flat": next_observation.flat,
+            **self._observation_fields("", observation),
+            **self._observation_fields("next_", next_observation),
             "action": action.float(),
             "z": z.float(),
             "terminated": terminated.bool(),
             "aux_rewards": torch.stack([aux_rewards[name].float() for name in self.reward_names], dim=-1),
         }
-        values = {key: value.detach().cpu() for key, value in values.items()}
+        values = {key: value.detach().to(self.device) for key, value in values.items()}
         if self.storage is None:
-            self.storage = {key: torch.zeros((self.capacity, *value.shape[1:]), dtype=value.dtype) for key, value in values.items()}
+            self.storage = {key: torch.zeros((self.capacity, *value.shape[1:]), dtype=value.dtype, device=self.device) for key, value in values.items()}
         count = values["z"].shape[0]
-        indices = (self.position + torch.arange(count)) % self.capacity
+        indices = (self.position + torch.arange(count, device=self.device)) % self.capacity
         for key, value in values.items():
             self.storage[key][indices] = value
         self.position = (self.position + count) % self.capacity
         self.size = min(self.size + count, self.capacity)
 
-    def sample(self, count: int, generator: torch.Generator | None = None) -> dict[str, torch.Tensor]:
-        """Return ``count`` uniformly sampled transitions."""
+    def _observation(self, sample: dict[str, torch.Tensor], prefix: str, joints: int, device: torch.device) -> Observation:
+        def read(key: str) -> torch.Tensor:
+            return sample[f"{prefix}{key}"].to(device).float()
+
+        return Observation(
+            read("local"), read("global"), read("dynamics"), _unpack_mass(read("mass"), joints),
+            StateView(read("state_local"), read("state_global"), read("state_dynamics")),
+        )
+
+    def sample(self, count: int, device: torch.device | str = "cpu", generator: torch.Generator | None = None) -> dict:
+        """Return ``count`` uniformly sampled transitions as ``float32`` on a device."""
         if self.size == 0:
             raise ValueError("cannot sample an empty replay buffer")
-        indices = torch.randint(0, self.size, (count,), generator=generator)
-        return {key: value[indices] for key, value in self.storage.items()}
+        device = torch.device(device)
+        indices = torch.randint(0, self.size, (count,), generator=generator, device=self.device if generator is None else "cpu").to(self.device)
+        sample = {key: value[indices] for key, value in self.storage.items()}
+        joints = sample["action"].shape[1]
+        return {
+            "observation": self._observation(sample, "", joints, device),
+            "next_observation": self._observation(sample, "next_", joints, device),
+            "action": sample["action"].to(device),
+            "z": sample["z"].to(device),
+            "terminated": sample["terminated"].to(device),
+            "aux_rewards": sample["aux_rewards"].to(device),
+        }
+
+    def transition_bytes(self) -> int:
+        """Return the memory used per transition, once the buffer holds data."""
+        if self.storage is None:
+            return 0
+        return sum(value[0].numel() * value.element_size() for value in self.storage.values())

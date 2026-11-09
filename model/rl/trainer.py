@@ -1,9 +1,10 @@
 """Online off-policy training loop of the cross-embodiment FB-CPR agent.
 
-Mirrors BFM-Zero's ``Workspace.train_online``: parallel environments act with their
-latent and fill a replay buffer, random actions seed it, and a fixed number of gradient
-steps runs per collected batch. Here each robot has its own environments, replay buffer
-and expert motions, and every update draws an equal share of each robot.
+Mirrors BFM-Zero's ``Workspace.train_online``: parallel environments act with their latent
+and fill a replay buffer, random actions seed it, a fixed number of gradient steps runs per
+collected batch, and periodic evaluations set the motion priorities. Each robot has its own
+environments, replay buffer and expert motions, and every update draws an equal share of
+each robot. Physics pretraining batches keep tuning the encoder during RL.
 """
 
 from __future__ import annotations
@@ -17,17 +18,19 @@ from typing import Any
 
 import numpy as np
 import torch
+from torch.utils.data import DataLoader
 
 from model.configuration_bfm import BfmConfig
 from model.configuration_da_get import DaGetConfig
 from model.pretraining import DaGetForPhysicsPretraining, DaGetPhysicsPretrainingConfig
-from model.rl.agent import DaGetFbCprAgent, FrozenEncoder
+from model.rl.agent import DaGetFbCprAgent
 from model.rl.buffers import ExpertMotions, ReplayBuffer
 from model.rl.configuration_fb_cpr import FbCprConfig
-from model.rl.envs import DomainRandomization, EnvConfig, EnvStep, MujocoEmbodimentEnv
-from model.rl.observation import EmbodimentObserver, Observation, RobotState, flat_state_size, trajectory_state
-from model.training.dataset import joint_feature_config, load_data_config
-from model.training.episodes import EmbodimentRecord
+from model.rl.envs import DomainRandomization, EmbodimentEnv, EnvConfig, EnvStep, MujocoEmbodimentEnv, MujocoGroup
+from model.rl.evaluation import evaluate, motion_priorities
+from model.rl.observation import EmbodimentObserver, Observation, RobotState, trajectory_state
+from model.training.dataset import build_physics_datasets, joint_feature_config, load_data_config, resolve_path
+from model.training.episodes import EmbodimentRecord, Trajectory
 from model.training.ground_sim import ContactGeometry, ground_specs
 from model.training.sources import SOURCE_TYPES
 
@@ -48,42 +51,53 @@ class TrainingArguments:
     """Run settings; defaults are BFM-Zero's unless noted.
 
     Attributes:
-        data_config (str): JSON with one ``sources`` entry per robot (see ``docs/bfm.md``).
+        data_config (str): JSON with the robots' sources (see ``docs/bfm.md``).
         output_dir (str): Checkpoints and TensorBoard logs.
-        encoder_checkpoint (str | None): Pretrained encoder; a random one is used if None.
+        simulator (str): ``isaaclab`` or ``mujoco`` (CPU, for tests and small checks).
+        encoder_checkpoint (str | None): Pretrained encoder; a new one is used if None.
         num_env_steps (int): Total environment frames (BFM-Zero: 384M).
         online_parallel_envs (int): Environments over all robots.
         buffer_size (int): Stored transitions over all robots.
+        buffer_device (str): Device of the replay buffers.
         num_seed_steps (int): Frames with random actions before updates start.
         update_agent_every (int): Frames between update rounds.
         num_agent_updates (int): Gradient steps per round.
-        log_every (int): Frames between logs (here: 100k).
-        eval_every (int): Frames between evaluations; 0 disables them (here: 1M).
-        eval_motions (int): Motions per robot in an evaluation.
+        physics_batch_size (int): Batch size of the physics auxiliary losses (here: 64).
+        physics_cache_dir (str | None): Cache of the processed physics data.
+        log_every (int): Frames between logs.
+        eval_every (int): Frames between evaluations and priority updates; 0 disables them.
+        eval_motions (int | None): Motions per robot in an evaluation; all by default.
         checkpoint_every (int): Frames between checkpoints.
         resume_from (str | None): Agent checkpoint to continue from.
         device (str): Device of the networks.
-        num_threads (int): Physics workers.
-        torch_threads (int): PyTorch CPU threads. The per-step tensors are small, so many threads only add overhead.
+        num_threads (int): MuJoCo physics workers.
+        torch_threads (int): PyTorch CPU threads.
         seed (int): Random seed.
         domain_randomization (bool): Randomize the training environments.
         observation_noise (bool): Add sensor noise to the policy's observations.
         observe_base_linear_velocity (bool): Show it to the policy (BFM-Zero does not).
         max_episode_steps (int): Episode length in control steps.
+        fall_start_probability (float): Episodes that start lying down.
+        terminate_on_fall (bool): End episodes when fallen (BFM-Zero: no).
+        isaac_spacing (float): Distance between Isaac Lab worlds in m.
     """
 
     data_config: str
     output_dir: str
+    simulator: str = "isaaclab"
     encoder_checkpoint: str | None = None
     num_env_steps: int = 384_000_000
     online_parallel_envs: int = 1024
     buffer_size: int = 5_120_000
+    buffer_device: str = "cpu"
     num_seed_steps: int = 10_240
     update_agent_every: int = 1024
     num_agent_updates: int = 16
-    log_every: int = 100_000
-    eval_every: int = 1_000_000
-    eval_motions: int = 8
+    physics_batch_size: int = 64
+    physics_cache_dir: str | None = None
+    log_every: int = 384_000
+    eval_every: int = 9_600_000
+    eval_motions: int | None = None
     checkpoint_every: int = 9_600_000
     resume_from: str | None = None
     device: str = "cuda" if torch.cuda.is_available() else "cpu"
@@ -94,6 +108,9 @@ class TrainingArguments:
     observation_noise: bool = True
     observe_base_linear_velocity: bool = False
     max_episode_steps: int = 500
+    fall_start_probability: float = 0.3
+    terminate_on_fall: bool = False
+    isaac_spacing: float = 5.0
 
 
 @dataclass
@@ -105,74 +122,91 @@ class Embodiment:
         observer (EmbodimentObserver): Builds its observations.
         motions (ExpertMotions): Its expert motions.
         env_config (EnvConfig): Its environment settings.
+        source (dict): The data-config source that describes its environment.
+        base (Path | None): Directory of relative paths in the source.
     """
 
     record: EmbodimentRecord
     observer: EmbodimentObserver
     motions: ExpertMotions
     env_config: EnvConfig = field(default_factory=EnvConfig)
+    source: dict = field(default_factory=dict)
+    base: Path | None = None
 
 
-def load_embodiments(data_config: str | Path | dict, observe_base_linear_velocity: bool = False,
-                     domain_randomization: bool = True, max_episode_steps: int = 500) -> tuple[list[Embodiment], dict[str, Any]]:
-    """Load each source of a data config as a robot with expert motions.
+def load_embodiments(data_config: str | Path | dict, arguments: TrainingArguments | None = None) -> tuple[list[Embodiment], dict[str, Any]]:
+    """Group a data config's sources by robot; each robot's expert motions come from its sources.
 
-    Sources use the keys of the pretraining data config, plus the environment keys
-    ``nominal_pose``, ``contact_geometry``, ``gain_scale`` and ``action_scale``.
+    Sources of one robot share a ``robot`` name, which is what combines real and synthetic
+    trajectories. ``expert`` says whether a source's trajectories are expert data for D and
+    prompts; the default is true, except for ``synthetic`` sources, whose random PD motions
+    only serve the physics auxiliary losses. Environment keys (``nominal_pose``,
+    ``contact_geometry``, ``gain_scale``, ``action_scale``, and the Isaac Lab keys) are read
+    from the robot's first expert source.
 
     Args:
         data_config (str | Path | dict): Data config.
-        observe_base_linear_velocity (bool): See ``EmbodimentObserver``.
-        domain_randomization (bool): Randomize the environments.
-        max_episode_steps (int): Episode length.
+        arguments (TrainingArguments | None): Environment settings; defaults if None.
 
     Returns:
         tuple: Robots, and the loaded config.
     """
+    settings = arguments or TrainingArguments(data_config="", output_dir="")
     config, base = load_data_config(data_config)
     if not config.get("sources"):
         raise ValueError("data config needs at least one source")
     feature_config = joint_feature_config(config.get("joint_features"))
     history = int(config.get("history_size", 3))
-    loaded = []
+    grouped: dict[str, tuple[EmbodimentRecord, list[Trajectory], dict]] = {}
     for source in config["sources"]:
         kind = source.get("type")
         if kind not in SOURCE_TYPES:
             raise ValueError(f"unknown source type {kind!r}; use one of {sorted(SOURCE_TYPES)}")
+        if not source.get("expert", kind != "synthetic"):
+            continue
         records, trajectories = SOURCE_TYPES[kind](source, base, feature_config)
         for index, record in enumerate(records):
             motions = [trajectory for trajectory in trajectories if trajectory.embodiment == index]
-            if not motions:
-                raise ValueError(f"{record.name}: the source gave no motion")
+            name = source.get("robot", record.name)
+            name = f"{name}/{index}" if "robot" in source and len(records) > 1 else name
             if record.graph.floating_base and not record.contact_links:
                 raise ValueError(f"{record.name}: a floating robot needs contact_links for the RL environment")
-            specs = ground_specs(record.specs, float(source.get("gain_scale", 1.0)))
-            robot = EmbodimentRecord.build(
-                record.name, record.graph, specs, contact_links=list(record.contact_links), surface_contacts=record.surface_contacts
-            )
-            loaded.append((robot, motions, source))
-    max_joints = max(robot.graph.num_joints for robot, _, _ in loaded)
+            if name not in grouped:
+                specs = ground_specs(record.specs, float(source.get("gain_scale", 1.0)))
+                robot = EmbodimentRecord.build(name, record.graph, specs, contact_links=list(record.contact_links), surface_contacts=record.surface_contacts)
+                grouped[name] = (robot, [], source)
+            robot = grouped[name][0]
+            if list(robot.graph.joint_names) != list(record.graph.joint_names):
+                raise ValueError(f"{name}: sources of one robot must have the same joints in the same order")
+            grouped[name][1].extend(motions)
+    if not grouped:
+        raise ValueError("no source provides expert motions; set \"expert\": true on at least one source")
     embodiments = []
-    for offset, (robot, motions, source) in enumerate(loaded):
+    for offset, (robot, motions, source) in enumerate(grouped.values()):
+        if not motions:
+            raise ValueError(f"{robot.name}: the sources gave no motion")
         flags = [trajectory_state(robot, trajectory)[1:] for trajectory in motions]
         observer = EmbodimentObserver(
-            robot, history, max_joints, observe_base_linear_velocity,
+            robot, history, settings.observe_base_linear_velocity,
             use_height=all(flag[0] for flag in flags), use_linear_velocity=all(flag[1] for flag in flags),
         )
         env_config = EnvConfig(
-            max_episode_steps=max_episode_steps,
+            max_episode_steps=settings.max_episode_steps,
             action_scale=float(source.get("action_scale", 1.25)),
+            armature=float(source.get("armature", 0.01)),
+            fall_start_probability=settings.fall_start_probability,
+            terminate_on_fall=settings.terminate_on_fall,
             nominal_pose=source.get("nominal_pose", {}),
             geometry=ContactGeometry(**source.get("contact_geometry", {})),
-            randomization=DomainRandomization(enabled=domain_randomization),
+            randomization=DomainRandomization(enabled=settings.domain_randomization),
             seed=int(config.get("seed", 0)) + offset,
         )
-        embodiments.append(Embodiment(robot, observer, ExpertMotions(observer, motions, env_config.control_dt), env_config))
+        embodiments.append(Embodiment(robot, observer, ExpertMotions(observer, motions, env_config.control_dt), env_config, source, base))
     return embodiments, config
 
 
 def build_encoder(checkpoint: str | None, token_size: int) -> DaGetForPhysicsPretraining:
-    """Load the pretrained encoder, or a small untrained one when no checkpoint is given."""
+    """Load the pretrained encoder with its heads, or create a small new one."""
     if checkpoint:
         model = DaGetForPhysicsPretraining.from_pretrained(checkpoint)
         if model.config.encoder["input_size"] != token_size:
@@ -181,7 +215,6 @@ def build_encoder(checkpoint: str | None, token_size: int) -> DaGetForPhysicsPre
                 "use the same joint_features and history_size as in pretraining"
             )
         return model
-    print("WARNING: no --encoder_checkpoint; using a random, frozen encoder. This is only useful for debugging.")
     encoder = DaGetConfig(input_size=token_size, hidden_size=128, num_hidden_layers=4, num_attention_heads=4,
                           intermediate_size=512, use_physics_cross_attention=True)
     return DaGetForPhysicsPretraining(DaGetPhysicsPretrainingConfig.from_encoder_config(encoder))
@@ -191,13 +224,13 @@ class Rollout:
     """Run one robot's environments and keep their observation histories.
 
     Args:
-        env (MujocoEmbodimentEnv): Environments.
+        env (EmbodimentEnv): Environments.
         observer (EmbodimentObserver): Observer of the robot.
         noise (ObservationNoise): Sensor noise.
         generator (torch.Generator): Noise source.
     """
 
-    def __init__(self, env: MujocoEmbodimentEnv, observer: EmbodimentObserver, noise: ObservationNoise, generator: torch.Generator) -> None:
+    def __init__(self, env: EmbodimentEnv, observer: EmbodimentObserver, noise: ObservationNoise, generator: torch.Generator) -> None:
         self.env, self.observer, self.noise, self.generator = env, observer, noise, generator
         count, joints, history = env.num_envs, env.joints, observer.history_size
         self.local = torch.zeros((count, history, joints, 5), dtype=torch.float64)
@@ -205,11 +238,17 @@ class Rollout:
         self.perceived: RobotState | None = None
         self.torque = torch.zeros((count, joints), dtype=torch.float64)
         self.observation: Observation | None = None
+        self.evaluating = False
+
+    def set_evaluating(self, value: bool) -> None:
+        """Turn pushes and sensor noise off during evaluations."""
+        self.evaluating = value
+        self.env.evaluating = value
 
     def _perceive(self, state: RobotState) -> RobotState:
         """Return the state the policy senses."""
         settings = self.noise
-        if not settings.enabled:
+        if not settings.enabled or self.evaluating:
             return state
 
         def noisy(values: torch.Tensor, scale: float) -> torch.Tensor:
@@ -222,10 +261,10 @@ class Rollout:
             noisy(state.angular_velocity, settings.angular_velocity), state.linear_velocity, state.height,
         )
 
-    def start(self, frames: list[dict] | None = None) -> None:
+    def start(self, frames: list[dict | None] | None = None) -> None:
         """Reset every environment and build the first observations."""
         self.env.reset(frames=frames)
-        state = self.env.state()
+        state = self.env.read_state()
         self.perceived = self._perceive(state)
         local, global_features = self.observer.policy_step(self.perceived, None, None, None)
         self.local[:] = local[:, None]
@@ -233,9 +272,9 @@ class Rollout:
         self.torque.zero_()
         self.observation = self.observer.observation(self.local, self.global_features, state, self.perceived, None)
 
-    def advance(self, actions: np.ndarray) -> tuple[Observation, EnvStep]:
-        """Step the environments; return the next observation before any reset."""
-        step = self.env.step(actions)
+    def finish(self) -> tuple[Observation, EnvStep]:
+        """Collect the environment step; return the next observation before any reset."""
+        step = self.env.collect()
         perceived = self._perceive(step.state)
         local, global_features = self.observer.policy_step(perceived, step.target, self.perceived.q, self.perceived.qd)
         self.local = torch.cat((self.local[:, 1:], local[:, None]), dim=1)
@@ -251,64 +290,34 @@ class Rollout:
         if indices.numel() == 0:
             return
         self.env.reset(indices.numpy())
-        state = self.env.state()
-        subset = state.select(indices)
+        subset = self.env.read_state().select(indices)
         perceived = self._perceive(subset)
         local, global_features = self.observer.policy_step(perceived, None, None, None)
         self.local[indices] = local[:, None].expand(-1, self.observer.history_size, -1, -1)
         self.global_features[indices] = global_features[:, None].expand(-1, self.observer.history_size, -1)
         self.torque[indices] = 0.0
-        for name in ("q", "qd", "gravity_direction", "angular_velocity", "linear_velocity", "height"):
+        for name in RobotState.__dataclass_fields__:
             getattr(self.perceived, name)[indices] = getattr(perceived, name)
-        fresh = self.observer.observation(self.local[indices], self.global_features[indices], subset, perceived, None)
-        for name in ("tokens", "dynamics", "mass", "flat"):
-            getattr(self.observation, name)[indices] = getattr(fresh, name)
+        self.observation = next_observation
+        self.observation.assign(indices, self.observer.observation(self.local[indices], self.global_features[indices], subset, perceived, None))
 
 
-@torch.no_grad()
-def evaluate_robot(agent: DaGetFbCprAgent, robot: int, embodiment: Embodiment, motions: int, pool: ThreadPoolExecutor | None) -> dict[str, float]:
-    """Measure tracking and goal reaching on one robot's motions, without randomization or noise.
+def build_group(arguments: TrainingArguments, embodiments: list[Embodiment], pool: ThreadPoolExecutor | None, simulation: Any = None):
+    """Create every robot's environments in the chosen simulator."""
+    if arguments.simulator == "mujoco":
+        return MujocoGroup([MujocoEmbodimentEnv(item.record, item.env_config, pool) for item in embodiments])
+    if arguments.simulator != "isaaclab":
+        raise ValueError("simulator must be 'isaaclab' or 'mujoco'")
+    from model.rl.isaac_env import IsaacRobotConfig, build_isaac_group
 
-    Uses the paper's error ``E_mpjpe = mean_t ||q_t - q_ref||``, computed while a world is
-    alive, plus the fraction of worlds that stay up to the end.
-    """
-    selected = embodiment.motions.frames[:motions]
-    flats = embodiment.motions.flat[:motions]
-    config = EnvConfig(
-        num_envs=len(selected), control_dt=embodiment.env_config.control_dt, physics_dt=embodiment.env_config.physics_dt,
-        max_episode_steps=10**9, action_scale=embodiment.env_config.action_scale, nominal_pose=embodiment.env_config.nominal_pose,
-        geometry=embodiment.env_config.geometry, randomization=DomainRandomization(enabled=False),
-    )
-    env = MujocoEmbodimentEnv(embodiment.record, config, pool)
-    rollout = Rollout(env, embodiment.observer, ObservationNoise(enabled=False), torch.Generator())
-    horizon = min(len(frame["q"]) for frame in selected)
-    first = [{key: value[0] for key, value in frame.items()} for frame in selected]
-
-    def run(latents: torch.Tensor, reference: np.ndarray) -> tuple[float, float]:
-        rollout.start(first)
-        alive = np.ones(len(selected), dtype=bool)
-        errors, counts = np.zeros(len(selected)), np.zeros(len(selected))
-        for step in range(horizon):
-            action = agent.act(robot, rollout.observation, latents[:, step], mean=True).cpu().numpy()
-            next_observation, result = rollout.advance(action)
-            rollout.observation = next_observation
-            distance = np.linalg.norm(result.state.q.numpy() - reference[:, min(step + 1, reference.shape[1] - 1)], axis=-1)
-            errors += distance * alive
-            counts += alive
-            alive &= ~result.terminated.numpy()
-        return float((errors / np.maximum(counts, 1)).mean()), float(alive.mean())
-
-    reference = np.stack([frame["q"][:horizon] for frame in selected])
-    tracking = torch.stack([agent.tracking_latents(flat[:horizon]) for flat in flats])
-    tracking_error, tracking_survival = run(tracking, reference)
-    goal_frames = torch.stack([flat[horizon - 1] for flat in flats])
-    goal = agent.goal_latent(goal_frames)[:, None].expand(-1, horizon, -1)
-    goal_reference = np.broadcast_to(reference[:, -1:], reference.shape)
-    goal_error, goal_survival = run(goal, goal_reference)
-    return {
-        "tracking_mpjpe": tracking_error, "tracking_survival": tracking_survival,
-        "goal_mpjpe": goal_error, "goal_survival": goal_survival,
-    }
+    robots = []
+    for item in embodiments:
+        urdf = resolve_path(item.source.get("simulation_urdf", item.source["urdf"]), item.base)
+        settings = IsaacRobotConfig(
+            str(urdf), item.source.get("ros_package_paths", []), item.source.get("undesired_contact_links"), bool(item.source.get("self_collisions", True))
+        )
+        robots.append((item.record, item.env_config, settings))
+    return build_isaac_group(robots, simulation, arguments.isaac_spacing)
 
 
 class FbCprTrainer:
@@ -318,68 +327,83 @@ class FbCprTrainer:
         arguments (TrainingArguments): Run settings.
         model_overrides (dict | None): ``BfmConfig`` fields to change.
         config (FbCprConfig | None): Agent hyperparameters.
+        simulation (Any): ``isaaclab.sim.SimulationContext`` when using Isaac Lab.
     """
 
-    def __init__(self, arguments: TrainingArguments, model_overrides: dict | None = None, config: FbCprConfig | None = None) -> None:
+    def __init__(self, arguments: TrainingArguments, model_overrides: dict | None = None, config: FbCprConfig | None = None, simulation: Any = None) -> None:
         self.arguments = arguments
         self.config = config or FbCprConfig()
         torch.set_num_threads(arguments.torch_threads)
         torch.manual_seed(arguments.seed)
         np.random.seed(arguments.seed)
-        self.embodiments, _ = load_embodiments(
-            arguments.data_config, arguments.observe_base_linear_velocity, arguments.domain_randomization, arguments.max_episode_steps
-        )
+        self.embodiments, _ = load_embodiments(arguments.data_config, arguments)
         observers = [embodiment.observer for embodiment in self.embodiments]
-        token_sizes = {observer.token_size for observer in observers}
-        if len(token_sizes) != 1:
+        if len({observer.token_size for observer in observers}) != 1:
             raise ValueError("every robot must use the same joint features and history")
-        pretrained = build_encoder(arguments.encoder_checkpoint, token_sizes.pop())
-        size = flat_state_size(observers[0].max_joints)
+        pretrained = build_encoder(arguments.encoder_checkpoint, observers[0].token_size)
         model_config = BfmConfig(
-            embedding_size=pretrained.encoder.config.hidden_size, backward_input_size=size, context_size=size, **(model_overrides or {})
+            embedding_size=pretrained.encoder.config.hidden_size, state_token_size=observers[0].state_token_size, **(model_overrides or {})
         )
-        self.agent = DaGetFbCprAgent(model_config, self.config, FrozenEncoder(pretrained, observers), arguments.device)
+        self.agent = DaGetFbCprAgent(model_config, self.config, pretrained, observers, arguments.device)
         self.frames = 0
         if arguments.resume_from:
             state = torch.load(arguments.resume_from, map_location=arguments.device, weights_only=False)
             self.agent.load_state_dict(state)
             self.frames = int(state.get("frames", 0))
-        self.pool = ThreadPoolExecutor(arguments.num_threads) if arguments.num_threads > 1 else None
+        self.pool = ThreadPoolExecutor(arguments.num_threads) if arguments.num_threads > 1 and arguments.simulator == "mujoco" else None
         shares = np.array_split(np.arange(arguments.online_parallel_envs), len(self.embodiments))
         if min(len(share) for share in shares) == 0:
             raise ValueError("online_parallel_envs must be at least the number of robots")
-        generator = torch.Generator().manual_seed(arguments.seed)
-        noise = ObservationNoise(enabled=arguments.observation_noise)
-        self.rollouts, self.replays = [], []
         for embodiment, share in zip(self.embodiments, shares):
             embodiment.env_config.num_envs = len(share)
-            env = MujocoEmbodimentEnv(embodiment.record, embodiment.env_config, self.pool)
+        self.group = build_group(arguments, self.embodiments, self.pool, simulation)
+        generator = torch.Generator().manual_seed(arguments.seed)
+        noise = ObservationNoise(enabled=arguments.observation_noise)
+        capacity = max(arguments.buffer_size // len(self.embodiments), self.config.batch_size)
+        self.rollouts, self.replays = [], []
+        for embodiment, env in zip(self.embodiments, self.group.envs):
             env.set_motions(embodiment.motions.frames)
             self.rollouts.append(Rollout(env, embodiment.observer, noise, generator))
-            capacity = max(arguments.buffer_size // len(self.embodiments), self.config.batch_size)
-            self.replays.append(ReplayBuffer(capacity, self.agent.reward_names))
+            self.replays.append(ReplayBuffer(capacity, self.agent.reward_names, arguments.buffer_device))
         self.motions = [embodiment.motions for embodiment in self.embodiments]
+        self.physics_batches = self._physics_batches() if self.config.train_encoder and self.config.physics_loss_weight > 0 else None
         self.output = Path(arguments.output_dir)
         self.output.mkdir(parents=True, exist_ok=True)
 
+    def _physics_batches(self):
+        """Return an endless iterator over batches of the physics auxiliary losses."""
+        datasets = build_physics_datasets(self.arguments.data_config, self.arguments.physics_cache_dir)
+        if datasets.token_size != self.agent.observers[0].token_size:
+            raise ValueError("the physics data's token size differs from the policy's")
+        loader = DataLoader(datasets.train, batch_size=self.arguments.physics_batch_size, shuffle=True, drop_last=False, collate_fn=datasets.collator())
+
+        def cycle():
+            while True:
+                yield from loader
+
+        return cycle()
+
     def checkpoint(self) -> Path:
-        """Write the latest checkpoint and return its path."""
+        """Write the latest checkpoint, with the encoder also in ``from_pretrained`` form."""
         path = self.output / "checkpoint.pt"
         state = self.agent.state_dict()
         state["frames"] = self.frames
+        state["motion_priorities"] = [motions.priorities for motions in self.motions]
         torch.save(state, path)
+        self.agent.pretrained.save_pretrained(self.output / "encoder")
         return path
 
     def evaluate(self, writer) -> dict[str, float]:
-        """Evaluate every robot and log the results."""
-        results: dict[str, float] = {}
-        for robot, embodiment in enumerate(self.embodiments):
-            metrics = evaluate_robot(self.agent, robot, embodiment, self.arguments.eval_motions, self.pool)
-            for key, value in metrics.items():
-                results[f"eval/{embodiment.record.name}/{key}"] = value
-                writer.add_scalar(f"eval/{embodiment.record.name}/{key}", value, self.frames)
+        """Evaluate every robot, log the results, and update the motion priorities."""
+        metrics, distances = evaluate(self.agent, self.rollouts, self.group, self.motions, self.arguments.eval_motions)
+        for rollout, motions, emd in zip(self.rollouts, self.motions, distances):
+            priorities = motion_priorities(emd)
+            motions.set_priorities(torch.from_numpy(priorities))
+            rollout.env.set_motion_weights(priorities)
+        for key, value in metrics.items():
+            writer.add_scalar(key, value, self.frames)
         writer.flush()
-        return results
+        return metrics
 
     def train(self) -> dict[str, float]:
         """Run the online loop until ``num_env_steps`` frames; return the last metrics."""
@@ -401,8 +425,10 @@ class FbCprTrainer:
         totals: dict[str, float] = {}
         updates, last_log_time, last_log_frames = 0, time.time(), self.frames
         episode_lengths: list[list[int]] = [[] for _ in self.rollouts]
+        fallen_fraction: list[list[float]] = [[] for _ in self.rollouts]
         final: dict[str, float] = {}
         while self.frames < arguments.num_env_steps:
+            actions = []
             for robot, rollout in enumerate(self.rollouts):
                 env = rollout.env
                 contexts[robot] = self.agent.rollout_context(robot, contexts[robot], torch.from_numpy(env.steps.copy()), self.motions[robot])
@@ -410,18 +436,24 @@ class FbCprTrainer:
                     action = torch.from_numpy(env.rng.uniform(-1.0, 1.0, (env.num_envs, env.joints))).float()
                 else:
                     action = self.agent.act(robot, rollout.observation, contexts[robot]).cpu()
+                actions.append(action)
+                env.prepare(action.numpy())
+            self.group.advance()
+            for robot, rollout in enumerate(self.rollouts):
                 observation = rollout.observation
-                next_observation, step = rollout.advance(action.numpy())
-                self.replays[robot].add(observation, action, next_observation, contexts[robot], step.terminated, step.aux_rewards)
+                next_observation, step = rollout.finish()
+                self.replays[robot].add(observation, actions[robot], next_observation, contexts[robot], step.terminated, step.aux_rewards)
+                fallen_fraction[robot].append(float(rollout.env.fallen(step.state).mean()))
                 done = step.terminated | step.truncated
-                episode_lengths[robot].extend(int(steps) for steps in env.steps[done.numpy()])
+                episode_lengths[robot].extend(int(steps) for steps in rollout.env.steps[done.numpy()])
                 rollout.reset_done(done, next_observation)
             self.frames += batch_frames
             ready = self.frames >= arguments.num_seed_steps and all(len(replay) > 0 for replay in self.replays)
             if ready and self.frames - last["update"] >= arguments.update_agent_every:
                 last["update"] = self.frames
                 for _ in range(arguments.num_agent_updates):
-                    metrics = self.agent.update(self.replays, self.motions)
+                    physics = next(self.physics_batches) if self.physics_batches is not None else None
+                    metrics = self.agent.update(self.replays, self.motions, physics)
                     updates += 1
                     for key, value in metrics.items():
                         totals[key] = totals.get(key, 0.0) + float(value)
@@ -433,12 +465,15 @@ class FbCprTrainer:
                 final["train/gradient_steps"] = updates
                 for name, value in final.items():
                     writer.add_scalar(name, value, self.frames)
-                for robot, lengths in enumerate(episode_lengths):
-                    if lengths:
-                        name = f"rollout/{self.embodiments[robot].record.name}/episode_length"
-                        final[name] = float(np.mean(lengths))
-                        writer.add_scalar(name, final[name], self.frames)
-                    lengths.clear()
+                for robot, embodiment in enumerate(self.embodiments):
+                    name = f"rollout/{embodiment.record.name}"
+                    if episode_lengths[robot]:
+                        final[f"{name}/episode_length"] = float(np.mean(episode_lengths[robot]))
+                        writer.add_scalar(f"{name}/episode_length", final[f"{name}/episode_length"], self.frames)
+                    final[f"{name}/fallen_fraction"] = float(np.mean(fallen_fraction[robot]))
+                    writer.add_scalar(f"{name}/fallen_fraction", final[f"{name}/fallen_fraction"], self.frames)
+                    episode_lengths[robot].clear()
+                    fallen_fraction[robot].clear()
                 writer.flush()
                 print(f"frames {self.frames}: " + ", ".join(f"{k}={v:.4g}" for k, v in sorted(final.items()) if "aux_rew" not in k), flush=True)
                 totals, updates, last_log_time, last_log_frames = {}, 0, now, self.frames
@@ -447,6 +482,8 @@ class FbCprTrainer:
                 results = self.evaluate(writer)
                 final.update(results)
                 print(f"frames {self.frames}: " + ", ".join(f"{k}={v:.4g}" for k, v in sorted(results.items())), flush=True)
+                for rollout in self.rollouts:
+                    rollout.start()
             if self.frames - last["checkpoint"] >= arguments.checkpoint_every:
                 last["checkpoint"] = self.frames
                 self.checkpoint()

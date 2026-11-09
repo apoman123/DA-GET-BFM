@@ -105,6 +105,8 @@ def build_mjcf(
     geometry: ContactGeometry,
     friction: float = 0.9,
     timestep: float = 0.002,
+    body_collision_radius: float | None = None,
+    armature: float = 1e-5,
 ) -> str:
     """Write MJCF for a robot with foot contacts and position actuators.
 
@@ -117,6 +119,10 @@ def build_mjcf(
         geometry (ContactGeometry): Foot geometry.
         friction (float): Floor sliding friction.
         timestep (float): Physics step in s.
+        body_collision_radius (float | None): Also give every link a floor-colliding
+            sphere of this radius at its center of mass, so a fallen robot lies on the floor.
+        armature (float): Rotor inertia added to every joint. URDFs have none, and light links
+            with stiff gains need some to stay numerically stable.
 
     Returns:
         str: MJCF XML.
@@ -124,6 +130,12 @@ def build_mjcf(
     graph = record.graph
     surface = record.surface_contacts if record.surface_contacts is not None else len(record.contact_links) <= 2
     actuator = actuator_tensors(record.specs)
+
+    def _link_sphere(name: str, center) -> list[str]:
+        if body_collision_radius is None:
+            return []
+        return [f'<geom name="{name}" type="sphere" size="{body_collision_radius:.6g}" pos="{_vector(center)}" friction="{friction} 0.02 0.002" condim="3"/>']
+
     spheres: dict[int, list[str]] = {}
     for contact, body, point in foot_points(record, geometry, surface):
         spheres.setdefault(body, []).append(
@@ -143,10 +155,11 @@ def build_mjcf(
         lines = [
             f'{indent}<body name="b_{name}" pos="{_vector(transform[:3, 3])}" quat="{_vector(_quaternion(transform[:3, :3]))}">',
             f'{indent}  <joint name="{name}" type="{kind}" axis="{_vector(graph.axes[index].numpy())}"{limits} '
-            f'damping="{float(graph.damping[index]):.6g}" frictionloss="{float(graph.friction[index]):.6g}" armature="1e-5"/>',
+            f'damping="{float(graph.damping[index]):.6g}" frictionloss="{float(graph.friction[index]):.6g}" armature="{armature:.6g}"/>',
             f"{indent}  " + _inertial(float(graph.body_mass[index]), graph.body_com[index].numpy(), graph.body_inertia[index].numpy()),
         ]
         lines += [f"{indent}  {geom}" for geom in spheres.get(index, [])]
+        lines += [f"{indent}  {geom}" for geom in _link_sphere(f"link{index}", graph.body_com[index].numpy())]
         for child in children.get(index, []):
             lines.append(body_xml(child, indent + "  "))
         lines.append(f"{indent}</body>")
@@ -157,6 +170,7 @@ def build_mjcf(
         base_lines.append("      <freejoint/>")
     base_lines.append("      " + _inertial(max(graph.base_mass, 1e-3), graph.base_com.numpy(), graph.base_inertia.numpy()))
     base_lines += [f"      {geom}" for geom in spheres.get(-1, [])]
+    base_lines += [f"      {geom}" for geom in _link_sphere("link_base", graph.base_com.numpy())]
     base_lines += [body_xml(child, "      ") for child in children.get(-1, [])]
     base_lines.append("    </body>")
     actuators = []

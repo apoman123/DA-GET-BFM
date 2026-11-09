@@ -15,7 +15,7 @@ Meta's FB-CPR / Meta Motivo implementation:
   permit commercial use of the adapted parts.
 
 Adapted parts:
-- `BackwardMap`, `Discriminator`, and their MLP layouts;
+- the MLP heads of `DaGetBackwardMap` and `DaGetDiscriminator`;
 - `TruncatedNormal`;
 - the orthogonal `bfm_weight_init`;
 - the sphere projection of z;
@@ -30,11 +30,13 @@ Changes:
 
 In `model/rl/`, the adapted parts are the FB, discriminator, critic, and actor
 losses, the ensemble pessimism, the z mixture and rollout logic, the z buffer, the
-reward normalizer, the online loop, and the hyperparameter values. The
-environment settings and penalty definitions follow BFM-Zero's configuration.
+reward normalizer, the online loop, the lying-down starts, the EMD and motion
+priorities, and the hyperparameter values. The environment settings and penalty
+definitions follow BFM-Zero's configuration.
 
-The GET-conditioned actor and forward map, the per-robot training, and the MuJoCo
-environments are new. Their design follows the
+The per-DoF networks, the per-robot training, the encoder tuning, and the MuJoCo and
+Isaac Lab environments are new. The Isaac Lab adapter calls Isaac Lab's API
+(BSD-3-Clause, <https://github.com/isaac-sim/IsaacLab>) and does not copy its code. Their design follows the
 BFM-Zero / FB-CPR interfaces.
 
 Please cite:

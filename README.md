@@ -35,8 +35,9 @@ flat state ─► BackwardMap ─► latent z ─── cross-attention ──�
 | Physics pretraining (six tasks, Hugging Face `Trainer`) | Done; short training runs only |
 | Training data: synthetic, MuJoCo ground contact, Hub datasets, converters | Done |
 | BFM networks: backward map, discriminator, actor, forward map, critics | Done and unit tested |
-| Online off-policy FB-CPR training across robots (MuJoCo) | Done and tested; **only short runs so far, so no policy is trained yet** |
-| **Prompting one robot with another's motion** | **Open design question** ([details](docs/bfm.md#open-questions-for-cross-embodiment-training)) |
+| Online off-policy FB-CPR training across robots | Logic done and tested on MuJoCo; **only short runs, so no policy is trained yet** |
+| Isaac Lab simulation (self-collision, getting up, prioritized motions) | **Written against Isaac Lab 3 and tested with a fake only; never run in Isaac Lab, which needs a GPU** |
+| **Prompting one robot with another's motion** | **B and D are shared, but nothing aligns behaviors across robots yet** ([details](docs/bfm.md#sharing-z-across-robots)) |
 
 ## What comes from where
 
@@ -44,9 +45,9 @@ flat state ─► BackwardMap ─► latent z ─── cross-attention ──�
 |---|---|---|
 | Per-joint tokens, graph attention bias, `da_get_zero` preset | GET-Zero | Floating bases and multirotors |
 | Mass-matrix attention bias, Physics Cross Attention, physics pretraining | This repo | |
-| Backward map, discriminator, truncated-normal policy, latent inference | BFM-Zero / FB-CPR | Dictionary inputs, padding mask |
+| Backward map and discriminator heads, truncated-normal policy, latent inference | BFM-Zero / FB-CPR | Per-DoF state encoders in front of B and D; padding mask |
 | Actor and forward map interfaces | BFM-Zero / FB-CPR | Rebuilt to read joint embeddings and cross-attend to z; one action per joint |
-| Training losses, z mixture, rollout logic, hyperparameters | BFM-Zero / FB-CPR | Per-robot simulators, buffers, and prompts |
+| Training losses, z mixture, rollout logic, fall starts, motion priorities, hyperparameters | BFM-Zero / FB-CPR | Per-robot worlds, buffers, and prompts; encoder tuned with physics losses |
 
 ## Installation
 
@@ -63,13 +64,13 @@ uv run python scripts/download_urdfs.py  # Unitree Go1, H1, G1 and ANYmal D URDF
 
 URDF parsing and the dynamics need only PyTorch and the Python standard library.
 The training pipeline also uses `transformers`, `datasets`,
-`accelerate`, and `tensorboard`.
+`accelerate`, `tensorboard`, and `scipy`. Isaac Lab is installed separately.
 `uv sync` alone installs the core, and tests that need an extra are skipped
 without it:
 
 | Extra | Packages | Needed for |
 |---|---|---|
-| `sim` | `mujoco` | Ground-contact simulation (`"type": "mujoco"`) |
+| `sim` | `mujoco` | Ground-contact simulation (`"type": "mujoco"`) and RL checks on a CPU |
 | `convert` | `numcodecs` | GrandTour (zarr) conversion |
 | `validation` | `h5py` | MIPO conversion and the torque-validation script |
 
@@ -132,18 +133,27 @@ hidden = encoder(
 
 ### 2. Get one action per joint from a prompt
 
-The networks below are untrained here, so the actions only show the shapes.
+The networks below are untrained here, so the actions only show the shapes. The prompt is
+a goal state of the Go1: B reads per-DoF state tokens, so it fits any robot.
 
 ```python
 from model import BfmConfig, DaGetBfmModel
+from model.rl import EmbodimentObserver, RobotState
+from model.training.episodes import EmbodimentRecord
+from model.training.ground_sim import ground_specs
 
-state_dim = 64                                       # your flat state for B and D
-goal_state = torch.randn(2, state_dim)
+go1 = EmbodimentRecord.build("go1", graphs[0], ground_specs(specs[0]))
+observer = EmbodimentObserver(go1, history_size=H)
+pose = torch.zeros(1, graphs[0].num_joints, dtype=torch.float64)    # the goal pose
+still = torch.zeros(1, 3, dtype=torch.float64)
+down = torch.tensor([[0.0, 0.0, -1.0]], dtype=torch.float64)        # gravity in the base frame
+height = torch.tensor([0.3], dtype=torch.float64)
+goal = observer.state_inputs(observer.state_view(RobotState(pose, pose, down, still, still, height)))
 
-bfm = DaGetBfmModel(BfmConfig(embedding_size=hidden.shape[-1], backward_input_size=state_dim))
+bfm = DaGetBfmModel(BfmConfig(embedding_size=hidden.shape[-1], state_token_size=observer.state_token_size))
 bfm.init_weights()
 
-z = bfm.goal_inference(goal_state)                   # or tracking_inference / reward_inference
+z = bfm.goal_inference(goal).expand(2, -1)           # or tracking_inference / reward_inference
 action = bfm.act(hidden, z, batch.joint_mask)        # [2, 19]; values in [-1, 1], padded joints are 0
 ```
 
@@ -159,15 +169,18 @@ uv run tensorboard --logdir runs    # watch the losses at http://localhost:6006
 
 ### 4. Train the behavior foundation model
 
+This needs Isaac Lab and an NVIDIA GPU. Add `--simulator mujoco --device cpu` and small
+sizes to check the pipeline on a CPU.
+
 ```bash
-uv run python scripts/train_bfm.py \
-    --data_config configs/rl/go1_h1_ground.json \
-    --encoder_checkpoint runs/synthetic --output_dir runs/bfm
+python scripts/train_bfm.py \
+    --data_config configs/rl/g1_go1_real_and_synthetic.json \
+    --encoder_checkpoint runs/encoder --output_dir runs/bfm --headless
 ```
 
-Each `source` in the data config is one robot: its motions are the expert data, and
-a MuJoCo environment built from its URDF collects the replay data. The encoder
-checkpoint must use the same `joint_features` and `history_size`. See
+Sources with the same `robot` name are one robot, so real and synthetic trajectories
+combine. Expert sources teach the policy; all sources tune the encoder through the physics
+losses. The encoder checkpoint must use the same `joint_features` and `history_size`. See
 [Training](docs/bfm.md#training-online-off-policy-fb-cpr).
 
 ## Documentation
@@ -188,14 +201,14 @@ checkpoint must use the same `joint_features` and `history_size`. See
 model/                     library code
   modeling_da_get.py         DaGetEncoder and Physics Cross Attention
   modeling_bfm.py            backward map, discriminator, actor, forward map, critics
-  rl/                        FB-CPR agent, MuJoCo environments, replay buffers, training loop
+  rl/                        FB-CPR agent, Isaac Lab and MuJoCo worlds, replay, evaluation, training loop
   pretraining.py             physics pretraining model (heads A-F)
   dynamics.py                rigid-body dynamics and torque estimation
   training/, conversion/     data pipeline and dataset converters
 scripts/                   training, data config generator, converters, validation
 configs/data/              example data configs
 docs/                      documentation by topic
-tests/                     test suite (114 tests)
+tests/                     test suite
 ```
 
 ## Limitations
@@ -206,8 +219,9 @@ tests/                     test suite (114 tests)
   on ANYmal D. Prefer datasets with measured torques.
 - **Simulated ground contact covers standing, not walking.** Locomotion comes
   from recorded datasets.
-- **RL training runs MuJoCo on CPU**, without body collisions, fall starts, or
-  rotor robots ([differences from BFM-Zero](docs/bfm.md#what-differs-from-bfm-zero)).
+- **The Isaac Lab adapter is unverified on a real simulator** and rotor robots are not
+  supported in RL ([first run](docs/bfm.md#first-run-on-a-gpu-machine),
+  [differences from BFM-Zero](docs/bfm.md#what-differs-from-bfm-zero)).
 - **Automatic configs and actuator defaults are guesses.** Check them, and use
   measured values when you have them.
 
@@ -215,8 +229,8 @@ See [the full list](docs/development.md#limitations).
 
 ## License and attribution
 
-The backward map, discriminator, truncated-normal policy, latent inference, and
-FB-CPR training code are adapted from [BFM-Zero](https://github.com/LeCAR-Lab/BFM-Zero) (Copyright
+The heads of the backward map and discriminator, the truncated-normal policy, latent
+inference, and FB-CPR training code are adapted from [BFM-Zero](https://github.com/LeCAR-Lab/BFM-Zero) (Copyright
 Meta Platforms, Inc. and affiliates) under
 [CC BY-NC 4.0](https://creativecommons.org/licenses/by-nc/4.0/), which does not
 allow commercial use. See [THIRD_PARTY_NOTICES.md](THIRD_PARTY_NOTICES.md).
@@ -242,6 +256,9 @@ Motion datasets have their own licenses; see
   arXiv:2504.11054 (FB-CPR, Meta Motivo).
 - Ahmed Touati and Yann Ollivier. *Learning One Representation to Optimize All
   Rewards.* NeurIPS 2021 (forward-backward representations).
+- Mayank Mittal et al. *Orbit: A Unified Simulation Framework for Interactive Robot
+  Learning Environments.* IEEE RA-L 2023 ([Isaac Lab](https://isaac-sim.github.io/IsaacLab/),
+  the simulator).
 - Denis Yarats, Rob Fergus, Alessandro Lazaric, and Lerrel Pinto. *Mastering
   Visual Continuous Control: Improved Data-Augmented Reinforcement Learning.*
   ICLR 2022 (truncated-normal policy).

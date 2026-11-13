@@ -3,7 +3,7 @@ source_url: "https://get-zero-paper.github.io/"
 type: webpage
 title: "GET-Zero"
 captured_at: 2026-11-06T15:03:08.556603+00:00
-contributor: "HuJK"
+contributor: "apoman123"
 ---
 
 # GET-Zero

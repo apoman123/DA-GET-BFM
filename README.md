@@ -1,4 +1,4 @@
-# DA-GET-BFM
+# DA-GET-BFM: Dynamics Aware Cross Embodiment Behavior Foundation Model with Zero-Shot Capabilities
 
 **Dynamic-Aware Graph Embodiment Transformer for Behavior Foundation Models.**
 

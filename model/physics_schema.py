@@ -86,18 +86,11 @@ RIGID_BODY_FEATURES: tuple[PhysicsFeature, ...] = (
 ACTUATOR_FEATURES: tuple[PhysicsFeature, ...] = (
     PhysicsFeature("peak_torque", "tau_i^peak", "N m | N", "joint", 1.0),
     PhysicsFeature("continuous_torque", "tau_i^cont", "N m | N", "joint", 1.0),
-    PhysicsFeature("max_velocity", "omega_i^max", "rad/s | m/s", "joint", 1.0),
-    PhysicsFeature("max_power", "P_i^max", "W", "joint", 10.0),
-    PhysicsFeature("gear_ratio", "N_i", "1", "joint", 1.0),
     PhysicsFeature("kp", "K_p,i", "N m/rad | N/m", "joint", 10.0),
     PhysicsFeature("kd", "K_d,i", "N m s/rad | N s/m", "joint", 1.0),
     # Propeller coefficients of thrust-mode joints (multirotors); zero otherwise.
     PhysicsFeature("thrust_coefficient", "k_f,i (thrust = k_f w^2 along a_i)", "N s^2/rad^2", "B_i", 1e-6),
     PhysicsFeature("torque_coefficient", "k_m,i (drag = k_m w^2)", "N m s^2/rad^2", "joint", 1e-8),
-    *(
-        PhysicsFeature(f"mode_{mode}", f"mode_i[{mode}]", "1 (one-hot)", "joint", None)
-        for mode in ACTUATOR_MODES
-    ),
 )
 
 DYNAMICS_FEATURES: tuple[PhysicsFeature, ...] = (

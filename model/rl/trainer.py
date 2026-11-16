@@ -55,6 +55,8 @@ class TrainingArguments:
         output_dir (str): Checkpoints and TensorBoard logs.
         simulator (str): ``isaaclab`` or ``mujoco`` (CPU, for tests and small checks).
         encoder_checkpoint (str | None): Pretrained encoder; a new one is used if None.
+        encoder_size (str): Tiny, small, medium, or large architecture for a new encoder;
+            an existing checkpoint supplies its own architecture.
         num_env_steps (int): Total environment frames (BFM-Zero: 384M).
         online_parallel_envs (int): Environments over all robots.
         buffer_size (int): Stored transitions over all robots.
@@ -86,6 +88,7 @@ class TrainingArguments:
     output_dir: str
     simulator: str = "isaaclab"
     encoder_checkpoint: str | None = None
+    encoder_size: str = "small"
     num_env_steps: int = 384_000_000
     online_parallel_envs: int = 1024
     buffer_size: int = 5_120_000
@@ -205,8 +208,20 @@ def load_embodiments(data_config: str | Path | dict, arguments: TrainingArgument
     return embodiments, config
 
 
-def build_encoder(checkpoint: str | None, token_size: int) -> DaGetForPhysicsPretraining:
-    """Load the pretrained encoder with its heads, or create a small new one."""
+def build_encoder(checkpoint: str | None, token_size: int, size: str = "small") -> DaGetForPhysicsPretraining:
+    """Load a pretrained encoder or create one at the selected size.
+
+    Args:
+        checkpoint (str | None): Local pretrained checkpoint path, if available.
+        token_size (int): Positive raw joint-token width expected by the data.
+        size (str): Named architecture for a new encoder; ignored for checkpoints.
+
+    Returns:
+        DaGetForPhysicsPretraining: Encoder and physics heads ready for training.
+
+    Raises:
+        ValueError: The checkpoint token width or new encoder size is invalid.
+    """
     if checkpoint:
         model = DaGetForPhysicsPretraining.from_pretrained(checkpoint)
         if model.config.encoder["input_size"] != token_size:
@@ -215,8 +230,7 @@ def build_encoder(checkpoint: str | None, token_size: int) -> DaGetForPhysicsPre
                 "use the same joint_features and history_size as in pretraining"
             )
         return model
-    encoder = DaGetConfig(input_size=token_size, hidden_size=128, num_hidden_layers=4, num_attention_heads=4,
-                          intermediate_size=512, use_physics_cross_attention=True)
+    encoder = DaGetConfig.from_size(token_size, size, use_physics_cross_attention=True)
     return DaGetForPhysicsPretraining(DaGetPhysicsPretrainingConfig.from_encoder_config(encoder))
 
 
@@ -340,8 +354,8 @@ class FbCprTrainer:
         observers = [embodiment.observer for embodiment in self.embodiments]
         if len({observer.token_size for observer in observers}) != 1:
             raise ValueError("every robot must use the same joint features and history")
-        pretrained = build_encoder(arguments.encoder_checkpoint, observers[0].token_size)
-        model_config = BfmConfig(
+        pretrained = build_encoder(arguments.encoder_checkpoint, observers[0].token_size, arguments.encoder_size)
+        model_config = BfmConfig.from_sizes(
             embedding_size=pretrained.encoder.config.hidden_size, state_token_size=observers[0].state_token_size, **(model_overrides or {})
         )
         self.agent = DaGetFbCprAgent(model_config, self.config, pretrained, observers, arguments.device)

@@ -41,6 +41,19 @@ class DaGetEncoderTest(unittest.TestCase):
             ]
         )
 
+    def test_named_sizes_and_overrides(self) -> None:
+        """Check all encoder presets, explicit overrides, and unknown names.
+
+        Returns:
+            None: Asserts preset ordering and validation behavior.
+        """
+        configs = [DaGetConfig.from_size(3, size) for size in ("tiny", "small", "medium", "large")]
+        self.assertEqual([item.hidden_size for item in configs], [64, 128, 256, 512])
+        self.assertEqual([item.num_hidden_layers for item in configs], [2, 4, 6, 8])
+        self.assertEqual(DaGetConfig.from_size(3, "tiny", hidden_size=96).hidden_size, 96)
+        with self.assertRaisesRegex(ValueError, "unknown encoder size"):
+            DaGetConfig.from_size(3, "huge")
+
     def test_graph_distances_and_root_edges(self) -> None:
         """Check directed ancestry, undirected paths, and optional root edges.
 

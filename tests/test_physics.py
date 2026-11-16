@@ -33,6 +33,7 @@ from model.physics_schema import (
     FEATURE_UPDATE_TIERS,
     PHYSICS_FEATURE_GROUPS,
     RIGID_BODY_FEATURE_SIZE,
+    feature_names,
 )
 from model.urdf import parse_urdf
 from tests.test_embodiment import double_pendulum, humanoid, joint, link, quadruped, robot
@@ -158,6 +159,10 @@ class PhysicsFeatureTest(unittest.TestCase):
         specs = actuator_specs(graph)
         self.assertEqual(rigid_body_features(graph).shape, (12, RIGID_BODY_FEATURE_SIZE))
         self.assertEqual(actuator_features(specs).shape, (12, ACTUATOR_FEATURE_SIZE))
+        self.assertEqual(
+            feature_names("actuator"),
+            ("peak_torque", "continuous_torque", "kp", "kd", "thrust_coefficient", "torque_coefficient"),
+        )
         q = torch.zeros(12, dtype=torch.float64)
         self.assertEqual(dynamics_features(graph, specs, q, q).shape, (12, DYNAMICS_FEATURE_SIZE))
         for features in PHYSICS_FEATURE_GROUPS.values():

@@ -29,6 +29,7 @@ from torch import autograd, nn
 
 from model.configuration_bfm import BfmConfig
 from model.modeling_bfm import DaGetBfmModel
+from model.modeling_da_get import DaGetEncoder
 from model.pretraining import DaGetForPhysicsPretraining
 from model.rl.buffers import ExpertMotions, ReplayBuffer
 from model.rl.configuration_fb_cpr import FbCprConfig
@@ -189,8 +190,9 @@ class DaGetFbCprAgent:
         self.robots = len(observers)
         self.pretrained = pretrained.to(self.device).eval().requires_grad_(config.train_encoder)
         self.target_pretrained = copy.deepcopy(self.pretrained).eval().requires_grad_(False)
-        self.model = DaGetBfmModel(model_config).to(self.device)
+        self.model = DaGetBfmModel(model_config, self.pretrained.encoder).to(self.device)
         self.model.init_weights()
+        self.target_state_adapter = copy.deepcopy(self.model.state_adapter).requires_grad_(False)
         self.target_forward_map = copy.deepcopy(self.model.forward_map).requires_grad_(False)
         self.target_backward_map = copy.deepcopy(self.model.backward_map).requires_grad_(False)
         self.target_critic = copy.deepcopy(self.model.critic).requires_grad_(False)
@@ -200,7 +202,9 @@ class DaGetFbCprAgent:
         decay = config.weight_decay
         self.optimizers = {
             "forward": torch.optim.Adam(model.forward_map.parameters(), lr=config.lr_f, weight_decay=decay),
-            "backward": torch.optim.Adam(model.backward_map.parameters(), lr=config.lr_b, weight_decay=decay),
+            "backward": torch.optim.Adam(
+                [*model.backward_map.parameters(), *model.state_adapter.parameters()], lr=config.lr_b, weight_decay=decay
+            ),
             "actor": torch.optim.Adam(model.actor.parameters(), lr=config.lr_actor, weight_decay=decay),
             "critic": torch.optim.Adam(model.critic.parameters(), lr=config.lr_critic, weight_decay=decay),
             "aux_critic": torch.optim.Adam(model.aux_critic.parameters(), lr=config.lr_aux_critic, weight_decay=decay),
@@ -216,42 +220,65 @@ class DaGetFbCprAgent:
         self.reward_names = tuple(config.aux_reward_scales)
         self._reward_scales = torch.tensor([config.aux_reward_scales[name] for name in self.reward_names], device=self.device)
 
-    def _embed(self, model: DaGetForPhysicsPretraining, robot: int, observation: Observation, grad: bool = False) -> torch.Tensor:
-        """Return joint embeddings ``[N, J, E]`` of one robot's observation."""
+    def _embed(self, model: DaGetEncoder, robot: int, observation: Observation, grad: bool = False) -> torch.Tensor:
+        """Encode one robot's policy observation with the selected shared core.
+
+        Args:
+            model (DaGetEncoder): Online or target encoder instance.
+            robot (int): Index of the observation's robot.
+            observation (Observation): Policy tokens and physical state tensors.
+            grad (bool): Whether to retain encoder gradients for this call.
+
+        Returns:
+            torch.Tensor: Joint embeddings ``[N, J, embedding_size]``.
+        """
         observer = self.observers[robot]
         local = observation.local.to(self.device)
         structure = observer.structure_inputs(local.shape[0], self.device)
-        spatial, ancestors, descendants = structure.pop("graph_distances")
         with torch.set_grad_enabled(grad):
-            return model.encode(
+            return model(
                 input_values=observer.policy_tokens(local, observation.global_features.to(self.device)),
-                spatial_distances=spatial,
-                ancestor_distances=ancestors,
-                descendant_distances=descendants,
-                mass_matrix=observation.mass.to(self.device),
-                dynamics_features=observation.dynamics.to(self.device),
+                mass_matrix=observation.mass.to(self.device) if model.config.use_mass_encoding else None,
+                dynamics_features=observation.dynamics.to(self.device) if model.physics_tokenizers is not None else None,
                 **structure,
             )
 
     def _state_inputs(self, robot: int, view: StateView) -> dict:
-        """Return state-encoder inputs of one robot's frames on the agent's device."""
+        """Build privileged inputs for the shared encoder on the agent device.
+
+        Args:
+            robot (int): Index of the robot owning the frames.
+            view (StateView): One robot's state frames.
+
+        Returns:
+            dict: State tokens, graph structure, and physics features on the device.
+        """
         moved = StateView(view.local.to(self.device), view.global_features.to(self.device), view.dynamics.to(self.device))
         return self.observers[robot].state_inputs(moved)
 
     @torch.no_grad()
     def act(self, robot: int, observation: Observation, z: torch.Tensor, mean: bool = False) -> torch.Tensor:
         """Return per-DoF actions ``[N, J]`` for one robot's environments."""
-        embeddings = self._embed(self.pretrained, robot, observation)
+        embeddings = self._embed(self.model.encoder, robot, observation)
         distribution = self.model.actor(embeddings, z.to(self.device), self.model_config.actor_std)
         return distribution.mean if mean else distribution.sample()
 
     @torch.no_grad()
     def _backward(self, robot: int, view: StateView) -> torch.Tensor:
-        """Return raw ``B(s)`` of one robot's frames ``[N, ...]``, in chunks."""
+        """Encode one robot's state and evaluate B in bounded chunks.
+
+        Args:
+            robot (int): Index of the robot owning the frames.
+            view (StateView): Privileged state frames.
+
+        Returns:
+            torch.Tensor: Raw backward latents ``[N, z_dim]``.
+        """
         chunks = []
         for start in range(0, view.local.shape[0], LATENT_CHUNK):
             indices = torch.arange(start, min(start + LATENT_CHUNK, view.local.shape[0]))
-            chunks.append(self.model.backward_map(self._state_inputs(robot, view.select(indices))))
+            state = self._state_inputs(robot, view.select(indices))
+            chunks.append(self.model.backward_map(self.model.encode_state(state), state["joint_mask"]))
         return torch.cat(chunks)
 
     @torch.no_grad()
@@ -313,8 +340,18 @@ class DaGetFbCprAgent:
             z[environments] = tracking[torch.arange(chosen, device=self.device), times]
         return z
 
-    def _padded_embeddings(self, model: DaGetForPhysicsPretraining, observations: list[Observation], joints: int, grad: bool = False) -> torch.Tensor:
-        """Encode each robot and join the results, padded to ``joints``."""
+    def _padded_embeddings(self, model: DaGetEncoder, observations: list[Observation], joints: int, grad: bool = False) -> torch.Tensor:
+        """Encode each robot with one core and pad outputs to a common joint count.
+
+        Args:
+            model (DaGetEncoder): Online or target shared encoder.
+            observations (list[Observation]): One observation batch per robot.
+            joints (int): Positive padded joint count.
+            grad (bool): Whether to retain encoder gradients.
+
+        Returns:
+            torch.Tensor: Combined embeddings ``[batch, joints, embedding_size]``.
+        """
         return torch.cat([pad_joints(self._embed(model, robot, observation, grad), joints) for robot, observation in enumerate(observations)])
 
     def _training_batch(self, replays: list[ReplayBuffer], counts: list[int]) -> TrainingBatch:
@@ -362,7 +399,9 @@ class DaGetFbCprAgent:
     def encode_expert(self, next_states: list[dict]) -> torch.Tensor:
         """Return per-frame ``z`` in robot order: the projected mean of B over each expert window."""
         length = self.model_config.seq_length
-        embeddings = torch.cat([self.model.backward_map(inputs) for inputs in next_states])
+        embeddings = torch.cat([
+            self.model.backward_map(self.model.encode_state(inputs), inputs["joint_mask"]) for inputs in next_states
+        ])
         windows = embeddings.view(-1, length, self.model_config.z_dim)
         return torch.repeat_interleave(self.model.project_z(windows.mean(dim=1)), length, dim=0)
 
@@ -397,7 +436,12 @@ class DaGetFbCprAgent:
 
     def _discriminator_logits(self, states: list[dict], z: torch.Tensor, counts: list[int]) -> torch.Tensor:
         """Return D's logits ``[B, 1]`` of per-robot state inputs."""
-        return torch.cat([self.model.discriminator.compute_logits(inputs, part) for inputs, part in zip(states, z.split(counts))])
+        with torch.no_grad():
+            encoded = [self.model.encode_state(inputs) for inputs in states]
+        return torch.cat([
+            self.model.discriminator.compute_logits(embedding, part, inputs["joint_mask"])
+            for embedding, inputs, part in zip(encoded, states, z.split(counts))
+        ])
 
     def _gradient_penalty(self, expert: list[dict], expert_z: torch.Tensor, train: list[dict], train_z: torch.Tensor) -> torch.Tensor:
         """Return the WGAN gradient penalty of D's head, between expert and replay samples of each robot.
@@ -406,10 +450,15 @@ class DaGetFbCprAgent:
         head is the pooled state: second derivatives through attention would be far more
         expensive, and PyTorch's fast CPU attention does not support them.
         """
-        encoder = self.model.discriminator.state_encoder
         with torch.no_grad():
-            expert_features = torch.cat([encoder(inputs) for inputs in expert])
-            train_features = torch.cat([encoder(inputs) for inputs in train])
+            expert_features = torch.cat([
+                self.model.discriminator.readout(self.model.encode_state(inputs), inputs["joint_mask"])
+                for inputs in expert
+            ])
+            train_features = torch.cat([
+                self.model.discriminator.readout(self.model.encode_state(inputs), inputs["joint_mask"])
+                for inputs in train
+            ])
         alpha = torch.rand(train_z.shape[0], 1, device=self.device)
         features = (alpha * expert_features + (1 - alpha) * train_features).requires_grad_(True)
         latents = (alpha * expert_z + (1 - alpha) * train_z).requires_grad_(True)
@@ -444,10 +493,22 @@ class DaGetFbCprAgent:
         with torch.no_grad():
             next_action = self._sample_action(next_embeddings, z, mask)
             target_forward = self.target_forward_map(next_embeddings, z, next_action, mask, context_states=batch.next_context, context_mask=mask)
-            target_backward = torch.cat([self.target_backward_map(inputs) for inputs in batch.next_states])
+            target_backward = torch.cat([
+                self.target_backward_map(
+                    self.model.encode_state(inputs, encoder=self.target_pretrained.encoder, adapter=self.target_state_adapter),
+                    inputs["joint_mask"],
+                )
+                for inputs in batch.next_states
+            ])
             _, _, target = ensemble_pessimism(target_forward @ target_backward.T, self.config.fb_pessimism_penalty)
         forward = self.model.forward_map(embeddings, z, batch.action, mask, context_states=batch.context, context_mask=mask)
-        backward = torch.cat([self.model.backward_map(inputs) for inputs in batch.next_states])
+        grad = self.config.train_encoder and self.config.encoder_rl_gradients
+        backward = torch.cat([
+            self.model.backward_map(
+                self.model.encode_state(inputs, train_encoder=grad), inputs["joint_mask"]
+            )
+            for inputs in batch.next_states
+        ])
         measures = forward @ backward.T
         fb_loss, fb_diagonal, fb_off = fb_bellman_loss(measures, batch.discount, target, pairs)
         orth_loss, orth_diagonal, orth_off = orthonormality_loss(backward, pairs)
@@ -478,7 +539,12 @@ class DaGetFbCprAgent:
         config = self.config
         with torch.no_grad():
             reward = torch.cat(
-                [self.model.discriminator.compute_reward(inputs, part) for inputs, part in zip(batch.states, z.split(batch.counts))]
+                [
+                    self.model.discriminator.compute_reward(
+                        self.model.encode_state(inputs), part, inputs["joint_mask"]
+                    )
+                    for inputs, part in zip(batch.states, z.split(batch.counts))
+                ]
             )
         critic_loss, target, value, uncertainty = self._value_loss(
             self.model.critic, self.target_critic, config.critic_pessimism_penalty, reward, batch, embeddings, next_embeddings, z
@@ -510,9 +576,9 @@ class DaGetFbCprAgent:
         config = self.config
         joints = batch.joint_mask.shape[1]
         grad = config.train_encoder and config.encoder_rl_gradients
-        embeddings = self._padded_embeddings(self.pretrained, batch.observations, joints, grad)
+        embeddings = self._padded_embeddings(self.model.encoder, batch.observations, joints, grad)
         with torch.no_grad():
-            next_embeddings = self._padded_embeddings(self.target_pretrained, batch.next_observations, joints)
+            next_embeddings = self._padded_embeddings(self.target_pretrained.encoder, batch.next_observations, joints)
         fb_loss, metrics = self._fb_loss(batch, embeddings, next_embeddings, z)
         critic_loss, aux_loss, critic_metrics = self._critic_losses(batch, embeddings, next_embeddings, z)
         metrics.update(critic_metrics)
@@ -536,7 +602,7 @@ class DaGetFbCprAgent:
         """Maximize ``Fᵀz + λ_D Q_D + λ_R Q_R`` with ensemble pessimism; the encoder does not move."""
         config = self.config
         mask = batch.joint_mask
-        embeddings = self._padded_embeddings(self.pretrained, batch.observations, mask.shape[1])
+        embeddings = self._padded_embeddings(self.model.encoder, batch.observations, mask.shape[1])
         action = self._sample_action(embeddings, z, mask)
         keywords = {"context_states": batch.context, "context_mask": mask}
         q_d = self.model.critic(embeddings, z, action, mask, **keywords)
@@ -565,7 +631,10 @@ class DaGetFbCprAgent:
         expert_z = self.encode_expert(expert_next)
         metrics = self.update_discriminator(expert_states, expert_z, batch.states, batch.z, counts)
         with torch.no_grad():
-            goals = self.model.project_z(torch.cat([self.model.backward_map(inputs) for inputs in batch.next_states]))
+            goals = self.model.project_z(torch.cat([
+                self.model.backward_map(self.model.encode_state(inputs), inputs["joint_mask"])
+                for inputs in batch.next_states
+            ]))
         z = self.sample_mixed_z(batch.robots, goals, expert_z, batch.robots)
         for robot, buffer in enumerate(self.z_buffers):
             buffer.add(z[batch.robots == robot])
@@ -575,6 +644,7 @@ class DaGetFbCprAgent:
         metrics.update(self.update_actor(batch, z))
         soft_update(self.model.forward_map, self.target_forward_map, config.fb_target_tau)
         soft_update(self.model.backward_map, self.target_backward_map, config.fb_target_tau)
+        soft_update(self.model.state_adapter, self.target_state_adapter, config.fb_target_tau)
         soft_update(self.model.critic, self.target_critic, config.critic_target_tau)
         soft_update(self.model.aux_critic, self.target_aux_critic, config.critic_target_tau)
         if config.train_encoder:
@@ -589,6 +659,7 @@ class DaGetFbCprAgent:
             "target_pretrained": self.target_pretrained.state_dict(),
             "target_forward_map": self.target_forward_map.state_dict(),
             "target_backward_map": self.target_backward_map.state_dict(),
+            "target_state_adapter": self.target_state_adapter.state_dict(),
             "target_critic": self.target_critic.state_dict(),
             "target_aux_critic": self.target_aux_critic.state_dict(),
             "aux_normalizer": self.aux_normalizer.state_dict(),
@@ -604,6 +675,7 @@ class DaGetFbCprAgent:
         self.target_pretrained.load_state_dict(state["target_pretrained"])
         self.target_forward_map.load_state_dict(state["target_forward_map"])
         self.target_backward_map.load_state_dict(state["target_backward_map"])
+        self.target_state_adapter.load_state_dict(state["target_state_adapter"])
         self.target_critic.load_state_dict(state["target_critic"])
         self.target_aux_critic.load_state_dict(state["target_aux_critic"])
         self.aux_normalizer.load_state_dict(state["aux_normalizer"])

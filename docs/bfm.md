@@ -30,31 +30,48 @@ two references:
 - [GET-Zero](https://get-zero-paper.github.io/) (Patel and Song, ICRA 2025).
 
 BFM-Zero's networks read one flat state vector of a single robot (the G1). Here
-every network reads per-DoF tokens, so one set of weights fits any robot: the actor and
-critics read `DaGetEncoder` embeddings, which carry the graph, the hardware, and the
-dynamics, and B and D read state tokens through encoders of their own.
+every network reads per-DoF tokens from one shared `DaGetEncoder`. Its state-token
+adapter maps expert and privileged state tokens to the encoder input width;
+the actor, F, B, D, and critics then consume encoder embeddings.
 
 ```text
-state tokens ─► DaGetBackwardMap B(s) ─► z  (goal / tracking / reward prompt)
-state tokens ─┐                          │
-              └► DaGetDiscriminator D(s,z) ◄┤
-                                         ▼
-URDF + q, q̇, … ─► DaGetEncoder ─► H [B, J, hidden] ─► LatentMemory(z, context) ─► K/V tokens
-                                     │                                  │
-                                     ▼                                  ▼
-                 joint tokens (+ action embedding for F/Q) ── cross-attn → self-attn → FFN  × N
-                                     │
-                   ┌─────────────────┴────────────────────┐
-    actor: per-joint head → tanh → a [B, J]     F / critics: readout query + mean → [P, B, z_dim or 1]
+policy tokens ────────────────────┐
+state tokens ─► state adapter ───┤
+                                ▼
+                         DaGetEncoder (one instance)
+                                │ per-joint embeddings
+              ┌─────────────────┼─────────────────────┐
+              ▼                 ▼                     ▼
+           B and D           actor              F and critics
+       pooled heads      per-joint actions    action-conditioned readout
 ```
 
 | Network | BFM-Zero | Here |
 |---|---|---|
-| Backward map `B(s)` | MLP: Linear → LayerNorm → Tanh → Linear, normalized to radius `√z_dim` | `DaGetBackwardMap`: its own `DaGetEncoder` over state tokens, a joint readout, then the same MLP head |
-| Discriminator `D(s, z)` | MLP on `[z, s]`, reward `log D − log(1−D)` | `DaGetDiscriminator`: its own `DaGetEncoder` over state tokens, a joint readout, then the same MLP on `[z, pooled]` |
+| Backward map `B(s)` | MLP: Linear → LayerNorm → Tanh → Linear, normalized to radius `√z_dim` | Shared encoder output, a joint readout, then the same MLP head |
+| Discriminator `D(s, z)` | MLP on `[z, s]`, reward `log D − log(1−D)` | Shared encoder output, a joint readout, then the same MLP on `[z, pooled]` |
 | Actor `π(a \| s, z)` | Residual MLP on `[s, z]` → `tanh` mean, truncated normal | `DaGetBfmActor`: joint tokens cross-attend to latent tokens, then a per-DoF head gives a `tanh` mean and a truncated normal |
 | Forward map `F(s, a, z)` | Residual MLP, ensemble of 2, `z_dim` outputs | `DaGetForwardMap`: each joint token gets its own action, cross-attends to latent tokens, then the joints are pooled; ensemble of `num_parallel` |
 | Critic, aux critic `Q(s, a, z)` | Same as F with one output | `DaGetForwardMap(config, 1)` |
+
+For state-only inputs, the adapter preserves privileged features. Expert
+records provide each joint's mass diagonal but not the full joint-space inertia
+matrix, so state encoding uses a diagonal matrix for the shared encoder's mass
+bias. Policy observations continue to use their full mass matrix.
+This changes B and D parameter shapes, so RL checkpoints made with their old
+separate encoders need a new BFM training run. Pretrained DA-GET encoder
+checkpoints remain usable.
+
+In BFM-Zero's published training configuration, actor, F, and both critics
+use **separate** residual networks with the same 2048-wide, six-layer setting.
+The critics are instances of the forward-map architecture and output one Q
+value per sample; the actor outputs an action distribution. The actor sees
+policy observations, while F and the critics also see privileged observations.
+This project replaces those residual MLPs with per-joint attention networks so
+they can process robots with different joint counts. Its transformer widths and
+depths are project presets, not the paper's 2048-wide residual architecture.
+See the upstream [training configuration](https://github.com/LeCAR-Lab/BFM-Zero/blob/main/humanoidverse/train.py)
+and [network definitions](https://github.com/LeCAR-Lab/BFM-Zero/blob/main/humanoidverse/agents/nn_models.py).
 
 ## Design details
 
@@ -86,7 +103,7 @@ URDF + q, q̇, … ─► DaGetEncoder ─► H [B, J, hidden] ─► LatentMemo
 ```python
 # hidden, batch and goal from the README quick start, with Go1 as the prompted robot
 config = BfmConfig(embedding_size=hidden.shape[-1], state_token_size=observer.state_token_size)
-bfm = DaGetBfmModel(config)
+bfm = DaGetBfmModel(config, encoder)
 bfm.init_weights()
 
 z = bfm.goal_inference(goal).expand(2, -1)               # or tracking_inference / reward_inference
@@ -95,13 +112,44 @@ dist = bfm.actor(hidden, z, config.actor_std, batch.joint_mask)
 F = bfm.forward_map(hidden, z, dist.sample(clip=0.3), batch.joint_mask)   # [2, 2, 256]
 q_fb = bfm.fb_q_value(F, z)                              # Fᵀz, [2, 2]
 q_cpr = bfm.critic(hidden, z, action, batch.joint_mask)  # [2, 2, 1]
-reward = bfm.discriminator.compute_reward(goal, z[:1])   # CPR reward
+goal_hidden = bfm.encode_state(goal)
+reward = bfm.discriminator.compute_reward(goal_hidden, z[:1], goal["joint_mask"])
 ```
 
 ## Configuration
 
-`BfmConfig` fields (defaults follow BFM-Zero's G1 configuration where one
-exists):
+Choose sizes independently for the actor, forward map (including both critics),
+and backward map. The backward preset also sizes the shared state-token adapter
+and B/D readouts. `small` matches the original defaults. Explicit config
+fields or CLI dimension flags override the selected presets.
+
+```python
+config = BfmConfig.from_sizes(
+    embedding_size=hidden.shape[-1],
+    state_token_size=observer.state_token_size,
+    actor_size="tiny",
+    forward_size="medium",
+    backward_size="small",
+)
+```
+
+```bash
+python scripts/train_bfm.py --data_config configs/rl/go1_h1_ground.json \
+    --output_dir runs/bfm --encoder_size tiny --actor_size tiny --forward_size medium \
+    --backward_size small
+```
+
+`--encoder_size` selects the policy encoder only when no `--encoder_checkpoint`
+is supplied. A checkpoint retains its saved encoder architecture.
+
+| Size | Actor/forward width | Actor/forward layers | Heads | Feed-forward width | State adapter width/layers | Backward head width/layers |
+|---|---:|---:|---:|---:|---:|---:|
+| `tiny` | 128 | 2 | 4 | 512 | 64 / 1 | 128 / 1 |
+| `small` | 256 | 4 | 4 | 1024 | 128 / 2 | 256 / 1 |
+| `medium` | 384 | 6 | 8 | 1536 | 256 / 4 | 512 / 2 |
+| `large` | 512 | 8 | 16 | 2048 | 512 / 6 | 1024 / 3 |
+
+`BfmConfig` fields (BFM-Zero values are identified where retained):
 
 | Field | Default | Meaning |
 |---|---|---|
@@ -110,10 +158,11 @@ exists):
 | `z_dim`, `norm_z` | 256, `True` | Latent size and its projection to the sphere |
 | `hidden_size`, `num_attention_heads`, `intermediate_size` | 256, 4, 1024 | Actor and critic token width |
 | `num_latent_tokens` | 8 | Tokens per latent vector |
+| `actor_*`, `forward_*` dimension fields | `None` | Optional role-specific width, heads, feed-forward width, and latent-token count |
 | `actor_layers`, `forward_layers` | 4, 4 | Latent-conditioned blocks |
 | `num_parallel` | 2 | Ensemble size of F and the critics |
 | `action_size_per_joint` | 1 | Action entries per DoF |
-| `state_hidden_size`, `state_num_layers`, `state_num_heads`, `state_intermediate_size` | 128, 2, 4, 256 | Encoders of B and D (not from BFM-Zero) |
+| `state_hidden_size`, `state_num_layers`, `state_num_heads`, `state_intermediate_size` | 128, 2, 4, 256 | State adapter width/depth, B/D readout heads, and adapter inner width |
 | `backward_hidden_size`, `backward_hidden_layers`, `backward_norm` | 256, 1, `True` | B head (BFM-Zero) |
 | `discriminator_hidden_size`, `discriminator_hidden_layers` | 1024, 3 | D head (BFM-Zero) |
 | `actor_std`, `seq_length` | 0.05, 8 | Policy std, tracking window |
@@ -232,11 +281,11 @@ of the paper):
 | Difference | Why |
 |---|---|
 | Actor and critics read `DaGetEncoder` embeddings | The point of this project |
-| B and D read per-DoF state tokens through their own encoder | The state must fit every robot |
+| A shared state adapter lets B and D use the same encoder as the actor and F | Expert states lack policy history and have a different token width |
 | Prompts pair only within a robot, each robot has a z buffer, and F and B are compared only within a robot | See [Sharing z across robots](#sharing-z-across-robots) |
 | The encoder keeps training, with a target encoder and physics losses | Requested for this project |
 | Gradient penalty on D's pooled state, not its raw input | Second derivatives through attention are expensive and unsupported by PyTorch's fast CPU attention. Only D's head is penalized |
-| No observation `BatchNorm` | Tokens are already scaled per feature, and the encoders start with a LayerNorm |
+| No observation `BatchNorm` | Tokens are already scaled per feature, and the encoder and adapter start with LayerNorm |
 | Ankle-roll penalty left out | It names G1 joints |
 | Replay is not saved in checkpoints | Resuming continues with an empty buffer |
 | Rotor robots are not supported | Not needed yet; `NotImplementedError` |
@@ -324,8 +373,8 @@ python scripts/train_bfm.py --data_config configs/rl/go1_h1_ground.json \
   and a proprioceptive history. Here those go into the GET tokens: joint
   history via `DaGetTokenizer`, and the last applied torque via the dynamics
   features. Base-level signals can go in as context tokens.
-- **Tuning.** The encoder's learning rate, the physics weight, and the encoders of B
-  and D have no reference values.
+- **Tuning.** The shared encoder's learning rate, physics weight, and state
+  adapter have no reference values.
 - **Offline training.** Training needs a simulator, as in BFM-Zero.
 
 ## Attribution

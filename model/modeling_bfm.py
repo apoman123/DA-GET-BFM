@@ -3,8 +3,10 @@
 "Da" stands for dynamic-aware: the GET embeddings these networks read carry the
 robot's dynamics.
 
-* ``DaGetBackwardMap`` B(s) and ``DaGetDiscriminator`` D(s, z) read per-DoF state
-  tokens through their own ``DaGetEncoder``, pool the joints, and keep BFM-Zero's MLP head.
+* One ``DaGetEncoder`` handles policy and state tokens. A shared state-token
+  adapter maps privileged state tokens to its input width. ``DaGetBackwardMap``
+  B(s) and ``DaGetDiscriminator`` D(s, z) pool its joint embeddings before their
+  BFM-Zero-style MLP heads.
 * ``DaGetBfmActor`` pi(a | s, z) and ``DaGetForwardMap`` F(s, a, z) (also used for
   the discriminator critic and the auxiliary critic, with one output) take the
   ``[batch, joints, hidden]`` output of ``DaGetEncoder``, cross-attend from joint tokens
@@ -36,7 +38,7 @@ References and attribution:
   The truncated normal itself follows DrQ-v2 (Yarats et al., ICLR 2022) and
   the clipped target noise follows TD3 (Fujimoto et al., ICML 2018).
 * The per-DoF networks (latent tokens, joint-to-latent cross-attention, per-DoF
-  action head, joint readout, state encoders of B and D) are new in this repo.
+  action head, joint readout, and shared state-token adapter) are new in this repo.
 """
 
 from __future__ import annotations
@@ -49,6 +51,7 @@ import torch.nn.functional as F
 from torch import distributions as pyd
 from torch import nn
 from torch.distributions.utils import _standard_normal
+from torch.func import functional_call
 
 from model.configuration_bfm import BfmConfig
 from model.modeling_da_get import DaGetEncoder
@@ -136,34 +139,33 @@ class JointReadout(nn.Module):
         return torch.cat((pooled, (hidden_states * joint_mask[..., None]).sum(1) / count), dim=-1)
 
 
-class StateEncoder(nn.Module):
-    """``DaGetEncoder`` over state tokens followed by a joint readout: any robot to one vector."""
-
-    def __init__(self, config: BfmConfig) -> None:
-        super().__init__()
-        self.encoder = DaGetEncoder(config.state_encoder_config)
-        self.readout = JointReadout(config.state_hidden_size, config.state_num_heads)
-        self.output_size = 2 * config.state_hidden_size
-
-    def forward(self, state: StateInputs) -> torch.Tensor:
-        """Encode ``DaGetEncoder`` keyword inputs into ``[batch, output_size]``."""
-        return self.readout(self.encoder(**state), state["joint_mask"])
-
-
 class DaGetBackwardMap(nn.Module):
     """Backward representation B(s) -> z, shared across robots.
 
-    A ``StateEncoder`` replaces BFM-Zero's flat input. BFM-Zero's head follows:
+    A readout of the shared encoder replaces BFM-Zero's flat input. Its head follows:
     Linear -> LayerNorm -> Tanh, ``backward_hidden_layers - 1`` Linear -> ReLU, then Linear
     to ``z_dim`` and an optional projection to the sphere.
+
+    Attributes:
+        config (BfmConfig): Validated head dimensions and latent settings.
+        readout (JointReadout): Pool shared-encoder joint embeddings.
+        head (nn.Sequential): Map pooled state to the backward latent.
     """
 
     def __init__(self, config: BfmConfig) -> None:
+        """Construct the backward head without creating an encoder.
+
+        Args:
+            config (BfmConfig): Validated embedding, readout, and latent sizes.
+
+        Returns:
+            None: Registers the readout and backward MLP.
+        """
         super().__init__()
         self.config = config
-        self.state_encoder = StateEncoder(config)
+        self.readout = JointReadout(config.embedding_size, math.gcd(config.embedding_size, config.state_num_heads))
         width = config.backward_hidden_size
-        layers: list[nn.Module] = [nn.Linear(self.state_encoder.output_size, width), nn.LayerNorm(width), nn.Tanh()]
+        layers: list[nn.Module] = [nn.Linear(2 * config.embedding_size, width), nn.LayerNorm(width), nn.Tanh()]
         for _ in range(config.backward_hidden_layers - 1):
             layers += [nn.Linear(width, width), nn.ReLU()]
         layers.append(nn.Linear(width, config.z_dim))
@@ -171,24 +173,45 @@ class DaGetBackwardMap(nn.Module):
             layers.append(SphereNorm())
         self.head = nn.Sequential(*layers)
 
-    def forward(self, state: StateInputs) -> torch.Tensor:
-        """Embed state tokens of one or several same-size robots into ``[batch, z_dim]``."""
-        return self.head(self.state_encoder(state))
+    def forward(self, joint_embeddings: torch.Tensor, joint_mask: torch.Tensor) -> torch.Tensor:
+        """Map shared-encoder embeddings to ``[batch, z_dim]``.
+
+        Args:
+            joint_embeddings (torch.Tensor): Encoded state tokens ``[batch, joints, embedding_size]``.
+            joint_mask (torch.Tensor): Boolean ``[batch, joints]`` valid-token mask.
+
+        Returns:
+            torch.Tensor: Backward representation ``[batch, z_dim]``.
+        """
+        return self.head(self.readout(joint_embeddings, joint_mask))
 
 
 class DaGetDiscriminator(nn.Module):
     """FB-CPR discriminator D(s, z), shared across robots.
 
-    A ``StateEncoder`` replaces BFM-Zero's flat input. BFM-Zero's head follows on the pooled
+    A readout of the shared encoder replaces BFM-Zero's flat input. Its head follows on the pooled
     state and z. ``compute_reward`` gives the CPR reward ``log D - log(1 - D)``.
+
+    Attributes:
+        config (BfmConfig): Validated head dimensions and latent settings.
+        readout (JointReadout): Pool shared-encoder joint embeddings.
+        trunk (nn.Sequential): Classify pooled state and a latent prompt.
     """
 
     def __init__(self, config: BfmConfig) -> None:
+        """Construct the discriminator head without creating an encoder.
+
+        Args:
+            config (BfmConfig): Validated embedding, readout, and latent sizes.
+
+        Returns:
+            None: Registers the readout and classification MLP.
+        """
         super().__init__()
         self.config = config
-        self.state_encoder = StateEncoder(config)
+        self.readout = JointReadout(config.embedding_size, math.gcd(config.embedding_size, config.state_num_heads))
         width = config.discriminator_hidden_size
-        layers: list[nn.Module] = [nn.Linear(self.state_encoder.output_size + config.z_dim, width), nn.LayerNorm(width), nn.Tanh()]
+        layers: list[nn.Module] = [nn.Linear(2 * config.embedding_size + config.z_dim, width), nn.LayerNorm(width), nn.Tanh()]
         for _ in range(config.discriminator_hidden_layers - 1):
             layers += [nn.Linear(width, width), nn.ReLU()]
         layers.append(nn.Linear(width, 1))
@@ -198,17 +221,46 @@ class DaGetDiscriminator(nn.Module):
         """Return logits from pooled state features ``[batch, output_size]``."""
         return self.trunk(torch.cat([z, features], dim=-1))
 
-    def compute_logits(self, state: StateInputs, z: torch.Tensor) -> torch.Tensor:
-        """Return logits ``[batch, 1]`` that (s, z) comes from the expert data."""
-        return self.logits_from_features(self.state_encoder(state), z)
+    def compute_logits(self, joint_embeddings: torch.Tensor, z: torch.Tensor, joint_mask: torch.Tensor) -> torch.Tensor:
+        """Return expert logits from encoded state tokens and latent prompts.
 
-    def forward(self, state: StateInputs, z: torch.Tensor) -> torch.Tensor:
-        """Return the expert probability ``[batch, 1]``."""
-        return torch.sigmoid(self.compute_logits(state, z))
+        Args:
+            joint_embeddings (torch.Tensor): Shared-encoder output ``[batch, joints, embedding_size]``.
+            z (torch.Tensor): Latent prompts ``[batch, z_dim]``.
+            joint_mask (torch.Tensor): Boolean ``[batch, joints]`` valid-token mask.
 
-    def compute_reward(self, state: StateInputs, z: torch.Tensor, eps: float = 1e-7) -> torch.Tensor:
-        """Return the CPR reward ``log D - log(1 - D)`` of shape ``[batch, 1]``."""
-        probability = self.forward(state, z).clamp(eps, 1 - eps)
+        Returns:
+            torch.Tensor: Expert logits ``[batch, 1]``.
+        """
+        return self.logits_from_features(self.readout(joint_embeddings, joint_mask), z)
+
+    def forward(self, joint_embeddings: torch.Tensor, z: torch.Tensor, joint_mask: torch.Tensor) -> torch.Tensor:
+        """Return expert probabilities ``[batch, 1]`` from encoded state tokens.
+
+        Args:
+            joint_embeddings (torch.Tensor): Shared-encoder output ``[batch, joints, embedding_size]``.
+            z (torch.Tensor): Latent prompts ``[batch, z_dim]``.
+            joint_mask (torch.Tensor): Boolean ``[batch, joints]`` valid-token mask.
+
+        Returns:
+            torch.Tensor: Expert probabilities ``[batch, 1]``.
+        """
+        return torch.sigmoid(self.compute_logits(joint_embeddings, z, joint_mask))
+
+    def compute_reward(self, joint_embeddings: torch.Tensor, z: torch.Tensor, joint_mask: torch.Tensor,
+                       eps: float = 1e-7) -> torch.Tensor:
+        """Return the CPR log-odds reward from encoded state tokens.
+
+        Args:
+            joint_embeddings (torch.Tensor): Shared-encoder output ``[batch, joints, embedding_size]``.
+            z (torch.Tensor): Latent prompts ``[batch, z_dim]``.
+            joint_mask (torch.Tensor): Boolean ``[batch, joints]`` valid-token mask.
+            eps (float): Probability clamp margin within ``(0, 0.5)``.
+
+        Returns:
+            torch.Tensor: Log-odds rewards ``[batch, 1]``.
+        """
+        probability = self.forward(joint_embeddings, z, joint_mask).clamp(eps, 1 - eps)
         return probability.log() - (1 - probability).log()
 
 
@@ -220,14 +272,26 @@ class LatentMemory(nn.Module):
     of latents (for example B of future frames) also gets a sinusoidal position.
     """
 
-    def __init__(self, config: BfmConfig) -> None:
+    def __init__(self, config: BfmConfig, role: str) -> None:
+        """Create latent memory at the actor or forward network width.
+
+        Args:
+            config (BfmConfig): Validated network configuration.
+            role (str): ``actor`` or ``forward``; critics use ``forward``.
+
+        Returns:
+            None: Registers projections, embeddings, and normalization.
+
+        Raises:
+            ValueError: The role is not supported.
+        """
         super().__init__()
-        self.num_tokens, self.hidden_size = config.num_latent_tokens, config.hidden_size
-        self.latent_projection = nn.Linear(config.z_dim, config.num_latent_tokens * config.hidden_size)
-        self.slot_embedding = nn.Parameter(torch.randn(config.num_latent_tokens, config.hidden_size) * 0.02)
-        self.position_embedding = SinusoidalPositionEmbedding(config.hidden_size)
-        self.context_projection = nn.Linear(config.state_token_size, config.hidden_size)
-        self.norm = nn.LayerNorm(config.hidden_size)
+        self.hidden_size, _, _, self.num_tokens = config.network_dimensions(role)
+        self.latent_projection = nn.Linear(config.z_dim, self.num_tokens * self.hidden_size)
+        self.slot_embedding = nn.Parameter(torch.randn(self.num_tokens, self.hidden_size) * 0.02)
+        self.position_embedding = SinusoidalPositionEmbedding(self.hidden_size)
+        self.context_projection = nn.Linear(config.state_token_size, self.hidden_size)
+        self.norm = nn.LayerNorm(self.hidden_size)
 
     def forward(
         self,
@@ -269,17 +333,29 @@ class LatentMemory(nn.Module):
 class LatentConditionedBlock(nn.Module):
     """Joint tokens cross-attend to latent memory, self-attend across joints, then feed forward."""
 
-    def __init__(self, config: BfmConfig) -> None:
+    def __init__(self, config: BfmConfig, role: str) -> None:
+        """Create one latent-conditioned attention block for a network role.
+
+        Args:
+            config (BfmConfig): Validated network configuration.
+            role (str): ``actor`` or ``forward``; critics use ``forward``.
+
+        Returns:
+            None: Registers cross-attention, self-attention, and feed-forward layers.
+
+        Raises:
+            ValueError: The role is not supported.
+        """
         super().__init__()
-        width, heads = config.hidden_size, config.num_attention_heads
+        width, heads, intermediate, _ = config.network_dimensions(role)
         self.cross_attention = CrossAttentionBlock(width, heads, dropout=config.dropout)
         self.self_attention = AttentionBlock(width, heads, dropout=config.dropout)
         self.feed_forward = nn.Sequential(
             nn.LayerNorm(width),
-            nn.Linear(width, config.intermediate_size),
+            nn.Linear(width, intermediate),
             nn.GELU(),
             nn.Dropout(config.dropout),
-            nn.Linear(config.intermediate_size, width),
+            nn.Linear(intermediate, width),
             nn.Dropout(config.dropout),
         )
 
@@ -313,12 +389,20 @@ class DaGetBfmActor(nn.Module):
     """
 
     def __init__(self, config: BfmConfig) -> None:
+        """Create the actor with its independently selected dimensions.
+
+        Args:
+            config (BfmConfig): Validated actor and input dimensions.
+
+        Returns:
+            None: Registers the policy projection, memory, blocks, and action head.
+        """
         super().__init__()
         self.config = config
-        width = config.hidden_size
+        width, _, _, _ = config.network_dimensions("actor")
         self.embedding_projection = nn.Sequential(nn.LayerNorm(config.embedding_size), nn.Linear(config.embedding_size, width))
-        self.memory = LatentMemory(config)
-        self.layers = nn.ModuleList(LatentConditionedBlock(config) for _ in range(config.actor_layers))
+        self.memory = LatentMemory(config, "actor")
+        self.layers = nn.ModuleList(LatentConditionedBlock(config, "actor") for _ in range(config.actor_layers))
         self.action_head = nn.Sequential(
             nn.LayerNorm(width), nn.Linear(width, width), nn.Mish(), nn.Linear(width, config.action_size_per_joint)
         )
@@ -370,16 +454,25 @@ class DaGetForwardNetwork(nn.Module):
     """
 
     def __init__(self, config: BfmConfig, output_size: int) -> None:
+        """Create one forward or critic member at the selected forward size.
+
+        Args:
+            config (BfmConfig): Validated forward and input dimensions.
+            output_size (int): Positive output width for F or a critic.
+
+        Returns:
+            None: Registers the action tokenizer, attention blocks, and readout.
+        """
         super().__init__()
-        width = config.hidden_size
+        width, heads, intermediate, _ = config.network_dimensions("forward")
         self.embedding_projection = nn.Sequential(nn.LayerNorm(config.embedding_size), nn.Linear(config.embedding_size, width))
         self.action_embedding = NumericTokenizer(config.action_size_per_joint, width, width)
-        self.memory = LatentMemory(config)
-        self.layers = nn.ModuleList(LatentConditionedBlock(config) for _ in range(config.forward_layers))
-        self.readout = JointReadout(width, config.num_attention_heads, config.dropout)
+        self.memory = LatentMemory(config, "forward")
+        self.layers = nn.ModuleList(LatentConditionedBlock(config, "forward") for _ in range(config.forward_layers))
+        self.readout = JointReadout(width, heads, config.dropout)
         self.output_head = nn.Sequential(
-            nn.LayerNorm(2 * width), nn.Linear(2 * width, config.intermediate_size), nn.Mish(),
-            nn.Linear(config.intermediate_size, output_size),
+            nn.LayerNorm(2 * width), nn.Linear(2 * width, intermediate), nn.Mish(),
+            nn.Linear(intermediate, output_size),
         )
 
     def forward(
@@ -457,10 +550,14 @@ class DaGetBfmModel(nn.Module):
 
     Holds B, F, the actor, the discriminator critic, the discriminator and an
     optional auxiliary critic, plus BFM-Zero's latent sampling and inference.
-    Actor and critics take ``DaGetEncoder`` embeddings; B and D take state tokens.
+    One ``DaGetEncoder`` produces embeddings for every head. State tokens pass
+    through a shared input adapter before that encoder.
 
     Attributes:
-        backward_map (DaGetBackwardMap): B(s).
+        config (BfmConfig): Validated dimensions for all BFM heads.
+        encoder (DaGetEncoder): Shared policy and state encoder.
+        state_adapter (nn.Sequential): Map state tokens to the encoder input width.
+        backward_map (DaGetBackwardMap): B(s) from encoder embeddings.
         forward_map (DaGetForwardMap): F(s, a, z) with ``z_dim`` outputs.
         actor (DaGetBfmActor): π(a | s, z).
         critic (DaGetForwardMap): Discriminator-reward critic Q(s, a, z).
@@ -468,9 +565,39 @@ class DaGetBfmModel(nn.Module):
         aux_critic (DaGetForwardMap | None): Auxiliary-reward critic.
     """
 
-    def __init__(self, config: BfmConfig, use_aux_critic: bool = True) -> None:
+    def __init__(self, config: BfmConfig, encoder: DaGetEncoder, use_aux_critic: bool = True) -> None:
+        """Build independent heads around a single shared DA-GET encoder.
+
+        Args:
+            config (BfmConfig): Validated BFM dimensions and head settings.
+            encoder (DaGetEncoder): Policy encoder, optionally loaded from pretraining.
+            use_aux_critic (bool): Whether to construct the auxiliary reward critic.
+
+        Returns:
+            None: Registers the encoder, state adapter, and all BFM heads.
+
+        Raises:
+            ValueError: The encoder output width differs from ``embedding_size``.
+        """
         super().__init__()
+        if encoder.config.hidden_size != config.embedding_size:
+            raise ValueError("encoder hidden_size must equal BfmConfig.embedding_size")
         self.config = config
+        self.encoder = encoder
+        adapter_layers: list[nn.Module] = [
+            nn.LayerNorm(config.state_token_size),
+            nn.Linear(config.state_token_size, config.state_hidden_size),
+            nn.GELU(),
+        ]
+        for _ in range(config.state_num_layers - 1):
+            adapter_layers.extend((
+                nn.Linear(config.state_hidden_size, config.state_intermediate_size),
+                nn.GELU(),
+                nn.Linear(config.state_intermediate_size, config.state_hidden_size),
+                nn.GELU(),
+            ))
+        adapter_layers.append(nn.Linear(config.state_hidden_size, encoder.config.input_size))
+        self.state_adapter = nn.Sequential(*adapter_layers)
         self.backward_map = DaGetBackwardMap(config)
         self.forward_map = DaGetForwardMap(config, config.z_dim)
         self.actor = DaGetBfmActor(config)
@@ -478,9 +605,59 @@ class DaGetBfmModel(nn.Module):
         self.discriminator = DaGetDiscriminator(config)
         self.aux_critic = DaGetForwardMap(config, 1) if use_aux_critic else None
 
+    def encode_state(
+        self,
+        state: StateInputs,
+        *,
+        encoder: DaGetEncoder | None = None,
+        adapter: nn.Module | None = None,
+        train_encoder: bool = True,
+    ) -> torch.Tensor:
+        """Encode privileged state tokens with the shared encoder core.
+
+        A diagonal inertia matrix is formed from each state's measured mass
+        diagonal because recorded expert states do not contain a full matrix.
+
+        Args:
+            state (StateInputs): State-token and graph inputs from ``state_inputs``.
+            encoder (DaGetEncoder | None): Target encoder override; defaults to the online encoder.
+            adapter (nn.Module | None): Target state-adapter override; defaults to the online adapter.
+            train_encoder (bool): Whether this call accumulates encoder parameter gradients.
+
+        Returns:
+            torch.Tensor: Per-joint embeddings ``[batch, joints, embedding_size]``.
+
+        Raises:
+            ValueError: State inputs have invalid dimensions or physics features.
+        """
+        source = self.encoder if encoder is None else encoder
+        projection = self.state_adapter if adapter is None else adapter
+        if "input_values" not in state or "dynamics_features" not in state:
+            raise ValueError("state must include input_values and dynamics_features")
+        if state["input_values"].ndim != 3 or state["input_values"].shape[-1] != self.config.state_token_size:
+            raise ValueError("state input_values must be [batch, joints, state_token_size]")
+        inputs = dict(state)
+        inputs["input_values"] = projection(inputs["input_values"])
+        if source.config.use_mass_encoding:
+            diagonal = inputs["dynamics_features"][..., 0].clamp_min(1e-8)
+            inputs["mass_matrix"] = torch.diag_embed(diagonal)
+        if source.physics_tokenizers is None:
+            for name in ("rigid_body_features", "actuator_features", "dynamics_features"):
+                inputs.pop(name, None)
+        if train_encoder:
+            return source(**inputs)
+        frozen_parameters = {name: parameter.detach() for name, parameter in source.named_parameters()}
+        return functional_call(source, frozen_parameters, (), inputs)
+
     def init_weights(self) -> None:
-        """Apply BFM-Zero's orthogonal initialization to every linear layer."""
-        self.apply(bfm_weight_init)
+        """Initialize BFM heads without changing pretrained encoder weights.
+
+        Returns:
+            None: Orthogonally initializes new linear layers in place.
+        """
+        for name, module in self.named_children():
+            if name != "encoder":
+                module.apply(bfm_weight_init)
 
     def project_z(self, z: torch.Tensor) -> torch.Tensor:
         """Project z to the sphere when ``config.norm_z`` is set."""
@@ -511,7 +688,7 @@ class DaGetBfmModel(nn.Module):
     @torch.no_grad()
     def goal_inference(self, goal: StateInputs) -> torch.Tensor:
         """Goal reaching: ``z = B(s_goal)``."""
-        return self.project_z(self.backward_map(goal))
+        return self.project_z(self.backward_map(self.encode_state(goal), goal["joint_mask"]))
 
     @torch.no_grad()
     def reward_inference(self, next_state: StateInputs, reward: torch.Tensor, weight: torch.Tensor | None = None) -> torch.Tensor:
@@ -530,7 +707,7 @@ class DaGetBfmModel(nn.Module):
         z = 0
         for start in range(0, size, step):
             chunk = _slice_inputs(next_state, start, start + step)
-            z = z + weighted[start:start + step].T @ self.backward_map(chunk)
+            z = z + weighted[start:start + step].T @ self.backward_map(self.encode_state(chunk), chunk["joint_mask"])
         return self.project_z(z)
 
     def reward_wr_inference(self, next_state: StateInputs, reward: torch.Tensor) -> torch.Tensor:
@@ -540,7 +717,7 @@ class DaGetBfmModel(nn.Module):
     @torch.no_grad()
     def tracking_inference(self, next_state: StateInputs) -> torch.Tensor:
         """Motion tracking: ``z_t`` = mean of B over the next ``seq_length`` frames of one motion ``[T, ...]``."""
-        embeddings = self.backward_map(next_state)
+        embeddings = self.backward_map(self.encode_state(next_state), next_state["joint_mask"])
         prefix = torch.cat([embeddings.new_zeros(1, embeddings.shape[-1]), embeddings.cumsum(0)])
         starts = torch.arange(embeddings.shape[0], device=embeddings.device)
         ends = torch.clamp(starts + self.config.seq_length, max=embeddings.shape[0])

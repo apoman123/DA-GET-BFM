@@ -3,6 +3,14 @@
 from dataclasses import dataclass
 
 
+ENCODER_SIZES: dict[str, dict[str, int]] = {
+    "tiny": {"hidden_size": 64, "num_hidden_layers": 2, "num_attention_heads": 2, "intermediate_size": 256},
+    "small": {"hidden_size": 128, "num_hidden_layers": 4, "num_attention_heads": 4, "intermediate_size": 512},
+    "medium": {"hidden_size": 256, "num_hidden_layers": 6, "num_attention_heads": 8, "intermediate_size": 1024},
+    "large": {"hidden_size": 512, "num_hidden_layers": 8, "num_attention_heads": 16, "intermediate_size": 2048},
+}
+
+
 @dataclass(frozen=True)
 class DaGetConfig:
     """Hold validated dimensions and graph encoding options for ``DaGetEncoder``.
@@ -56,9 +64,29 @@ class DaGetConfig:
     use_physics_cross_attention: bool = False
     physics_cross_attention_layers: tuple[int, ...] | None = None
     rigid_body_feature_size: int = 25
-    actuator_feature_size: int = 14
+    actuator_feature_size: int = 6
     dynamics_feature_size: int = 7
     physics_tokenizer_hidden_size: int | None = None
+
+    @classmethod
+    def from_size(cls, input_size: int, size: str = "small", **overrides: object) -> "DaGetConfig":
+        """Build a validated encoder configuration from a named architecture size.
+
+        Args:
+            input_size (int): Positive raw joint-token feature count.
+            size (str): One of ``tiny``, ``small``, ``medium``, or ``large``.
+            **overrides (object): Configuration fields replacing preset values.
+
+        Returns:
+            DaGetConfig: Configuration with the selected dimensions and overrides.
+
+        Raises:
+            ValueError: The size name or resulting configuration is invalid.
+            TypeError: An override is not a configuration field.
+        """
+        if size not in ENCODER_SIZES:
+            raise ValueError(f"unknown encoder size {size!r}; choose from {tuple(ENCODER_SIZES)}")
+        return cls(input_size=input_size, **{**ENCODER_SIZES[size], **overrides})
 
     @classmethod
     def da_get_zero(cls, input_size: int, **overrides: object) -> "DaGetConfig":

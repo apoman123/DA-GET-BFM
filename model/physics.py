@@ -265,37 +265,27 @@ def rigid_body_features(graph: EmbodimentGraph) -> torch.Tensor:
 
 
 def actuator_features(specs: Sequence[ActuatorSpec]) -> torch.Tensor:
-    """Return ``[tau^peak, tau^cont, omega^max, P^max, N, K_p, K_d, k_f, k_m, mode]``.
+    """Return joint effort limits, PD gains, and optional propeller coefficients.
 
     Args:
         specs (Sequence[ActuatorSpec]): One spec per joint.
 
     Returns:
-        torch.Tensor: Float32 ``[J, 14]``; ``mode`` is one-hot over 5 modes.
+        torch.Tensor: Float32 ``[J, 6]`` in schema column order.
     """
     tensors = actuator_tensors(specs)
-    mode = torch.nn.functional.one_hot(tensors["mode"], len(ACTUATOR_MODES))
-    features = torch.cat(
-        (
-            torch.stack(
-                [
-                    tensors[name]
-                    for name in (
-                        "peak_torque",
-                        "continuous_torque",
-                        "max_velocity",
-                        "max_power",
-                        "gear_ratio",
-                        "kp",
-                        "kd",
-                        "thrust_coefficient",
-                        "torque_coefficient",
-                    )
-                ],
-                dim=1,
-            ),
-            mode.to(torch.float64),
-        ),
+    features = torch.stack(
+        [
+            tensors[name]
+            for name in (
+                "peak_torque",
+                "continuous_torque",
+                "kp",
+                "kd",
+                "thrust_coefficient",
+                "torque_coefficient",
+            )
+        ],
         dim=1,
     )
     assert features.shape[1] == ACTUATOR_FEATURE_SIZE
@@ -618,7 +608,7 @@ class PhysicsFeatureCache:
     Attributes:
         graphs (tuple[EmbodimentGraph, ...]): One robot per row.
         rigid_body_features (torch.Tensor): Float32 ``[B, J, 25]``, zero padded.
-        actuator_features (torch.Tensor): Float32 ``[B, J, 14]``, zero padded.
+        actuator_features (torch.Tensor): Float32 ``[B, J, 6]``, zero padded.
         joint_mask (torch.Tensor): Bool ``[B, J]``.
         refresh_counts (dict[str, int]): Number of recomputations per tier, for
             monitoring.

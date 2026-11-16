@@ -295,7 +295,15 @@ class EmbodimentObserver:
         return self.tokenizer(self._joint_features(count, local.device), mask, variable_local=local, variable_global=global_features)
 
     def state_inputs(self, view: StateView) -> dict:
-        """Return keyword inputs of a state encoder for ``N`` state views."""
+        """Build privileged tokens and graph inputs for the shared encoder.
+
+        Args:
+            view (StateView): ``N`` state frames with local, base, and dynamics features.
+
+        Returns:
+            dict: State tokens ``[N, joints, state_token_size]`` and graph and
+            physics tensors consumed by ``DaGetBfmModel.encode_state``.
+        """
         count, joints, _ = view.local.shape
         device = view.local.device
         mask = torch.ones((count, joints), dtype=torch.bool, device=device)

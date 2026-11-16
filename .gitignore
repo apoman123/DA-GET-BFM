@@ -7,3 +7,4 @@ assets/urdf/
 runs/
 /data/
 MUJOCO_LOG.TXT
+*.ipynb

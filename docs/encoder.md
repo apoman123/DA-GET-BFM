@@ -16,6 +16,7 @@ How a URDF becomes one token per DoF, how the graph and the physics enter attent
   - [6. Physics Cross Attention](#6-physics-cross-attention)
   - [7. What is recomputed when](#7-what-is-recomputed-when)
   - [8. Batching different robots](#8-batching-different-robots)
+- [Physics pretraining auxiliary losses](#physics-pretraining-auxiliary-losses)
 - [Configuration reference](#configuration-reference)
 
 ## Why one token per DoF
@@ -97,10 +98,10 @@ What changes for a floating base:
 | | Fixed base | Floating base |
 |---|---|---|
 | Frames | root link | base frame (moves with the robot); gravity expressed in it |
-| Dynamics | `τ = M qdd + c + g` | joint rows plus 6 base rows; base twist and acceleration enter RNEA; external wrenches (contacts, thrust) close the base rows |
+| Dynamics | $\tau = M\ddot q + c + g$ | joint rows plus 6 base rows; base twist and acceleration enter RNEA; external wrenches (contacts, thrust) close the base rows |
 | Missing torques | inverse dynamics | inverse dynamics with contact forces distributed over the feet, or with rotor thrust |
 | Observation globals | gravity direction (constant) | gravity direction, base angular velocity, base linear velocity / robot size, flags |
-| FD label (task B) | `qdd` | `qdd` plus base linear and angular acceleration |
+| FD label (task B) | $\ddot q$ | $\ddot q$ plus base linear and angular acceleration |
 | Effect label (task E) | in the root frame | in the base frame at time `t`, including base motion |
 
 A humanoid that only moves its arms while standing still can be modelled as
@@ -124,11 +125,11 @@ the observation tokens.
 
 ### 4. Token assembly
 
-`DaGetTokenizer` builds token `j` exactly as GET-Zero does:
+`DaGetTokenizer` builds token $j$ exactly as GET-Zero does:
 
-```text
-T_j = [ o_vg^{t-H+1..t},  o_fg,  o_vl,j^{t-H+1..t},  o_fl,j ]
-```
+$$
+T_j = \bigl[o_{vg}^{t-H+1:t},\;o_{fg},\;o_{vl,j}^{t-H+1:t},\;o_{fl,j}\bigr].
+$$
 
 | Part | Shape in | Meaning | Training pipeline uses |
 |---|---|---|---|
@@ -157,14 +158,21 @@ oldest first. Padded joints get all-zero tokens.
 
 Each self-attention layer adds a learned per-head bias to the attention logits:
 
-```text
-normalized_mass[i, j] = M(q)[i, j] / (sqrt(M(q)[i, i] * M(q)[j, j]) + mass_epsilon)
+$$
+\widetilde M_{ij}(q)
+= \frac{M_{ij}(q)}{\sqrt{M_{ii}(q)M_{jj}(q)}+\varepsilon_M},
+$$
 
-A[i, j] = q_i · k_j / sqrt(d)
-        + spatial[SPD(i, j)]                 # GET-Zero
-        + parent[P(i, j)] + child[C(i, j)]   # GET-Zero
-        + linear(normalized_mass[i, j])      # this repository
-```
+$$
+A_{ij}
+= \frac{\mathbf q_i^\top\mathbf k_j}{\sqrt d}
++ b_{\mathrm{spatial}}(\operatorname{SPD}(i,j))
++ b_{\mathrm{parent}}(P_{ij})
++ b_{\mathrm{child}}(C_{ij})
++ b_{\mathrm{mass}}(\widetilde M_{ij}(q)).
+$$
+
+The graph terms come from GET-Zero; this repository adds the mass term.
 
 - `spatial`, `parent`, and `child` are embedding tables with one scalar per
   head, in every layer.
@@ -186,39 +194,37 @@ Three feature groups describe every joint `i`. All values are SI, and every
 spatial quantity names its frame (`model/physics_schema.py` has the full
 schema):
 
-- `B_i` is the body frame of joint `i`. Its origin is the joint origin, its axes
+- $B_i$ is the body frame of joint $i$. Its origin is the joint origin, its axes
   are the joint frame's, and it moves with the body that joint `i` drives (the
   child link after fixed links are merged).
-- `B_p(i)` is the parent joint's body frame, or the base frame.
+- $B_{p(i)}$ is the parent joint's body frame, or the base frame.
 - For prismatic joints read N for N m, m for rad, and m/s for rad/s.
 
 **Rigid body (25), from URDF, static per robot**
 
 | Symbol | Size | Unit | Frame |
 |---|---|---|---|
-| `m_i` | 1 | kg | — |
-| `vech(I_i)`: `Ixx, Ixy, Ixz, Iyy, Iyz, Izz` about the CoM | 6 | kg m² | `B_i` |
-| `r_i^CoM` | 3 | m | `B_i` |
-| `a_i^axis` (unit) | 3 | 1 | `B_i` |
-| `T_i^parent`: translation and first two rotation columns at `q_i = 0` | 3 + 6 | m, 1 | `B_p(i)` |
-| `jointType_i` (one-hot revolute, continuous, prismatic) | 3 | 1 | — |
+| $m_i$ | 1 | kg | — |
+| $\operatorname{vech}(I_i)$: $I_{xx},I_{xy},I_{xz},I_{yy},I_{yz},I_{zz}$ about the CoM | 6 | kg m² | $B_i$ |
+| $r_i^{\mathrm{CoM}}$ | 3 | m | $B_i$ |
+| $a_i^{\mathrm{axis}}$ (unit) | 3 | 1 | $B_i$ |
+| $T_i^{\mathrm{parent}}$: translation and first two rotation columns at $q_i=0$ | 3 + 6 | m, 1 | $B_{p(i)}$ |
+| $\mathrm{jointType}_i$ (one-hot revolute, continuous, prismatic) | 3 | 1 | — |
 
-**Actuator (14), from `ActuatorSpec`, static per robot**
+**Actuator (6), from `ActuatorSpec`, static per robot**
 
 | Symbol | Unit | Default when the URDF lacks it |
 |---|---|---|
-| `τ_i^peak` | N m | URDF `effort` |
-| `τ_i^cont` | N m | `0.5 τ^peak` |
-| `ω_i^max` | rad/s | URDF `velocity` |
-| `P_i^max` | W | `0.5 τ^peak ω^max` (torque falls off above half the no-load speed) |
-| `N_i` (gear ratio) | 1 | URDF `<transmission>` reduction, else 1 |
-| `K_p,i`, `K_d,i` | N m/rad, N m s/rad | 0, or `actuator_defaults` |
-| `k_f,i` propeller thrust coefficient (thrust `k_f ω²` along `a_i`, signed) | N s²/rad² | 0 (rotors only) |
-| `k_m,i` propeller drag coefficient (drag moment `k_m ω²`) | N m s²/rad² | 0 (rotors only) |
-| `mode_i` (one-hot torque, position, velocity, passive, thrust) | 1 | the data source's action type |
+| $\tau_i^{\mathrm{peak}}$ | N m | URDF `effort` |
+| $\tau_i^{\mathrm{cont}}$ | N m | $0.5\tau_i^{\mathrm{peak}}$ |
+| $K_{p,i},K_{d,i}$ | N m/rad, N m s/rad | 0, or `actuator_defaults` |
+| $k_{f,i}$ propeller thrust coefficient (thrust $k_{f,i}\omega_i^2$ along $a_i$, signed) | N s²/rad² | 0 (rotors only) |
+| $k_{m,i}$ propeller drag coefficient (drag moment $k_{m,i}\omega_i^2$) | N m s²/rad² | 0 (rotors only) |
 
-`k_f`, `k_m`, and the `thrust` mode extend the actuator list so multirotors can
-be described. Every other joint has zeros there. The defaults are assumptions.
+`k_f` and `k_m` extend the actuator features so multirotors can be described.
+Every other joint has zeros there. Speed, power, gear ratio, and control mode
+remain in `ActuatorSpec` for simulation and labels, but are not encoder features.
+The defaults are assumptions.
 Pass real motor data through
 `actuator_specs(graph, overrides={"*_knee_joint": {"continuous_torque": 23.7}})`
 or, in a data config, through `actuator_overrides` (exact names or glob
@@ -228,13 +234,13 @@ patterns).
 
 | Symbol | Unit | Depends on |
 |---|---|---|
-| `M_ii(q_t)` | kg m² | `q` |
-| `c_i(q_t, qd_t)` Coriolis and centrifugal, including base rotation for a floating base | N m | `q`, `qd`, base twist |
-| `g_i(q_t)` gravity, with gravity in the base frame | N m | `q`, gravity direction |
-| `τ̂_f,i` friction `d qd + μ tanh(qd / 0.01)`, plus propeller drag `k_m ω\|ω\|` | N m | `qd` |
-| `τ_{i,t-1}^applied` | N m | measurement or estimate |
-| `\|g_i\| / (τ_i^cont + ε)` gravity load | 1 | `q` |
-| source of `τ_{t-1}`: 1 measured, 0.5 inverse-dynamics estimate, 0 unknown | 1 | data |
+| $M_{ii}(q_t)$ | kg m² | $q$ |
+| $c_i(q_t,\dot q_t)$ Coriolis and centrifugal, including base rotation for a floating base | N m | $q$, $\dot q$, base twist |
+| $g_i(q_t)$ gravity, with gravity in the base frame | N m | $q$, gravity direction |
+| $\hat\tau_{f,i}$ friction $d_i\dot q_i+\mu_i\tanh(\dot q_i/0.01)$, plus propeller drag $k_{m,i}\omega_i\lvert\omega_i\rvert$ | N m | $\dot q$ |
+| $\tau_{i,t-1}^{\mathrm{applied}}$ | N m | measurement or estimate |
+| $\lvert g_i\rvert/(\tau_i^{\mathrm{cont}}+\varepsilon)$ gravity load | 1 | $q$ |
+| source of $\tau_{t-1}$: 1 measured, 0.5 inverse-dynamics estimate, 0 unknown | 1 | data |
 
 Each group goes through its own tokenizer (`PhysicsFeatureTokenizer`). The
 tokenizer first maps every feature to `asinh(x / s)` with a per-feature scale
@@ -243,12 +249,17 @@ tokenizer first maps every feature to `asinh(x / s)` with a per-feature scale
 then gives one token per joint, and a learned group embedding is added. The
 three groups are concatenated into a memory of `3J` tokens:
 
-```text
-memory = [ rigid_body_1..J | actuator_1..J | dynamics_1..J ]
+$$
+\mathcal M = [\,\mathrm{rigid\ body}_{1:J},\;
+                 \mathrm{actuator}_{1:J},\;\mathrm{dynamics}_{1:J}\,],
+$$
 
-PhysicsCrossAttention(i, (g, j)) = softmax_j,g( q_i · k_(g,j) / sqrt(d)
-                                                + spatial_phys[SPD(i, j)] + group_bias[g] )
-```
+$$
+\alpha_{i,g,j} = \operatorname{softmax}_{g,j}\!\left(
+  \frac{\mathbf q_i^\top\mathbf k_{g,j}}{\sqrt d}
+  + b_{\mathrm{spatial}}^{\mathrm{phys}}(\operatorname{SPD}(i,j))
+  + b_{\mathrm{group}}(g)\right).
+$$
 
 Queries are the observation tokens. The bias lets a joint focus on its own
 physics (`SPD = 0`) and on nearby joints. The bias tables are per layer and per
@@ -261,9 +272,9 @@ every layer).
 | Tier | Features | Changes when | At training time | At control time |
 |---|---|---|---|---|
 | embodiment | all rigid-body and actuator features | the robot or its randomized parameters change | once per robot, when the dataset is built | once per robot; their per-layer keys and values are cached in a `PhysicsMemory` |
-| configuration | `M_ii(q)`, `g(q)`, gravity load | `q` or the gravity direction | once per frame, cached on disk | `PhysicsFeatureCache`: every `configuration_interval` steps, or sooner if any joint moves more than `configuration_tolerance` or gravity turns |
-| velocity | `c(q, qd, base twist)`, `τ̂_f` | `qd`, the base twist (and `q`) | once per frame, cached on disk | every `velocity_interval` steps, if `qd` or the base twist moves more than `velocity_tolerance`, or with the configuration tier |
-| measurement | `τ_{t-1}^applied` | every step | per frame | every step |
+| configuration | $M_{ii}(q)$, $g(q)$, gravity load | $q$ or the gravity direction | once per frame, cached on disk | `PhysicsFeatureCache`: every `configuration_interval` steps, or sooner if any joint moves more than `configuration_tolerance` or gravity turns |
+| velocity | $c(q,\dot q,\text{base twist})$, $\hat\tau_f$ | $\dot q$, the base twist (and $q$) | once per frame, cached on disk | every `velocity_interval` steps, if $\dot q$ or the base twist moves more than `velocity_tolerance`, or with the configuration tier |
+| measurement | $\tau_{t-1}^{\mathrm{applied}}$ | every step | per frame | every step |
 
 `encoder.build_physics_memory(rigid_body, actuator, joint_mask)` precomputes the
 rigid-body and actuator tokens and their keys and values for every physics
@@ -289,7 +300,80 @@ DoF count and returns an `EmbodimentBatch` holding:
 per-robot helpers to a padded batch. Fixed- and floating-base robots can share
 a batch.
 
+## Physics pretraining auxiliary losses
+
+`DaGetForPhysicsPretraining` adds six heads to the encoder during pretraining.
+They receive its per-joint embedding $H_i$; the action-conditioned heads also
+receive a proposed or applied action. The heads produce training targets for
+the shared encoder, not constraints on the BFM actor's output. The current
+losses are implemented in [`model/pretraining.py`](../model/pretraining.py),
+with labels assembled by [`model/training/episodes.py`](../model/training/episodes.py)
+and [`model/training/dataset.py`](../model/training/dataset.py).
+
+| Task and logged name | Head input | Prediction and label | Per-joint loss |
+|---|---|---|---|
+| A. Forward kinematics, `loss_fk` | $H_i$ | Joint-frame position in the root frame, divided by robot length $L_e$; optionally its orientation | $\lambda_p\lVert\hat p_i-p_i\rVert^2+\lambda_R d_{SO(3)}(\hat R_i,R_i)^2$. Omit orientation if `fk_orientation=False`. |
+| B. Forward dynamics, `loss_fd` | $H_i$ and applied effort $\tau_i/\tau_i^{\mathrm{peak}}$, with graph mixing | Joint acceleration $\ddot q_i/\sigma_i^a$; for a floating base, six normalized base acceleration components | Squared error in normalized joint acceleration, plus $\lambda_{\mathrm{base}}$ times mean squared base error when known. |
+| C. Inverse dynamics, `loss_id` | $H_i$, desired normalized joint acceleration, and desired base acceleration, with graph mixing | Required effort divided by $\tau_i^{\mathrm{cont}}$ | Squared normalized effort error. For estimated torques in contact, first project the physical error onto motion-determined torque directions. |
+| D. Motor feasibility, `loss_motor` | $H_i$ and an action proposal | Two feasibility flags and five capability margins | $\lambda_f\operatorname{BCEWithLogits}+\lambda_m\operatorname{Huber}$; mask missing margins. |
+| E. Action effect, `loss_effect` | $H_i$ and action features, with graph mixing | Next-frame end-effector displacement, orientation, linear velocity, and angular velocity in the current base frame | Weighted squared errors for displacement and velocities, plus squared $SO(3)$ geodesic rotation error. Only selected end-effectors have labels. |
+| F. Rigid-body dynamics consistency, `loss_rbd` | Forward-dynamics prediction | Residual $M(q)\hat{\ddot q}+c+g+\tau_f-\tau_{\mathrm{applied}}$ | Squared residual divided by $\tau_i^{\mathrm{cont}}+\varepsilon$; only fixed-base samples. Default weight is **0**. |
+
+The motor head's flags are *peak feasible* and *continuous feasible*.
+For a position target $a_i$, its requested effort is
+
+$$
+\tau_i^{\mathrm{request}}
+=K_{p,i}(a_i-q_i)-K_{d,i}\dot q_i.
+$$
+
+Torque and velocity commands use their
+respective control laws. The five margins describe peak torque, continuous
+torque, power, speed, and joint-position limits. A margin of zero is the
+limit, positive is inside it, and negative is beyond it. Peak feasibility
+requires the peak-effort, power, speed, and position margins to be
+nonnegative; continuous feasibility also requires the sustainable-effort
+margin. Speed, power, and mode are retained in `ActuatorSpec` to generate
+these labels even though they are no longer encoder actuator features.
+
+For every per-joint task, `masked_joint_mean` averages valid joints within
+each sample first, then averages samples. FD and ID supervise actuated joints
+only. Measured or exact simulated torques receive full label weight;
+inverse-dynamics estimates can be down-weighted, and estimates with large
+unexplained contact wrenches are masked. FD uses estimated efforts only when
+`allow_estimated_torque_for_fd` is enabled. The total loss is
+
+$$
+\mathcal L_{\mathrm{total}}
+=\sum_{k\in\{\mathrm{fk,fd,id,motor,effect,rbd}\}}w_k\mathcal L_k.
+$$
+
+Default task weights are 1 for A–E
+and 0 for F. See [physics pretraining](training.md#physics-pretraining) for
+the training flags and dataset setup.
+
+There is **no separate loss that regresses $K_p$ or $K_d$**. Task D uses them
+to generate feasibility labels, so it can teach the embedding how gains affect
+a proposed target. This is indirect supervision; it does not prove that the
+BFM actor uses the gains. None of these losses alone guarantees that the
+actor's target angles are actuator-feasible at runtime.
+These encoder pretraining losses are separate from the BFM's
+[`aux_critic`](bfm.md), which learns the environment's auxiliary rewards.
+
 ## Configuration reference
+
+Select an encoder architecture with `DaGetConfig.from_size(token_size, "tiny")`.
+The same names work with `--preset` in `scripts/train_physics_da_get.py`.
+Keyword arguments override individual preset dimensions. `da_get_zero` remains
+available as the paper architecture with width 512, eight layers, and a 1024-wide
+feed-forward block.
+
+| Size | Width | Layers | Heads | Feed-forward width |
+|---|---:|---:|---:|---:|
+| `tiny` | 64 | 2 | 2 | 256 |
+| `small` | 128 | 4 | 4 | 512 |
+| `medium` | 256 | 6 | 8 | 1024 |
+| `large` | 512 | 8 | 16 | 2048 |
 
 `DaGetConfig` fields:
 
@@ -311,7 +395,7 @@ a batch.
 | `use_input_layer_norm` | `True` | `True` | LayerNorm on raw tokens |
 | `use_physics_cross_attention` | `False` | `False` | Physics Cross Attention |
 | `physics_cross_attention_layers` | `None` (all) | `None` | Layers with Physics Cross Attention |
-| `rigid_body_feature_size`, `actuator_feature_size`, `dynamics_feature_size` | 25, 14, 7 | same | Physics feature widths |
+| `rigid_body_feature_size`, `actuator_feature_size`, `dynamics_feature_size` | 25, 6, 7 | same | Physics feature widths |
 | `physics_tokenizer_hidden_size` | `None` (= `hidden_size`) | same | Physics tokenizer MLP width |
 
 `EmbodimentGraph.from_urdf` options:

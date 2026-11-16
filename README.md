@@ -12,18 +12,23 @@ control many different robots. It builds on two references:
   policy that can be prompted for goals, motion tracking, or rewards without
   retraining, but its networks read the flat state of a single humanoid.
 
-This repo makes the GET encoder aware of each robot's dynamics, then has the
-BFM's actor and critics read its joint embeddings. The actor outputs one action
-per joint, for whichever robot it is given.
+This repo makes the GET encoder aware of each robot's dynamics. One encoder
+instance supplies joint embeddings to the BFM's actor, forward map, backward
+map, discriminator, and critics. The actor outputs one action per joint, for
+whichever robot it is given.
 
 ```text
                     M(q), rigid-body, actuator, dynamics
                                      │
-URDF + joint state ─► DaGetTokenizer ─► DaGetEncoder ─► one embedding per joint
-                                                              │
-flat state ─► BackwardMap ─► latent z ─── cross-attention ────┤
-                                                              ├─► DaGetBfmActor ─► one action per joint
-                                                              └─► DaGetForwardMap ─► F(s, a, z), Q(s, a, z)
+policy tokens ──────────────────────────┐
+state tokens ─► state adapter ──────────┤
+                                        ▼
+URDF + dynamics ─────────────────► DaGetEncoder ─► one embedding per joint
+                                        │
+                                        ├─► BackwardMap ─► latent z
+                                        ├─► Discriminator
+                                        ├─► Actor ─► one action per joint
+                                        └─► ForwardMap and critics ─► F, Q
 ```
 
 ## Status
@@ -45,9 +50,15 @@ flat state ─► BackwardMap ─► latent z ─── cross-attention ──�
 |---|---|---|
 | Per-joint tokens, graph attention bias, `da_get_zero` preset | GET-Zero | Floating bases and multirotors |
 | Mass-matrix attention bias, Physics Cross Attention, physics pretraining | This repo | |
-| Backward map and discriminator heads, truncated-normal policy, latent inference | BFM-Zero / FB-CPR | Per-DoF state encoders in front of B and D; padding mask |
+| Backward map and discriminator heads, truncated-normal policy, latent inference | BFM-Zero / FB-CPR | One shared DA-GET encoder with a state-token adapter; padding mask |
 | Actor and forward map interfaces | BFM-Zero / FB-CPR | Rebuilt to read joint embeddings and cross-attend to z; one action per joint |
 | Training losses, z mixture, rollout logic, fall starts, motion priorities, hyperparameters | BFM-Zero / FB-CPR | Per-robot worlds, buffers, and prompts; encoder tuned with physics losses |
+
+The actor and critics are separate networks. In the published BFM-Zero training
+configuration they share width and depth, while the critics use the forward-map
+architecture to predict scalar values from state, latent, and action. This repo
+uses per-joint attention in place of those residual MLPs; see
+[the architecture comparison](docs/bfm.md#configuration).
 
 ## Installation
 
@@ -73,6 +84,138 @@ without it:
 | `sim` | `mujoco` | Ground-contact simulation (`"type": "mujoco"`) and RL checks on a CPU |
 | `convert` | `numcodecs` | GrandTour (zarr) conversion |
 | `validation` | `h5py` | MIPO conversion and the torque-validation script |
+
+## Physics features: sources and calculation
+
+The encoder receives three physics feature groups with one row per joint, in
+the same order as `graph.joint_names`. `rigid_body_features` has shape
+`[B, J, 25]`, `actuator_features` has `[B, J, 6]`, and
+`dynamics_features` has `[B, J, 7]`; `B` is the batch size and `J` is the
+padded joint count. Padded rows are zero and excluded by `joint_mask`. The
+column names, units, and normalization scales are defined in
+[`model/physics_schema.py`](model/physics_schema.py). Joint-space values use
+SI units: revolute joints use rad, rad/s, and N m; prismatic joints use m,
+m/s, and N.
+
+### Rigid-body features: 25 values per joint
+
+These describe the link driven by each joint. `EmbodimentGraph.from_urdf`
+reads the URDF's joint origins, axes, and link `<inertial>` elements, merges
+fixed links, and places the result in the joint's body frame `B_i`. Its origin
+is the joint origin; the parent frame `B_p(i)` is the parent joint's body frame
+or the root link frame. [`rigid_body_features(graph)`](model/physics.py)
+packs the following values once per robot:
+
+| Columns | Count | How they are obtained or calculated |
+|---|---:|---|
+| `mass` | 1 | Child body's mass `m_i` in kg from URDF inertials, including merged fixed links. |
+| `inertia_xx`, `inertia_xy`, `inertia_xz`, `inertia_yy`, `inertia_yz`, `inertia_zz` | 6 | Independent entries of the symmetric inertia tensor about that body's center of mass, rotated into `B_i`, in kg m². |
+| `com_x`, `com_y`, `com_z` | 3 | Center-of-mass offset from the joint origin, expressed in `B_i`, in m. |
+| `axis_x`, `axis_y`, `axis_z` | 3 | Unit joint axis expressed in `B_i`. |
+| `parent_translation_x/y/z` | 3 | Translation from `B_p(i)` to `B_i` at joint position zero, in m. |
+| `parent_rotation_0` … `parent_rotation_5` | 6 | First two columns of that zero-position rotation matrix, flattened column first. |
+| `type_revolute`, `type_continuous`, `type_prismatic` | 3 | One-hot joint type from the URDF. |
+
+These values change only when the robot geometry or inertial parameters change.
+A URDF needs valid inertial data for dynamics calculations; measured masses and
+inertias are preferable to placeholders.
+
+### Actuator features: 6 values per joint
+
+[`actuator_specs(graph)`](model/physics.py) reads each URDF joint's `effort`
+limit. URDFs usually do not provide continuous limits, controller gains, or
+propeller data; those values come from defaults or explicit `overrides`. The
+default assumptions are `continuous_torque = 0.5 × peak_torque` and zero PD
+gains and propeller coefficients. The actuator spec still retains speed,
+power, gear ratio, and control mode for simulation and physics labels, but
+these four fields are **not encoder features**. Missing positive effort or
+velocity limits on an actuated joint require an override or
+`ActuatorDefaults`. [`actuator_features(specs)`](model/physics.py) packs:
+
+| Columns | Count | Meaning and source |
+|---|---:|---|
+| `peak_torque`, `continuous_torque` | 2 | Short-term joint-side effort from URDF `effort` or override; sustainable effort from motor data or the default ratio. Units N m (N for prismatic joints). |
+| `kp`, `kd` | 2 | Position and velocity controller gains from the actual controller, `ActuatorDefaults`, or an override. |
+| `thrust_coefficient`, `torque_coefficient` | 2 | Propeller coefficients `k_f` and `k_m` from rotor specifications: thrust is `k_f ω²` along the axis, and drag magnitude is `k_m ω²`. Zero for ordinary joints. |
+
+This changes the physics-token input width from 14 to 6. Encoder checkpoints
+trained with the old width cannot be loaded into the new architecture without
+converting those tokenizer weights or retraining the encoder.
+
+Supply real motor/controller data when available, for example
+`actuator_specs(graph, overrides={"*_knee_joint": {"continuous_torque": 23.7,
+"kp": 40.0, "kd": 1.0, "mode": "position"}})`. Dataset configs also accept
+`actuator_overrides` by joint name or glob pattern. These features are static
+until actuator parameters or the control mode change.
+
+### Dynamics features: 7 values per joint and time step
+
+These use the current joint position `q_t`, velocity `qd_t`, gravity in the
+base frame, and (when available) the previous applied joint effort. The
+functions in [`model/dynamics.py`](model/dynamics.py) compute the robot's
+mass matrix and inverse-dynamics terms; [`dynamics_features`](model/physics.py)
+assembles them in this order:
+
+| Column | Calculation | Inputs and update trigger |
+|---|---|---|
+| `mass_diagonal` | `M_ii(q_t)`, diagonal of the joint-space mass matrix. | Joint positions or inertial parameters change. |
+| `coriolis` | `c_i(q_t, qd_t, base twist)`, Coriolis and centrifugal effort. | Joint positions/velocities or floating-base velocity change. |
+| `gravity` | `g_i(q_t)`, gravity effort from inverse dynamics. | Joint positions or gravity direction in the base frame change. |
+| `friction` | Joint viscous/Coulomb estimate `d_i qd_i + μ_i tanh(qd_i / 0.01)`, plus `k_m ω_i\|ω_i\|` for thrust joints. | Joint velocity changes; coefficients come from the robot model. |
+| `applied_torque_prev` | Measured effort `τ_{i,t−1}`; zero if unavailable. | Every control step. |
+| `gravity_load` | `\|g_i\| / (τ_i^cont + 10⁻⁶)`; zero for passive joints. | Gravity effort or continuous effort limit changes. |
+| `applied_torque_known` | `1` for measured previous effort, `0.5` for an inverse-dynamics estimate, `0` when unavailable. | Every control step or when the effort source changes. |
+
+For a floating base, pass IMU projected gravity multiplied by `9.81 m/s²`
+and base linear/angular velocity in the base frame. If previous effort is
+missing, pass `None`; the value and source flag both become zero. A motion
+dataset without torque sensors can use
+[`estimate_joint_efforts`](model/dynamics.py), but its contact-dependent
+estimate is approximate; see [torque estimation](docs/dynamics.md#estimating-joint-torques-without-torque-sensors).
+
+```python
+import torch
+
+from model import EmbodimentGraph, JointFeatureConfig
+from model.physics import (
+    PhysicsFeatureCache, actuator_features, actuator_specs,
+    dynamics_features, rigid_body_features,
+)
+
+features = JointFeatureConfig.da_get_zero()
+graph = EmbodimentGraph.from_urdf("assets/urdf/go1.urdf", features, floating_base=True)
+specs = actuator_specs(graph)
+body = rigid_body_features(graph)         # [J, 25], computed once
+motor = actuator_features(specs)          # [J, 6], computed once
+
+# Replace these example values with joint encoders, effort sensors, and IMU data.
+q_current = torch.zeros(1, graph.num_joints)
+qd_current = torch.zeros_like(q_current)
+gravity_base = torch.tensor([[0.0, 0.0, -9.81]])
+dynamic = dynamics_features(             # [N, J, 7], recompute as the state changes
+    graph, specs, q_current, qd_current,
+    applied_torque_prev=None, gravity=gravity_base,
+)
+
+# For mixed-robot batches, the cache stacks and pads the static groups and
+# refreshes the dynamics terms according to their dependencies.
+physics = PhysicsFeatureCache([graph], [specs])
+dynamic_batch = physics.update(q_current, qd_current, gravity=gravity_base)
+```
+
+Replace the example state with `q_current` and `qd_current` `[N, J]` from
+joint sensors. Pass measured `tau_previous` `[N, J]` as
+`applied_torque_prev` and `torque_source=1.0` when available. Pass
+`base_linear_velocity` and `base_angular_velocity` `[N, 3]` to include
+floating-base motion in `c`; `gravity_base` is `[N, 3]`. For a mixed-robot
+cache, give one graph/spec sequence per row and padded `[B, J]` state arrays.
+Set the cache intervals to 1 for fresh values
+every step; larger intervals reuse configuration and velocity terms until
+their age or change thresholds trigger a refresh. Call `physics.reset()`
+after an environment reset. The physics tokenizers map dimensional columns
+with `asinh(value / scale)` and pass unit vectors and one-hot flags through,
+then use learned projections. See [Physics Cross Attention](docs/encoder.md#6-physics-cross-attention)
+for how these groups enter the encoder.
 
 ## Quick start
 
@@ -150,7 +293,7 @@ down = torch.tensor([[0.0, 0.0, -1.0]], dtype=torch.float64)        # gravity in
 height = torch.tensor([0.3], dtype=torch.float64)
 goal = observer.state_inputs(observer.state_view(RobotState(pose, pose, down, still, still, height)))
 
-bfm = DaGetBfmModel(BfmConfig(embedding_size=hidden.shape[-1], state_token_size=observer.state_token_size))
+bfm = DaGetBfmModel(BfmConfig(embedding_size=hidden.shape[-1], state_token_size=observer.state_token_size), encoder)
 bfm.init_weights()
 
 z = bfm.goal_inference(goal).expand(2, -1)           # or tracking_inference / reward_inference
@@ -177,6 +320,11 @@ python scripts/train_bfm.py \
     --data_config configs/rl/g1_go1_real_and_synthetic.json \
     --encoder_checkpoint runs/encoder --output_dir runs/bfm --headless
 ```
+
+Select architecture sizes with `--preset tiny|small|medium|large` during encoder
+pretraining, or `--encoder_size`, `--actor_size`, `--forward_size`, and
+`--backward_size` during BFM training. The four BFM flags can use different sizes;
+`--encoder_size` applies when starting without an encoder checkpoint.
 
 Sources with the same `robot` name are one robot, so real and synthetic trajectories
 combine. Expert sources teach the policy; all sources tune the encoder through the physics

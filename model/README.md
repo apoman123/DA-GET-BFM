@@ -158,9 +158,7 @@ self-attention. Observation tokens attend to `3J` physics tokens:
 
 * rigid body (25): `m`, `vech(I)` about the CoM in body frame `B_i`, `r^CoM`,
   `a^axis`, `T^parent`, joint type;
-* actuator (14): `τ^peak`, `τ^cont`, `ω^max`, `P^max`, `N`, `K_p`, `K_d`,
-  propeller `k_f` and `k_m`, and the mode (torque, position, velocity,
-  passive, thrust);
+* actuator (6): `τ^peak`, `τ^cont`, `K_p`, `K_d`, and propeller `k_f` and `k_m`;
 * dynamics (7): `M_ii(q)`, `c(q, qd, base twist)`, `g(q)` with gravity in the
   base frame, friction plus rotor drag, `τ_{t-1}`, `|g| / τ^cont`, and the
   source of `τ_{t-1}` (1 measured, 0.5 estimated, 0 unknown).

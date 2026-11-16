@@ -342,16 +342,25 @@ class AgentTest(unittest.TestCase):
         names = ("forward_map", "backward_map", "actor", "critic", "aux_critic", "discriminator")
         return {
             **{name: getattr(model, name) for name in names},
+            "state_adapter": model.state_adapter,
             "encoder": self.agent.pretrained.encoder,
             "physics_heads": torch.nn.ModuleList([module for name, module in self.agent.pretrained.named_children() if name != "encoder"]),
         }
 
     def test_batch_has_an_equal_share_of_each_robot(self) -> None:
-        """Robots are padded together, with zero actions and context on missing joints."""
+        """Check one shared encoder and correct padding across robots.
+
+        Returns:
+            None: Asserts module identity, masks, actions, and context padding.
+        """
+        self.assertIs(self.agent.model.encoder, self.agent.pretrained.encoder)
+        self.assertEqual(
+            sum(isinstance(module, type(self.agent.model.encoder)) for module in self.agent.model.modules()), 1
+        )
         batch, _ = self.prepared()
         self.assertEqual(int((batch.robots == 0).sum()), 8)
         joints = [observer.record.graph.num_joints for observer in self.agent.observers]
-        embeddings = self.agent._padded_embeddings(self.agent.pretrained, batch.observations, max(joints))
+        embeddings = self.agent._padded_embeddings(self.agent.model.encoder, batch.observations, max(joints))
         for robot, count in enumerate(joints):
             rows = batch.robots == robot
             self.assertTrue(bool((batch.joint_mask[rows].sum(1) == count).all()))
@@ -371,12 +380,15 @@ class AgentTest(unittest.TestCase):
         """Value networks and encoder move together; the actor and D move alone; targets wait."""
         agent = self.agent
         batch, z = self.prepared()
-        targets = [agent.target_forward_map, agent.target_backward_map, agent.target_critic, agent.target_aux_critic, agent.target_pretrained]
+        targets = [
+            agent.target_forward_map, agent.target_backward_map, agent.target_state_adapter,
+            agent.target_critic, agent.target_aux_critic, agent.target_pretrained,
+        ]
         networks = self.networks()
         with tempfile.TemporaryDirectory() as folder:
             physics = physics_batch(Path(folder))
         steps = {
-            ("forward_map", "backward_map", "critic", "aux_critic", "encoder", "physics_heads"): lambda: agent.update_value_networks(batch, z, physics),
+            ("forward_map", "backward_map", "state_adapter", "critic", "aux_critic", "encoder", "physics_heads"): lambda: agent.update_value_networks(batch, z, physics),
             ("actor",): lambda: agent.update_actor(batch, z),
             ("discriminator",): lambda: agent.update_discriminator(batch.states, z, batch.next_states, z, batch.counts),
         }
@@ -398,7 +410,11 @@ class AgentTest(unittest.TestCase):
         self.assertTrue(all(parameter.grad is None for parameter in self.agent.pretrained.parameters()))
 
     def test_encoder_gradient_sources(self) -> None:
-        """RL losses and physics losses each reach the encoder, and each can be turned off."""
+        """Check RL and physics gradients, including the state adapter ablation.
+
+        Returns:
+            None: Asserts which encoder and adapter weights change per update.
+        """
         batch, z = self.prepared()
         with tempfile.TemporaryDirectory() as folder:
             physics = physics_batch(Path(folder))
@@ -408,8 +424,10 @@ class AgentTest(unittest.TestCase):
         self.assertTrue(changed(rl_only.pretrained.encoder, before))
         physics_only, _, _ = build_agent(encoder_rl_gradients=False)
         before = snapshot(physics_only.pretrained.encoder)
+        adapter_before = snapshot(physics_only.model.state_adapter)
         physics_only.update_value_networks(physics_only._training_batch(self.replays, [8, 8]), z)
         self.assertFalse(changed(physics_only.pretrained.encoder, before))
+        self.assertTrue(changed(physics_only.model.state_adapter, adapter_before))
         metrics = physics_only.update_value_networks(physics_only._training_batch(self.replays, [8, 8]), z, physics)
         self.assertTrue(changed(physics_only.pretrained.encoder, before))
         self.assertIn("physics/loss_fk", metrics)
@@ -428,13 +446,18 @@ class AgentTest(unittest.TestCase):
         self.assertFalse(self.agent.pretrained.training)
 
     def test_full_update_moves_targets_by_tau(self) -> None:
-        """All networks learn, the targets follow by their tau, and the metrics are finite."""
+        """Check finite updates and exact target interpolation for shared components.
+
+        Returns:
+            None: Asserts target critic, encoder, and state-adapter updates.
+        """
         agent = self.agent
         with tempfile.TemporaryDirectory() as folder:
             physics = physics_batch(Path(folder))
         forward, target = snapshot(agent.model.critic), snapshot(agent.target_critic)
         self.assertTrue(all(torch.equal(a, b) for a, b in zip(forward, target)))
         encoder_target = snapshot(agent.target_pretrained)
+        adapter_target = snapshot(agent.target_state_adapter)
         metrics = agent.update(self.replays, self.motions, physics)
         self.assertTrue(all(np.isfinite(float(value)) for value in metrics.values()))
         self.assertIn("aux_rew/penalty_undesired_contact", metrics)
@@ -444,6 +467,8 @@ class AgentTest(unittest.TestCase):
         tau = agent.config.fb_target_tau
         self.assertTrue(changed(agent.target_pretrained, encoder_target))
         for new, old, online in zip(agent.target_pretrained.parameters(), encoder_target, agent.pretrained.parameters()):
+            torch.testing.assert_close(new, (1 - tau) * old + tau * online, rtol=1e-5, atol=1e-6)
+        for new, old, online in zip(agent.target_state_adapter.parameters(), adapter_target, agent.model.state_adapter.parameters()):
             torch.testing.assert_close(new, (1 - tau) * old + tau * online, rtol=1e-5, atol=1e-6)
 
     def test_f_and_b_are_compared_only_within_a_robot(self) -> None:
@@ -476,10 +501,10 @@ class AgentTest(unittest.TestCase):
         with mock.patch.object(agent, "_padded_embeddings", side_effect=spy):
             agent.update_value_networks(batch, z)
         self.assertEqual(len(calls), 2)
-        self.assertIs(calls[0][0], agent.pretrained)
+        self.assertIs(calls[0][0], agent.model.encoder)
         self.assertIs(calls[0][1], batch.observations)
         self.assertTrue(calls[0][2])
-        self.assertIs(calls[1][0], agent.target_pretrained)
+        self.assertIs(calls[1][0], agent.target_pretrained.encoder)
         self.assertIs(calls[1][1], batch.next_observations)
         self.assertFalse(calls[1][2])
 
@@ -506,7 +531,10 @@ class AgentTest(unittest.TestCase):
         _, next_states = agent._expert_batch(self.motions, [2, 2])
         z = agent.encode_expert(next_states)
         self.assertEqual(z.shape, (16, Z))
-        embeddings = torch.cat([agent.model.backward_map(inputs) for inputs in next_states]).detach()
+        embeddings = torch.cat([
+            agent.model.backward_map(agent.model.encode_state(inputs), inputs["joint_mask"])
+            for inputs in next_states
+        ]).detach()
         torch.testing.assert_close(z[0], project_to_sphere(embeddings[:4].mean(0)))
         torch.testing.assert_close(z[3], z[0])
         torch.testing.assert_close(z[8], project_to_sphere(embeddings[8:12].mean(0)))
@@ -571,7 +599,12 @@ class AgentTest(unittest.TestCase):
             last = float(agent.update_discriminator([expert], z, [train], z, [16])["disc_loss"])
         self.assertLess(last, 0.7 * first)
         discriminator = agent.model.discriminator
-        self.assertGreater(float(discriminator.compute_reward(expert, z).mean().detach()), float(discriminator.compute_reward(train, z).mean().detach()))
+        expert_hidden = agent.model.encode_state(expert)
+        train_hidden = agent.model.encode_state(train)
+        self.assertGreater(
+            float(discriminator.compute_reward(expert_hidden, z, expert["joint_mask"]).mean().detach()),
+            float(discriminator.compute_reward(train_hidden, z, train["joint_mask"]).mean().detach()),
+        )
 
     def test_critic_learns_a_constant_reward(self) -> None:
         """With terminal-only transitions on a fixed batch, the value loss falls toward the reward."""
@@ -884,6 +917,20 @@ class EnvironmentTest(unittest.TestCase):
 
 class EncoderCheckpointTest(unittest.TestCase):
     """Loading the pretrained encoder."""
+
+    def test_new_encoder_size(self) -> None:
+        """A new RL encoder uses its requested architecture size.
+
+        Returns:
+            None: Asserts dimensions and size validation.
+        """
+        from model.rl.trainer import build_encoder
+
+        model = build_encoder(None, 30, "tiny")
+        self.assertEqual(model.encoder.config.hidden_size, 64)
+        self.assertEqual(model.encoder.config.num_hidden_layers, 2)
+        with self.assertRaisesRegex(ValueError, "unknown encoder size"):
+            build_encoder(None, 30, "huge")
 
     def test_token_size_must_match(self) -> None:
         """A checkpoint trained with other tokens is rejected with a clear error."""

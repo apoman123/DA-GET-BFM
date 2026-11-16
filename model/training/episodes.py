@@ -68,7 +68,7 @@ class EmbodimentRecord:
         graph (EmbodimentGraph): Robot graph.
         specs (tuple[ActuatorSpec, ...]): One actuator spec per joint.
         rigid_body_features (torch.Tensor): ``[J, 25]``.
-        actuator_features (torch.Tensor): ``[J, 14]``.
+        actuator_features (torch.Tensor): ``[J, 6]``.
         joint_features (torch.Tensor): ``[J, F]`` GET-Zero hardware features.
         effect_mask (torch.Tensor): Bool ``[J]`` end-effector joints for task E.
         contact_links (tuple[str, ...]): Links that can touch the ground.

@@ -48,7 +48,7 @@ class ModelArguments:
 
     preset: str = field(
         default="small",
-        metadata={"help": "'small' (128 wide, 4 layers) or 'da_get_zero' (paper size, 512 wide, 8 layers)."},
+        metadata={"help": "Encoder size: tiny, small, medium, large, or da_get_zero (paper architecture)."},
     )
     hidden_size: int | None = field(default=None, metadata={"help": "Override the preset width."})
     num_hidden_layers: int | None = field(default=None, metadata={"help": "Override the preset depth."})
@@ -97,14 +97,7 @@ class PretrainingArguments(TrainingArguments):
 
 def encoder_config(arguments: ModelArguments, input_size: int) -> DaGetConfig:
     """Build the encoder configuration from the preset and overrides."""
-    if arguments.preset == "da_get_zero":
-        values = {"hidden_size": 512, "num_hidden_layers": 8, "num_attention_heads": 16,
-                  "intermediate_size": 1024, "hidden_dropout_prob": 0.1}
-    elif arguments.preset == "small":
-        values = {"hidden_size": 128, "num_hidden_layers": 4, "num_attention_heads": 4,
-                  "intermediate_size": 512, "hidden_dropout_prob": 0.0}
-    else:
-        raise ValueError("preset must be 'small' or 'da_get_zero'")
+    values = {}
     for name in ("hidden_size", "num_hidden_layers", "num_attention_heads", "intermediate_size"):
         if getattr(arguments, name) is not None:
             values[name] = getattr(arguments, name)
@@ -113,13 +106,12 @@ def encoder_config(arguments: ModelArguments, input_size: int) -> DaGetConfig:
     layers = None
     if arguments.physics_layers:
         layers = tuple(int(item) for item in arguments.physics_layers.split(","))
-    return DaGetConfig(
-        input_size=input_size,
-        use_mass_encoding=arguments.mass_encoding,
-        use_physics_cross_attention=arguments.physics_cross_attention,
-        physics_cross_attention_layers=layers,
-        **values,
-    )
+    values.update(use_mass_encoding=arguments.mass_encoding,
+                  use_physics_cross_attention=arguments.physics_cross_attention,
+                  physics_cross_attention_layers=layers)
+    if arguments.preset == "da_get_zero":
+        return DaGetConfig.da_get_zero(input_size, **values)
+    return DaGetConfig.from_size(input_size, arguments.preset, **values)
 
 
 def main() -> None:

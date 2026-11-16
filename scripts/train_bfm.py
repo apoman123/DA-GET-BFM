@@ -33,6 +33,8 @@ MODEL_FIELDS = (
     "z_dim", "hidden_size", "num_attention_heads", "intermediate_size", "num_latent_tokens", "actor_layers",
     "forward_layers", "num_parallel", "actor_std", "seq_length", "state_hidden_size", "state_num_layers", "state_num_heads",
     "state_intermediate_size", "backward_hidden_size", "backward_hidden_layers", "discriminator_hidden_size", "discriminator_hidden_layers",
+    "actor_hidden_size", "actor_num_attention_heads", "actor_intermediate_size", "actor_num_latent_tokens",
+    "forward_hidden_size", "forward_num_attention_heads", "forward_intermediate_size", "forward_num_latent_tokens",
 )
 OPTIONAL_INT = {"eval_motions"}
 
@@ -66,7 +68,13 @@ def build_parser() -> argparse.ArgumentParser:
         {item.name: item.default for item in dataclasses.fields(TrainingArguments) if item.name not in ("data_config", "output_dir")},
     )
     defaults = {item.name: item.default for item in dataclasses.fields(BfmConfig)}
-    add_fields(parser.add_argument_group("model"), {name: defaults[name] for name in MODEL_FIELDS})
+    model_group = parser.add_argument_group("model")
+    for role in ("actor", "forward", "backward"):
+        model_group.add_argument(f"--{role}_size", choices=("tiny", "small", "medium", "large"), default="small")
+    for name in MODEL_FIELDS:
+        default = defaults[name]
+        kind = float if isinstance(default, float) else int
+        model_group.add_argument(f"--{name}", type=kind, default=None, help=f"override preset (legacy default: {default})")
     add_fields(
         parser.add_argument_group("agent"),
         {item.name: item.default for item in dataclasses.fields(FbCprConfig) if item.name != "aux_reward_scales"},
@@ -77,7 +85,8 @@ def build_parser() -> argparse.ArgumentParser:
 def split_settings(values: dict) -> tuple[TrainingArguments, dict, FbCprConfig]:
     """Split parsed values into run, model and agent settings."""
     run = TrainingArguments(**{item.name: values[item.name] for item in dataclasses.fields(TrainingArguments)})
-    model = {name: values[name] for name in MODEL_FIELDS}
+    model = {name: values[name] for name in MODEL_FIELDS if values[name] is not None}
+    model.update({f"{role}_size": values[f"{role}_size"] for role in ("actor", "forward", "backward")})
     agent = FbCprConfig(**{item.name: values[item.name] for item in dataclasses.fields(FbCprConfig) if item.name != "aux_reward_scales"})
     return run, model, agent
 

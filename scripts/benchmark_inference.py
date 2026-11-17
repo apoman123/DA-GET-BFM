@@ -96,16 +96,14 @@ def benchmark(robot: str, size: str, device: torch.device, history: int, warmup:
     local_history = torch.zeros(1, history, joints, 5, dtype=torch.float64)
     global_history = torch.zeros(1, history, 11, dtype=torch.float64)
     view = observer.state_view(state)
-    linear = torch.zeros_like(state.linear_velocity)
 
     def observe():
         """Build what the policy reads; the state view is for B, D and critics, so it is left out."""
         local, global_features = observer.policy_step(state, target, previous.q, previous.qd)
         local_history[:, :-1], local_history[:, -1] = local_history[:, 1:].clone(), local
         global_history[:, :-1], global_history[:, -1] = global_history[:, 1:].clone(), global_features
-        dynamics = observer._dynamics(state, linear, torque, 1.0)
-        mass = observer.graph.mass_matrix(state.q)
-        return Observation(local_history.float(), global_history.float(), dynamics.float(), mass.float(), view)
+        dynamics, mass = observer.policy_physics(state, torque)
+        return Observation(local_history.float(), global_history.float(), dynamics, mass, view)
 
     observation = observe()
 

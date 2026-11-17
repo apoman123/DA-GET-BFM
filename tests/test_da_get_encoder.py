@@ -1,11 +1,13 @@
 """Test GET graph distances, attention biases, cross-attention, and gradients."""
 
 import unittest
+from unittest import mock
 
 import torch
 
 from model.configuration_da_get import DaGetConfig
-from model.modeling_da_get import DaGetEncoder, DaGetGraphAttentionBias, graph_distances
+from model import modeling_da_get
+from model.modeling_da_get import DaGetEncoder, DaGetGraphAttentionBias, graph_distances, normalize_mass_matrix
 
 
 class DaGetEncoderTest(unittest.TestCase):
@@ -210,6 +212,29 @@ class DaGetEncoderTest(unittest.TestCase):
         original = encoder(values, parents, mass)
         changed = encoder(values, parents, changed_mass)
         self.assertFalse(torch.allclose(original, changed))
+
+    def test_mass_matrix_is_checked_once_per_forward(self) -> None:
+        """Every layer reuses one normalized mass matrix, and invalid matrices still fail.
+
+        Returns:
+            None: Asserts one normalization for two layers and the same output as per-layer normalization.
+        """
+        encoder = DaGetEncoder(self.config).eval()
+        values, context = torch.randn(1, 4, 3), torch.randn(1, 2, 6)
+        with mock.patch.object(modeling_da_get, "normalize_mass_matrix", wraps=normalize_mass_matrix) as spy:
+            output = encoder(values, self.parents, self.mass, self.joint_mask, context_states=context)
+        self.assertEqual(spy.call_count, 1)
+        bias = encoder.layers[0].graph_bias
+        distances = graph_distances(self.parents, self.joint_mask)
+        torch.testing.assert_close(
+            bias(*distances, self.mass, self.joint_mask, torch.float32),
+            bias(*distances, normalize_mass_matrix(self.mass, self.joint_mask, self.config.mass_epsilon),
+                 self.joint_mask, torch.float32, mass_normalized=True),
+        )
+        self.assertTrue(torch.isfinite(output[self.joint_mask]).all())
+        for broken in (self.mass * -1, self.mass + torch.triu(torch.ones(4, 4), 1), self.mass.masked_fill(self.mass == 16.0, float("nan"))):
+            with self.assertRaises(ValueError):
+                encoder(values, self.parents, broken, self.joint_mask, context_states=context)
 
     def test_padded_mass_has_finite_gradients(self) -> None:
         """Check zero padded inertia diagonals do not create NaN gradients.

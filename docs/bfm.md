@@ -378,19 +378,25 @@ uv run python scripts/benchmark_inference.py --device cuda --robots g1 h1 go1 \
 
 | Part | What it runs | Where |
 |---|---|---|
-| `observation` | Policy tokens, dynamics features (two Newton-Euler passes) and mass matrix | CPU, float64 |
+| `observation` | Policy tokens, dynamics features and mass matrix (`EmbodimentObserver.policy_physics`) | CPU, float64 |
 | `act` | Copy to the device, DA-GET encoder, actor | `--device` |
 | `tracking` | B of one new reference frame, only when tracking a motion online | `--device` |
 
-On a CPU (1 thread, no GPU), G1 measured 16.6 ms for `observation` and 18.0 ms for `act`
-with the small encoder: 34 ms per step, over budget. A GPU only speeds up `act`; the
-`observation` part stays on the CPU, and for G1 it alone takes most of the 20 ms. Two
-known costs:
+Measured on a CPU (1 thread, no GPU), small encoder, median:
 
-- The Newton-Euler passes in `model/dynamics.py` loop over joints in Python, so their
-  cost grows with the DoF count (Go1 8.3 ms, H1 11.8 ms, G1 16.6 ms).
-- The encoder checks the mass matrix in every layer (`.all()`, `.any()`, `allclose`).
-  On a GPU each check waits for the device, 18 times per forward for the small encoder.
+| Robot | `observation` | `act` | Step |
+|---|---|---|---|
+| G1 (29 DoF) | 5.6 ms | 16.9 ms | 22.5 ms |
+| H1 (19 DoF) | 3.5 ms | 15.1 ms | 18.8 ms |
+| Go1 (12 DoF) | 2.7 ms | 13.1 ms | 16.5 ms |
+
+A GPU only speeds up `act`; `observation` stays on the CPU. What keeps it small:
+
+- Forward kinematics and Newton-Euler run one tree level at a time (G1: 10 levels
+  instead of 29 joints), and `dynamics_terms` gets g(q) and c(q, qd) from one batched
+  pass that shares the kinematics with M(q). Before, G1 took 16.6 ms here.
+- The encoder checks and normalizes the mass matrix once per forward instead of in
+  every layer, so a GPU waits for the device twice per forward instead of 18 times.
 
 ## Open questions for cross-embodiment training
 

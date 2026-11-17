@@ -21,11 +21,14 @@ from model.physics import (
     actuator_features,
     actuator_specs,
     actuator_tensors,
+    configuration_terms,
     dynamics_features,
+    dynamics_terms,
     motor_labels,
     requested_torque,
     rigid_body_features,
     torque_limit,
+    velocity_terms,
 )
 from model.physics_schema import (
     ACTUATOR_FEATURE_SIZE,
@@ -90,6 +93,26 @@ class DynamicsTest(unittest.TestCase):
             leaf = q.clone().requires_grad_()
             gradient = torch.autograd.grad(potential(leaf).sum(), leaf)[0]
             torch.testing.assert_close(gravity_efforts(graph, q), gradient)
+
+    def test_dynamics_terms_equal_the_two_tiers(self) -> None:
+        """One batched pass gives the same M(q), g(q), c(q, qd, twist) and friction as two."""
+        for urdf in (quadruped(), humanoid()):
+            graph = EmbodimentGraph.from_urdf(urdf, multi_dof_joints="expand", floating_base=True)
+            q, qd, _ = random_state(graph, seed=3)
+            generator = torch.Generator().manual_seed(4)
+            gravity, linear, angular = (torch.randn(4, 3, generator=generator, dtype=torch.float64) for _ in range(3))
+            tensors = actuator_tensors(actuator_specs(graph))
+            terms = dynamics_terms(graph, q, qd, gravity, linear, angular, tensors)
+            diagonal, gravity_term = configuration_terms(graph, q, gravity)
+            coriolis, friction = velocity_terms(graph, q, qd, linear, angular, tensors)
+            torch.testing.assert_close(terms.mass_matrix, graph.mass_matrix(q))
+            torch.testing.assert_close(terms.mass_matrix.diagonal(dim1=-2, dim2=-1), diagonal)
+            torch.testing.assert_close(terms.gravity, gravity_term)
+            torch.testing.assert_close(terms.coriolis, coriolis)
+            torch.testing.assert_close(terms.friction, friction)
+            fixed = dynamics_terms(graph, q, qd)
+            torch.testing.assert_close(fixed.gravity, gravity_efforts(graph, q))
+            torch.testing.assert_close(fixed.coriolis, coriolis_efforts(graph, q, qd))
 
     def test_forward_dynamics_inverts_inverse_dynamics(self) -> None:
         """FD(q, qd, ID(q, qd, qdd)) returns qdd, with friction and tilted gravity."""

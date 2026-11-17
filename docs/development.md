@@ -81,7 +81,7 @@ uv sync --all-extras
 uv run pytest
 ```
 
-The suite has 145 tests (the MuJoCo and HDF5 tests are skipped without the
+The suite has 153 tests (the MuJoCo and HDF5 tests are skipped without the
 `sim` and `validation` extras):
 
 - `test_embodiment.py`: URDF graphs, features, kinematics, mass matrix,

@@ -26,9 +26,12 @@ from typing import Mapping, Sequence
 import torch
 
 from model.dynamics import (
+    BaseMotion,
     coriolis_efforts,
+    default_gravity,
     friction_efforts,
     gravity_efforts,
+    recursive_newton_euler,
 )
 from model.embodiment import EmbodimentGraph
 from model.physics_schema import (
@@ -359,6 +362,76 @@ def velocity_terms(
         graph, positions, velocities, base_linear_velocity, base_angular_velocity
     )
     return coriolis, loss_efforts(graph, tensors, velocities)
+
+
+@dataclass(frozen=True)
+class DynamicsTerms:
+    """Both tiers of dynamics terms at one state.
+
+    Attributes:
+        mass_matrix (torch.Tensor): ``[..., J, J]`` M(q).
+        gravity (torch.Tensor): ``[..., J]`` g(q).
+        coriolis (torch.Tensor): ``[..., J]`` c(q, qd, base twist).
+        friction (torch.Tensor): ``[..., J]`` friction plus rotor drag.
+    """
+
+    mass_matrix: torch.Tensor
+    gravity: torch.Tensor
+    coriolis: torch.Tensor
+    friction: torch.Tensor
+
+
+def dynamics_terms(
+    graph: EmbodimentGraph,
+    positions: torch.Tensor,
+    velocities: torch.Tensor,
+    gravity: torch.Tensor | None = None,
+    base_linear_velocity: torch.Tensor | None = None,
+    base_angular_velocity: torch.Tensor | None = None,
+    tensors: Mapping[str, torch.Tensor] | None = None,
+) -> DynamicsTerms:
+    """Compute ``configuration_terms`` and ``velocity_terms`` together, for a control loop.
+
+    Forward kinematics runs once, and g(q) and c(q, qd) come from one Newton-Euler
+    pass over a batch of two problems instead of two passes.
+
+    Args:
+        graph (EmbodimentGraph): Robot.
+        positions (torch.Tensor): ``[..., J]`` joint positions.
+        velocities (torch.Tensor): ``[..., J]`` joint velocities.
+        gravity (torch.Tensor | None): Gravity in the base frame.
+        base_linear_velocity (torch.Tensor | None): ``[..., 3]`` floating base.
+        base_angular_velocity (torch.Tensor | None): ``[..., 3]`` floating base.
+        tensors (Mapping | None): Actuator tensors, for rotor drag.
+
+    Returns:
+        DynamicsTerms: The full mass matrix (its diagonal is the configuration
+            term), gravity, Coriolis and friction efforts.
+    """
+    kinematics = graph._kinematics(positions)
+    shape = positions.shape[:-1]
+
+    def pair(first: torch.Tensor | None, second: torch.Tensor | None, size: tuple) -> torch.Tensor:
+        """Stack the gravity problem's and the Coriolis problem's input."""
+        zeros = positions.new_zeros(size)
+        first = zeros if first is None else first.to(positions).expand(size)
+        second = zeros if second is None else second.to(positions).expand(size)
+        return torch.stack((first, second))
+
+    vector = (*shape, 3)
+    gravity_vector = default_gravity(positions.dtype, positions.device) if gravity is None else gravity
+    efforts = recursive_newton_euler(
+        graph,
+        positions.expand(2, *positions.shape),
+        pair(None, velocities, positions.shape),
+        positions.new_zeros((2, *positions.shape)),
+        pair(gravity_vector, None, vector),
+        BaseMotion(pair(None, base_linear_velocity, vector), pair(None, base_angular_velocity, vector)),
+        kinematics=tuple(item.expand(2, *item.shape) for item in kinematics),
+    ).efforts
+    return DynamicsTerms(
+        graph.mass_matrix(positions, kinematics), efforts[0], efforts[1], loss_efforts(graph, tensors, velocities)
+    )
 
 
 def assemble_dynamics_features(

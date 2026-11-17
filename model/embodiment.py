@@ -636,7 +636,11 @@ class EmbodimentGraph:
             poses.append(carrier @ self.link_transforms[index].to(dtype=dtype, device=device))
         return torch.stack(poses, dim=-3)
 
-    def mass_matrix(self, positions: torch.Tensor) -> torch.Tensor:
+    def mass_matrix(
+        self,
+        positions: torch.Tensor,
+        kinematics: tuple[torch.Tensor, torch.Tensor, torch.Tensor] | None = None,
+    ) -> torch.Tensor:
         """Compute the fixed-base joint-space inertia matrix ``M(q)``.
 
         For a floating-base robot with skipped floating joints, this equals the
@@ -645,6 +649,8 @@ class EmbodimentGraph:
 
         Args:
             positions (torch.Tensor): Floating joint positions ``[..., J]``.
+            kinematics (tuple | None): ``_kinematics(positions)``, when the
+                caller already has it.
 
         Returns:
             torch.Tensor: Symmetric positive semidefinite ``[..., J, J]``.
@@ -652,7 +658,7 @@ class EmbodimentGraph:
         Raises:
             ValueError: positions does not end with dimension J.
         """
-        body_frames, joint_origins, joint_axes = self._kinematics(positions)
+        body_frames, joint_origins, joint_axes = self._kinematics(positions) if kinematics is None else kinematics
         dtype, device = positions.dtype, positions.device
         rotation = body_frames[..., :3, :3]
         com = (
@@ -690,6 +696,34 @@ class EmbodimentGraph:
     def _depth_order(self) -> list[int]:
         """Return joint indices sorted so parents come before children."""
         return torch.argsort(self.ancestor_mask.sum(dim=1), stable=True).tolist()
+
+    def _depth_levels(self, device: torch.device | str) -> tuple[tuple[torch.Tensor, torch.Tensor], ...]:
+        """Group joints by tree depth, so a recursion over the tree runs one level at a time.
+
+        Args:
+            device (torch.device | str): Device of the returned indices.
+
+        Returns:
+            tuple: One ``(joints, parents)`` pair of long tensors per depth, roots
+                first. Every joint of level 0 is a root (parent -1); deeper joints
+                have their parent in the previous level.
+        """
+        cache = self.__dict__.setdefault("_level_cache", {})
+        key = str(device)
+        if key not in cache:
+            parents = self.parent_indices.tolist()
+            depth: list[int] = [0] * self.num_joints
+            for index in self._depth_order():
+                depth[index] = 0 if parents[index] < 0 else depth[parents[index]] + 1
+            levels = []
+            for level in range(max(depth, default=-1) + 1):
+                joints = [index for index in range(self.num_joints) if depth[index] == level]
+                levels.append((
+                    torch.tensor(joints, dtype=torch.long, device=device),
+                    torch.tensor([parents[index] for index in joints], dtype=torch.long, device=device),
+                ))
+            cache[key] = tuple(levels)
+        return cache[key]
 
     def _kinematics(
         self, positions: torch.Tensor
@@ -730,17 +764,17 @@ class EmbodimentGraph:
             ),
             dim=-2,
         )
-        frames: list[torch.Tensor | None] = [None] * self.num_joints
-        static: list[torch.Tensor | None] = [None] * self.num_joints
-        parents = self.parent_indices.tolist()
-        for index in self._depth_order():
-            parent = parents[index]
-            parent_frame = identity if parent < 0 else frames[parent]
-            joint_frame = parent_frame @ tree[index]
-            static[index] = joint_frame
-            frames[index] = joint_frame @ motions[..., index, :, :]
-        moving = torch.stack(frames, dim=-3)
-        fixed = torch.stack(static, dim=-3)
+        # One level of the tree at a time: a joint's frame needs only its parent's.
+        joint_dim = len(batch_shape)
+        moving = positions.new_zeros((*batch_shape, self.num_joints, 4, 4))
+        fixed = moving
+        for level, (joints, parents) in enumerate(self._depth_levels(device)):
+            if level == 0:
+                joint_frame = tree[joints].expand(*batch_shape, -1, 4, 4)
+            else:
+                joint_frame = moving.index_select(joint_dim, parents) @ tree[joints]
+            fixed = fixed.index_copy(joint_dim, joints, joint_frame)
+            moving = moving.index_copy(joint_dim, joints, joint_frame @ motions.index_select(joint_dim, joints))
         world_axes = (fixed[..., :3, :3] @ axes[..., None]).squeeze(-1)
         return moving, fixed[..., :3, 3], world_axes
 

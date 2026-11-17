@@ -358,6 +358,43 @@ class PhysicsMemory:
     parameter_versions: tuple[int, ...]
 
 
+def normalize_mass_matrix(mass_matrix: torch.Tensor, joint_mask: torch.Tensor, epsilon: float) -> torch.Tensor:
+    """Validate ``M(q)`` and return ``M_ij / sqrt(M_ii M_jj)``, with padded diagonals set to one.
+
+    All checks reduce to one boolean, so a GPU waits for the device once per call.
+
+    Args:
+        mass_matrix (torch.Tensor): ``[batch, joints, joints]`` joint mass matrix.
+        joint_mask (torch.Tensor): Boolean ``[batch, joints]`` valid joints.
+        epsilon (float): Stabilizer added to the denominator.
+
+    Returns:
+        torch.Tensor: Normalized mass matrix of the same shape.
+
+    Raises:
+        ValueError: The matrix is not floating, finite and symmetric with a positive
+            valid diagonal, or has the wrong shape.
+    """
+    batch_size, joint_count = joint_mask.shape
+    if mass_matrix is None or mass_matrix.shape != (batch_size, joint_count, joint_count):
+        raise ValueError("mass_matrix must have shape [batch, joints, joints]")
+    if not mass_matrix.is_floating_point():
+        raise ValueError("mass_matrix must be floating, finite, symmetric, and have positive valid diagonal")
+    diagonal = mass_matrix.diagonal(dim1=1, dim2=2)
+    transposed = mass_matrix.transpose(1, 2)
+    valid = (
+        torch.isfinite(mass_matrix).all()
+        & ((diagonal > 0) | ~joint_mask).all()
+        # The tolerances of torch.allclose.
+        & ((mass_matrix - transposed).abs() <= 1e-8 + 1e-5 * transposed.abs()).all()
+    )
+    if not valid:
+        raise ValueError("mass_matrix must be floating, finite, symmetric, and have positive valid diagonal")
+    safe_diagonal = torch.where(joint_mask, diagonal, torch.ones_like(diagonal))
+    denominator = torch.sqrt(safe_diagonal.unsqueeze(2) * safe_diagonal.unsqueeze(1))
+    return mass_matrix / (denominator + epsilon)
+
+
 class DaGetGraphAttentionBias(nn.Module):
     """Learn per-head spatial, parent, child, and normalized mass logit biases.
 
@@ -408,6 +445,7 @@ class DaGetGraphAttentionBias(nn.Module):
         mass_matrix: torch.Tensor | None,
         joint_mask: torch.Tensor,
         dtype: torch.dtype,
+        mass_normalized: bool = False,
     ) -> torch.Tensor:
         """Build an additive PyTorch attention mask for each batch and head.
 
@@ -421,6 +459,8 @@ class DaGetGraphAttentionBias(nn.Module):
                 when mass encoding is enabled.
             joint_mask (torch.Tensor): Boolean ``[batch, joints]`` valid joints.
             dtype (torch.dtype): Floating dtype of attention hidden states.
+            mass_normalized (bool): ``mass_matrix`` already comes from
+                ``normalize_mass_matrix``, as the encoder passes it to every layer.
 
         Returns:
             torch.Tensor: Additive logits of shape
@@ -449,27 +489,11 @@ class DaGetGraphAttentionBias(nn.Module):
                 child_distances.clamp(max=max_distance)
             ).to(dtype)
         if self.mass_projection is not None:
-            if mass_matrix is None or mass_matrix.shape != (
-                batch_size,
-                joint_count,
-                joint_count,
-            ):
-                raise ValueError("mass_matrix must have shape [batch, joints, joints]")
-            diagonal = mass_matrix.diagonal(dim1=1, dim2=2)
-            if (
-                not mass_matrix.is_floating_point()
-                or not torch.isfinite(mass_matrix).all()
-                or torch.any(diagonal[joint_mask] <= 0)
-                or not torch.allclose(mass_matrix, mass_matrix.transpose(1, 2))
-            ):
-                raise ValueError(
-                    "mass_matrix must be floating, finite, symmetric, and have positive valid diagonal"
-                )
-            safe_diagonal = torch.where(joint_mask, diagonal, torch.ones_like(diagonal))
-            denominator = torch.sqrt(
-                safe_diagonal.unsqueeze(2) * safe_diagonal.unsqueeze(1)
+            normalized = (
+                mass_matrix
+                if mass_normalized
+                else normalize_mass_matrix(mass_matrix, joint_mask, self.config.mass_epsilon)
             )
-            normalized = mass_matrix / (denominator + self.config.mass_epsilon)
             bias = bias + self.mass_projection(normalized.unsqueeze(-1)).to(dtype)
         bias = bias.masked_fill(~joint_mask[:, None, :, None], float("-inf"))
         return bias.permute(0, 3, 1, 2).reshape(
@@ -539,6 +563,7 @@ class DaGetEncoderLayer(nn.Module):
         context_states: torch.Tensor | None,
         context_mask: torch.Tensor | None,
         physics: tuple[torch.Tensor, torch.Tensor, torch.Tensor] | None = None,
+        mass_normalized: bool = False,
     ) -> torch.Tensor:
         """Update joint states while keeping padded positions zero.
 
@@ -553,6 +578,7 @@ class DaGetEncoderLayer(nn.Module):
             physics (tuple | None): Static keys ``[B, heads, 2J, d]``, static
                 values, and dynamics tokens ``[B, J, hidden]``, required when
                 the layer has Physics Cross Attention.
+            mass_normalized (bool): ``mass_matrix`` comes from ``normalize_mass_matrix``.
 
         Returns:
             torch.Tensor: Updated joint states of the same shape, zero on padding.
@@ -560,7 +586,7 @@ class DaGetEncoderLayer(nn.Module):
         Raises:
             ValueError: A cross-attention layer has no context or physics tokens.
         """
-        bias = self.graph_bias(*distances, mass_matrix, joint_mask, hidden_states.dtype)
+        bias = self.graph_bias(*distances, mass_matrix, joint_mask, hidden_states.dtype, mass_normalized)
         hidden_states = self.self_attention(hidden_states, attention_mask=bias)
         if self.physics_attention is not None:
             if physics is None:
@@ -859,6 +885,9 @@ class DaGetEncoder(nn.Module):
             dynamics_tokens = dynamics_tokens.masked_fill(~joint_mask[..., None], 0)
         elif physics_memory is not None or dynamics_features is not None:
             raise ValueError("physics inputs given but Physics Cross Attention is disabled")
+        if self.config.use_mass_encoding:
+            # Once per forward, not per layer: each check waits for the device.
+            mass_matrix = normalize_mass_matrix(mass_matrix, joint_mask, self.config.mass_epsilon)
         if self.input_norm is not None:
             input_values = self.input_norm(input_values)
         hidden_states = self.input_projection(input_values)
@@ -880,5 +909,6 @@ class DaGetEncoder(nn.Module):
                 context_states,
                 context_mask,
                 physics if layer.physics_attention is not None else None,
+                mass_normalized=True,
             )
         return self.final_norm(hidden_states).masked_fill(~joint_mask.unsqueeze(-1), 0)

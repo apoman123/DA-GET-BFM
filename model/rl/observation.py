@@ -20,7 +20,7 @@ import torch
 
 from model.dynamics import STANDARD_GRAVITY
 from model.embodiment import collate_embodiments
-from model.physics import EPSILON, assemble_dynamics_features, configuration_terms, velocity_terms
+from model.physics import EPSILON, DynamicsTerms, assemble_dynamics_features, dynamics_terms
 from model.tokenization_da_get import DaGetTokenizer
 from model.training.episodes import (
     BASE_FEATURE_SIZE,
@@ -191,15 +191,22 @@ class EmbodimentObserver:
         global_features = torch.cat((state.gravity_direction, state.angular_velocity, linear / self.length, height[:, None] / self.length), dim=-1)
         return StateView(local.float(), global_features.float(), self._dynamics(state, linear, None, 0.0).float())
 
-    def _dynamics(self, state: RobotState, linear: torch.Tensor, previous_torque: torch.Tensor | None, source: float) -> torch.Tensor:
-        """Return dynamics features; ``source`` is the torque-source flag (0 means unknown)."""
-        q, qd = state.q, state.qd
-        mass_diagonal, gravity_term = configuration_terms(self.graph, q, STANDARD_GRAVITY * state.gravity_direction)
-        coriolis, friction = velocity_terms(
-            self.graph, q, qd, linear if self.floating else None, state.angular_velocity if self.floating else None, self.actuator
+    def _terms(self, state: RobotState, linear: torch.Tensor) -> DynamicsTerms:
+        """Return the mass matrix and efforts at a state."""
+        return dynamics_terms(
+            self.graph, state.q, state.qd, STANDARD_GRAVITY * state.gravity_direction,
+            linear if self.floating else None, state.angular_velocity if self.floating else None, self.actuator,
         )
-        previous = torch.zeros_like(q) if previous_torque is None else previous_torque
-        return assemble_dynamics_features(mass_diagonal, coriolis, gravity_term, friction, previous, self.actuator["continuous_torque"], source)
+
+    def _dynamics(self, state: RobotState, linear: torch.Tensor, previous_torque: torch.Tensor | None, source: float,
+                  terms: DynamicsTerms | None = None) -> torch.Tensor:
+        """Return dynamics features; ``source`` is the torque-source flag (0 means unknown)."""
+        terms = self._terms(state, linear) if terms is None else terms
+        previous = torch.zeros_like(state.q) if previous_torque is None else previous_torque
+        return assemble_dynamics_features(
+            terms.mass_matrix.diagonal(dim1=-2, dim2=-1), terms.coriolis, terms.gravity, terms.friction, previous,
+            self.actuator["continuous_torque"], source,
+        )
 
     def policy_step(self, state: RobotState, previous_target: torch.Tensor | None, previous_q: torch.Tensor | None,
                     previous_qd: torch.Tensor | None) -> tuple[torch.Tensor, torch.Tensor]:
@@ -246,12 +253,23 @@ class EmbodimentObserver:
         Returns:
             Observation: Stored tensors.
         """
+        dynamics, mass = self.policy_physics(policy_state, previous_torque)
+        return Observation(local_history.float(), global_history.float(), dynamics, mass, self.state_view(state))
+
+    def policy_physics(self, policy_state: RobotState, previous_torque: torch.Tensor | None) -> tuple[torch.Tensor, torch.Tensor]:
+        """Return what the policy encoder reads besides its tokens, as at deployment.
+
+        Args:
+            policy_state (RobotState): State the policy senses.
+            previous_torque (torch.Tensor | None): ``[N, J]`` torque applied at t-1.
+
+        Returns:
+            tuple[torch.Tensor, torch.Tensor]: Float32 dynamics features ``[N, J, 7]``
+                and mass matrix ``[N, J, J]``.
+        """
         linear = policy_state.linear_velocity if self.observe_base_linear_velocity else torch.zeros_like(policy_state.linear_velocity)
-        dynamics = self._dynamics(policy_state, linear, previous_torque, 1.0)
-        return Observation(
-            local_history.float(), global_history.float(), dynamics.float(),
-            self.graph.mass_matrix(policy_state.q).float(), self.state_view(state),
-        )
+        terms = self._terms(policy_state, linear)
+        return self._dynamics(policy_state, linear, previous_torque, 1.0, terms).float(), terms.mass_matrix.float()
 
     def _static(self, device: torch.device) -> dict:
         """Return the robot's per-sample encoder inputs on a device, with a batch of one."""

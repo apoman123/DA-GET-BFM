@@ -126,8 +126,9 @@ def recursive_newton_euler(
     base: BaseMotion | None = None,
     body_wrenches: torch.Tensor | None = None,
     base_external_wrench: torch.Tensor | None = None,
+    kinematics: tuple[torch.Tensor, torch.Tensor, torch.Tensor] | None = None,
 ) -> RneaResult:
-    """Run the recursive Newton-Euler algorithm on the tree.
+    """Run the recursive Newton-Euler algorithm on the tree, one depth level at a time.
 
     Friction is not included (see ``friction_efforts``).
 
@@ -145,6 +146,8 @@ def recursive_newton_euler(
             joint body, in the base frame, such as rotor thrust or contacts.
         base_external_wrench (torch.Tensor | None): ``[..., 6]`` known external
             wrench on the base body about the base origin.
+        kinematics (tuple | None): ``graph._kinematics(positions)``, when the
+            caller already has it.
 
     Returns:
         RneaResult: Joint efforts, required base wrench, and frame velocities.
@@ -154,7 +157,7 @@ def recursive_newton_euler(
     """
     _check_joint_tensor("velocities", velocities, positions)
     _check_joint_tensor("accelerations", accelerations, positions)
-    frames, _, axes = graph._kinematics(positions)
+    frames, _, axes = graph._kinematics(positions) if kinematics is None else kinematics
     velocities = velocities.to(positions)
     accelerations = accelerations.to(positions)
     dtype, device = positions.dtype, positions.device
@@ -164,106 +167,90 @@ def recursive_newton_euler(
     base_alpha = _vector(base.angular_acceleration, positions)
     base_velocity = _vector(base.linear_velocity, positions)
     base_acceleration = _vector(base.linear_acceleration, positions) - gravity
-    zero = torch.zeros_like(base_omega)
     masses = graph.body_mass.to(dtype=dtype, device=device)
     coms = graph.body_com.to(dtype=dtype, device=device)
     inertias = graph.body_inertia.to(dtype=dtype, device=device)
-    parents = graph.parent_indices.tolist()
-    order = graph._depth_order()
-    prismatic = [kind == "prismatic" for kind in graph.joint_types]
-    count = graph.num_joints
-    omega: list[torch.Tensor] = [zero] * count
-    alpha: list[torch.Tensor] = [zero] * count
-    linear_velocity: list[torch.Tensor] = [zero] * count
-    linear_acceleration: list[torch.Tensor] = [zero] * count
-    force: list[torch.Tensor] = [zero] * count
-    moment: list[torch.Tensor] = [zero] * count
+    prismatic = torch.tensor([kind == "prismatic" for kind in graph.joint_types], device=device)[:, None]
+    batch_shape = positions.shape[:-1]
+    joint_dim = len(batch_shape)
     origins = frames[..., :3, 3]
     cross = torch.linalg.cross
     if body_wrenches is not None:
         body_wrenches = body_wrenches.to(positions)
-    for index in order:
-        parent = parents[index]
-        if parent < 0:
-            parent_omega, parent_alpha = base_omega, base_alpha
-            parent_velocity, parent_acceleration = base_velocity, base_acceleration
-            parent_origin = zero
+    empty = positions.new_zeros((*batch_shape, graph.num_joints, 3))
+    omega = alpha = linear_velocity = linear_acceleration = force = moment = empty
+    levels = graph._depth_levels(device)
+    # Outward pass, one tree level at a time: a joint needs only its parent's motion.
+    for level, (joints, parents) in enumerate(levels):
+        if level == 0:
+            shape = (*batch_shape, joints.numel(), 3)
+            parent_omega, parent_alpha = base_omega[..., None, :].expand(shape), base_alpha[..., None, :].expand(shape)
+            parent_velocity = base_velocity[..., None, :].expand(shape)
+            parent_acceleration = base_acceleration[..., None, :].expand(shape)
+            lever = origins.index_select(joint_dim, joints)
         else:
-            parent_omega, parent_alpha = omega[parent], alpha[parent]
-            parent_velocity = linear_velocity[parent]
-            parent_acceleration = linear_acceleration[parent]
-            parent_origin = origins[..., parent, :]
-        lever = origins[..., index, :] - parent_origin
-        axis = axes[..., index, :]
-        speed = velocities[..., index, None]
-        rate = accelerations[..., index, None]
-        velocity = parent_velocity + cross(parent_omega, lever, dim=-1)
+            parent_omega = omega.index_select(joint_dim, parents)
+            parent_alpha = alpha.index_select(joint_dim, parents)
+            parent_velocity = linear_velocity.index_select(joint_dim, parents)
+            parent_acceleration = linear_acceleration.index_select(joint_dim, parents)
+            lever = origins.index_select(joint_dim, joints) - origins.index_select(joint_dim, parents)
+        axis = axes.index_select(joint_dim, joints)
+        is_prismatic = prismatic[joints]
+        speed = velocities.index_select(-1, joints)[..., None]
+        rate = accelerations.index_select(-1, joints)[..., None]
+        joint_velocity = axis * speed
+        joint_acceleration = axis * rate
+        omega_cross_motion = cross(parent_omega, joint_velocity, dim=-1)
+        zero = torch.zeros_like(joint_velocity)
+        velocity = parent_velocity + cross(parent_omega, lever, dim=-1) + torch.where(is_prismatic, joint_velocity, zero)
         acceleration = (
             parent_acceleration
             + cross(parent_alpha, lever, dim=-1)
             + cross(parent_omega, cross(parent_omega, lever, dim=-1), dim=-1)
+            + torch.where(is_prismatic, joint_acceleration + 2 * omega_cross_motion, zero)
         )
-        if prismatic[index]:
-            velocity = velocity + axis * speed
-            acceleration = (
-                acceleration
-                + axis * rate
-                + 2 * cross(parent_omega, axis * speed, dim=-1)
-            )
-            omega[index], alpha[index] = parent_omega, parent_alpha
-        else:
-            omega[index] = parent_omega + axis * speed
-            alpha[index] = (
-                parent_alpha + axis * rate + cross(parent_omega, axis * speed, dim=-1)
-            )
-        linear_velocity[index] = velocity
-        linear_acceleration[index] = acceleration
-        rotation = frames[..., index, :3, :3]
-        offset = (rotation @ coms[index, :, None]).squeeze(-1)
-        inertia = rotation @ inertias[index] @ rotation.transpose(-1, -2)
-        body_force, body_moment = _body_wrench(
-            masses[index], offset, inertia, acceleration, omega[index], alpha[index]
-        )
+        body_omega = parent_omega + torch.where(is_prismatic, zero, joint_velocity)
+        body_alpha = parent_alpha + torch.where(is_prismatic, zero, joint_acceleration + omega_cross_motion)
+        rotation = frames.index_select(joint_dim, joints)[..., :3, :3]
+        offset = (rotation @ coms[joints][..., None]).squeeze(-1)
+        inertia = rotation @ inertias[joints] @ rotation.transpose(-1, -2)
+        body_force, body_moment = _body_wrench(masses[joints][:, None], offset, inertia, acceleration, body_omega, body_alpha)
         if body_wrenches is not None:
-            body_force = body_force - body_wrenches[..., index, :3]
-            body_moment = body_moment - body_wrenches[..., index, 3:]
-        force[index], moment[index] = body_force, body_moment
-    efforts: list[torch.Tensor] = [zero[..., 0]] * count
+            selected = body_wrenches.index_select(joint_dim, joints)
+            body_force, body_moment = body_force - selected[..., :3], body_moment - selected[..., 3:]
+        omega = omega.index_copy(joint_dim, joints, body_omega)
+        alpha = alpha.index_copy(joint_dim, joints, body_alpha)
+        linear_velocity = linear_velocity.index_copy(joint_dim, joints, velocity)
+        linear_acceleration = linear_acceleration.index_copy(joint_dim, joints, acceleration)
+        force = force.index_copy(joint_dim, joints, body_force)
+        moment = moment.index_copy(joint_dim, joints, body_moment)
     base_force, base_moment = _body_wrench(
         torch.tensor(graph.base_mass, dtype=dtype, device=device),
-        graph.base_com.to(dtype=dtype, device=device).expand_as(zero),
+        graph.base_com.to(dtype=dtype, device=device).expand_as(base_omega),
         graph.base_inertia.to(dtype=dtype, device=device),
         base_acceleration,
         base_omega,
         base_alpha,
     )
-    for index in reversed(order):
-        axis = axes[..., index, :]
-        efforts[index] = (
-            (axis * force[index]).sum(-1)
-            if prismatic[index]
-            else (axis * moment[index]).sum(-1)
-        )
-        parent = parents[index]
-        if parent >= 0:
-            lever = origins[..., index, :] - origins[..., parent, :]
-            force[parent] = force[parent] + force[index]
-            moment[parent] = (
-                moment[parent] + moment[index] + cross(lever, force[index], dim=-1)
-            )
+    # Inward pass, deepest level first: each joint adds its subtree's wrench to its parent.
+    # A joint's own wrench is final once its children's level has run.
+    for level in range(len(levels) - 1, -1, -1):
+        joints, parents = levels[level]
+        child_force = force.index_select(joint_dim, joints)
+        child_moment = moment.index_select(joint_dim, joints)
+        if level == 0:
+            lever = origins.index_select(joint_dim, joints)
+            base_force = base_force + child_force.sum(-2)
+            base_moment = base_moment + (child_moment + cross(lever, child_force, dim=-1)).sum(-2)
         else:
-            lever = origins[..., index, :]
-            base_force = base_force + force[index]
-            base_moment = base_moment + moment[index] + cross(lever, force[index], dim=-1)
+            lever = origins.index_select(joint_dim, joints) - origins.index_select(joint_dim, parents)
+            force = force.index_add(joint_dim, parents, child_force)
+            moment = moment.index_add(joint_dim, parents, child_moment + cross(lever, child_force, dim=-1))
+    efforts = torch.where(prismatic[:, 0], (axes * force).sum(-1), (axes * moment).sum(-1))
     base_wrench = torch.cat((base_force, base_moment), dim=-1)
     if base_external_wrench is not None:
         base_wrench = base_wrench - base_external_wrench.to(positions)
-    return RneaResult(
-        torch.stack(efforts, dim=-1),
-        base_wrench,
-        torch.stack(linear_velocity, dim=-2),
-        torch.stack(omega, dim=-2),
-    )
+    return RneaResult(efforts, base_wrench, linear_velocity, omega)
 
 
 def _body_wrench(mass, offset, inertia, acceleration, omega, alpha):

@@ -18,6 +18,7 @@ The FB-CPR networks on the DA-GET encoder, how they train across robots in Isaac
   - [Sharing z across robots](#sharing-z-across-robots)
   - [First run on a GPU machine](#first-run-on-a-gpu-machine)
   - [What TensorBoard shows](#what-tensorboard-shows)
+  - [Inference latency at 50 Hz](#inference-latency-at-50-hz)
 - [Open questions for cross-embodiment training](#open-questions-for-cross-embodiment-training)
 - [Attribution](#attribution)
 
@@ -364,6 +365,32 @@ python scripts/train_bfm.py --data_config configs/rl/go1_h1_ground.json \
 | `eval/<robot>/tracking_mpjpe`, `tracking_emd`, `tracking_fallen` | Tracking: the paper's `mean_t ‖q_t − q_ref‖`, the EMD behind priorities, and worlds fallen at the end |
 | `eval/<robot>/goal_mpjpe` | Goal reaching toward each motion's last frame |
 | `eval/<robot>/getting_up_rate` | Worlds upright at the end after a lying start, without pushes or noise |
+
+### Inference latency at 50 Hz
+
+`scripts/benchmark_inference.py` times one deployment control step at batch 1 and checks
+it against the 20 ms budget of 50 Hz control. Run it on the deployment machine:
+
+```bash
+uv run python scripts/benchmark_inference.py --device cuda --robots g1 h1 go1 \
+    --encoder_sizes small medium large
+```
+
+| Part | What it runs | Where |
+|---|---|---|
+| `observation` | Policy tokens, dynamics features (two Newton-Euler passes) and mass matrix | CPU, float64 |
+| `act` | Copy to the device, DA-GET encoder, actor | `--device` |
+| `tracking` | B of one new reference frame, only when tracking a motion online | `--device` |
+
+On a CPU (1 thread, no GPU), G1 measured 16.6 ms for `observation` and 18.0 ms for `act`
+with the small encoder: 34 ms per step, over budget. A GPU only speeds up `act`; the
+`observation` part stays on the CPU, and for G1 it alone takes most of the 20 ms. Two
+known costs:
+
+- The Newton-Euler passes in `model/dynamics.py` loop over joints in Python, so their
+  cost grows with the DoF count (Go1 8.3 ms, H1 11.8 ms, G1 16.6 ms).
+- The encoder checks the mass matrix in every layer (`.all()`, `.any()`, `allclose`).
+  On a GPU each check waits for the device, 18 times per forward for the small encoder.
 
 ## Open questions for cross-embodiment training
 

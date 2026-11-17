@@ -353,7 +353,7 @@ model/                     library code
   pretraining.py             physics pretraining model (heads A-F)
   dynamics.py                rigid-body dynamics and torque estimation
   training/, conversion/     data pipeline and dataset converters
-scripts/                   training, data config generator, converters, validation
+scripts/                   training, data config generator, converters, validation, latency benchmark
 configs/data/              example data configs
 docs/                      documentation by topic
 tests/                     test suite

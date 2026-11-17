@@ -41,7 +41,7 @@ URDF + dynamics ─────────────────► DaGetEnco
 | Training data: synthetic, MuJoCo ground contact, Hub datasets, converters | Done |
 | BFM networks: backward map, discriminator, actor, forward map, critics | Done and unit tested |
 | Online off-policy FB-CPR training across robots | Logic done and tested on MuJoCo; **only short runs, so no policy is trained yet** |
-| 50 Hz deployment (`DaGetBfmPolicy`, CUDA Graphs) | Eager path within budget on an RTX 5070 Ti for G1, H1, Go1; CUDA Graph path tested on a CPU only, not yet timed on a GPU ([details](docs/bfm.md#inference-latency-at-50-hz)) |
+| 50 Hz deployment (`DaGetBfmPolicy`, CUDA Graphs) | Done; on an RTX 5070 Ti a G1 step takes at most 6.3 ms, 12.6 ms with live tracking, for every encoder size (budget 20 ms; robot communication not included) ([details](docs/bfm.md#inference-latency-at-50-hz)) |
 | Isaac Lab simulation (self-collision, getting up, prioritized motions) | **Written against Isaac Lab 3 and tested with a fake only; never run in Isaac Lab, which needs a GPU** |
 | **Prompting one robot with another's motion** | **B and D are shared, but nothing aligns behaviors across robots yet** ([details](docs/bfm.md#sharing-z-across-robots)) |
 

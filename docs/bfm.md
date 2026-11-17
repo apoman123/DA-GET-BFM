@@ -397,6 +397,24 @@ The second table is everything else: each network alone (the policy and state en
 the actor and B heads, and F, Q_D, Q_R and D, which only training runs) and the one-off
 prompts (goal z, reward z over 1000 buffer states, tracking z of a 500-frame motion).
 
+Measured on an RTX 5070 Ti, policy path with CUDA Graphs, batch 1 (the CUDA Graph test of
+`tests/test_deployment.py` passed on the same machine):
+
+| Robot | Encoder | `act` eager → policy (median) | `control step` median / p99 / max | `+ live tracking` median / p99 / max |
+|---|---|---|---|---|
+| G1 (29 DoF) | small | 7.74 → 1.20 ms | 2.77 / 5.34 / 5.37 ms | 5.28 / 10.40 / 10.43 ms |
+| G1 (29 DoF) | large | 11.27 → 2.01 ms | 3.66 / 6.22 / 6.25 ms | 7.00 / 12.36 / 12.60 ms |
+| H1 (19 DoF) | large | 12.04 → 1.94 ms | 3.05 / 4.76 / 4.76 ms | 5.72 / 8.92 / 9.43 ms |
+| Go1 (12 DoF) | small | 7.18 → 0.94 ms | 1.81 / 3.06 / 3.09 ms | 3.28 / 6.87 / 8.82 ms |
+
+Every robot and encoder size (small, medium, large) is within budget, the maximum
+included. The large encoder costs about 0.9 ms more per step than the small one, so
+latency does not limit the encoder size on this GPU. The CPU parts (`observation`,
+`reference state`) are now about half of a live-tracking step, and their p99 is two to
+three times their median; on a robot, pin the control thread to a core and pause
+Python's garbage collector in the loop. An onboard computer (such as a Jetson) is
+slower than this desktop: run the benchmark there before deploying.
+
 #### Deployment: `DaGetBfmPolicy`
 
 ```python

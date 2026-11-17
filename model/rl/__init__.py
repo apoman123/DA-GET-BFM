@@ -3,9 +3,11 @@
 from model.rl.agent import DaGetFbCprAgent
 from model.rl.buffers import ExpertMotions, ReplayBuffer
 from model.rl.configuration_fb_cpr import FbCprConfig
+from model.rl.deployment import DaGetBfmPolicy
 from model.rl.observation import EmbodimentObserver, Observation, RobotState, StateView
 
 __all__ = [
+    "DaGetBfmPolicy",
     "DaGetFbCprAgent",
     "EmbodimentObserver",
     "ExpertMotions",

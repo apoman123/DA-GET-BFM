@@ -368,35 +368,71 @@ python scripts/train_bfm.py --data_config configs/rl/go1_h1_ground.json \
 
 ### Inference latency at 50 Hz
 
-`scripts/benchmark_inference.py` times one deployment control step at batch 1 and checks
-it against the 20 ms budget of 50 Hz control. Run it on the deployment machine:
+`scripts/benchmark_inference.py` times every part of the model on one robot and checks
+the per-step totals against the 20 ms budget of 50 Hz control. Run it on the deployment
+machine:
 
 ```bash
 uv run python scripts/benchmark_inference.py --device cuda --robots g1 h1 go1 \
     --encoder_sizes small medium large
 ```
 
+The first table is the work of every control step, at batch 1:
+
 | Part | What it runs | Where |
 |---|---|---|
 | `observation` | Policy tokens, dynamics features and mass matrix (`EmbodimentObserver.policy_physics`) | CPU, float64 |
-| `act` | Copy to the device, DA-GET encoder, actor | `--device` |
-| `tracking` | B of one new reference frame, only when tracking a motion online | `--device` |
+| `act (eager)` | `DaGetFbCprAgent.act`, the training path | `--device` |
+| `act (policy)` | `DaGetBfmPolicy.act`, the deployment path (below) | `--device` |
+| `reference state` | State view of a reference frame, for a motion streamed live | CPU, float64 |
+| `B (eager)`, `B (policy)` | B of that frame | `--device` |
+| `control step` | `observation` + `act (policy)` | |
+| `+ live tracking` | `control step` + `reference state` + `B (policy)` | |
 
-Measured on a CPU (1 thread, no GPU), small encoder, median:
+A total is `OK` when its 99th percentile and maximum are within budget, `OK (max over)`
+when only the maximum is over, and `OVER BUDGET` otherwise. A motion known ahead
+needs no live tracking: encode it once with `DaGetFbCprAgent.tracking_latents`.
 
-| Robot | `observation` | `act` | Step |
-|---|---|---|---|
-| G1 (29 DoF) | 5.6 ms | 16.9 ms | 22.5 ms |
-| H1 (19 DoF) | 3.5 ms | 15.1 ms | 18.8 ms |
-| Go1 (12 DoF) | 2.7 ms | 13.1 ms | 16.5 ms |
+The second table is everything else: each network alone (the policy and state encoders,
+the actor and B heads, and F, Q_D, Q_R and D, which only training runs) and the one-off
+prompts (goal z, reward z over 1000 buffer states, tracking z of a 500-frame motion).
 
-A GPU only speeds up `act`; `observation` stays on the CPU. What keeps it small:
+#### Deployment: `DaGetBfmPolicy`
+
+```python
+from model.rl import DaGetBfmPolicy
+
+policy = DaGetBfmPolicy(agent.model, observer, device="cuda")
+dynamics, mass = observer.policy_physics(sensed_state, previous_torque)
+action = policy.act(local_history, global_history, dynamics, mass, z)  # [1, J] on the CPU
+b = policy.backward(observer.state_view(reference_state))             # raw B(s), [1, z_dim]
+```
+
+At batch 1 the networks are bound by kernel launches, not arithmetic: on an RTX 5070 Ti,
+G1's `act (eager)` grew only from 7.9 to 12.1 ms between the small and large encoders.
+`DaGetBfmPolicy` removes most of that overhead:
+
+- All inputs live in one device buffer, filled with one copy from pinned host memory;
+  the action comes back in one copy.
+- The embodiment-only part of Physics Cross Attention is computed once
+  (`build_physics_memory`), not every step.
+- On a GPU, the encoder and actor (and separately the state encoder and B) are recorded
+  once as CUDA Graphs (`torch.cuda.CUDAGraph`) and replayed each step.
+- A graph cannot record a wait for the device, so the encoder runs with
+  `validate_inputs=False` and the mass matrix is checked on the CPU before the copy.
+  `tests/test_deployment.py` checks that the recorded functions make no such call.
+
+Call `policy.refresh()` after loading new weights; using a policy built before the
+change raises a stale-memory error.
+
+What keeps `observation` small on the CPU:
 
 - Forward kinematics and Newton-Euler run one tree level at a time (G1: 10 levels
   instead of 29 joints), and `dynamics_terms` gets g(q) and c(q, qd) from one batched
-  pass that shares the kinematics with M(q). Before, G1 took 16.6 ms here.
+  pass that shares the kinematics with M(q). G1 went from 16.6 to 5.6 ms on one CPU
+  thread.
 - The encoder checks and normalizes the mass matrix once per forward instead of in
-  every layer, so a GPU waits for the device twice per forward instead of 18 times.
+  every layer: 2 device waits per forward instead of 18 in the training path.
 
 ## Open questions for cross-embodiment training
 

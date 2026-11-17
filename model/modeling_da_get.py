@@ -181,6 +181,10 @@ class PhysicsFeatureTokenizer(nn.Module):
         if len(scales) != input_size:
             scales = (0.0,) * input_size
         self.scales = tuple(float(scale) for scale in scales)
+        # Device copies of the scales, made on first use: creating the tensor in every
+        # forward would copy it from the host each call, which a CUDA Graph cannot record.
+        # Not a buffer, because transformers' from_pretrained leaves unsaved buffers empty.
+        self._scale_tensors: dict[tuple[torch.device, torch.dtype], torch.Tensor] = {}
         self.mlp = nn.Sequential(
             nn.Linear(input_size, mlp_size), nn.GELU(), nn.Linear(mlp_size, hidden_size)
         )
@@ -195,7 +199,10 @@ class PhysicsFeatureTokenizer(nn.Module):
         Returns:
             torch.Tensor: ``[batch, joints, hidden_size]`` tokens.
         """
-        scales = torch.tensor(self.scales, dtype=features.dtype, device=features.device)
+        key = (features.device, features.dtype)
+        if key not in self._scale_tensors:
+            self._scale_tensors[key] = torch.tensor(self.scales, dtype=features.dtype, device=features.device)
+        scales = self._scale_tensors[key]
         scaled = torch.where(
             scales > 0, torch.asinh(features / torch.where(scales > 0, scales, 1)), features
         )
@@ -358,15 +365,18 @@ class PhysicsMemory:
     parameter_versions: tuple[int, ...]
 
 
-def normalize_mass_matrix(mass_matrix: torch.Tensor, joint_mask: torch.Tensor, epsilon: float) -> torch.Tensor:
+def normalize_mass_matrix(
+    mass_matrix: torch.Tensor, joint_mask: torch.Tensor, epsilon: float, validate: bool = True
+) -> torch.Tensor:
     """Validate ``M(q)`` and return ``M_ij / sqrt(M_ii M_jj)``, with padded diagonals set to one.
 
-    All checks reduce to one boolean, so a GPU waits for the device once per call.
+    All value checks reduce to one boolean, so a GPU waits for the device once per call.
 
     Args:
         mass_matrix (torch.Tensor): ``[batch, joints, joints]`` joint mass matrix.
         joint_mask (torch.Tensor): Boolean ``[batch, joints]`` valid joints.
         epsilon (float): Stabilizer added to the denominator.
+        validate (bool): Check the values (off: only the shape, with no device wait).
 
     Returns:
         torch.Tensor: Normalized mass matrix of the same shape.
@@ -381,15 +391,16 @@ def normalize_mass_matrix(mass_matrix: torch.Tensor, joint_mask: torch.Tensor, e
     if not mass_matrix.is_floating_point():
         raise ValueError("mass_matrix must be floating, finite, symmetric, and have positive valid diagonal")
     diagonal = mass_matrix.diagonal(dim1=1, dim2=2)
-    transposed = mass_matrix.transpose(1, 2)
-    valid = (
-        torch.isfinite(mass_matrix).all()
-        & ((diagonal > 0) | ~joint_mask).all()
-        # The tolerances of torch.allclose.
-        & ((mass_matrix - transposed).abs() <= 1e-8 + 1e-5 * transposed.abs()).all()
-    )
-    if not valid:
-        raise ValueError("mass_matrix must be floating, finite, symmetric, and have positive valid diagonal")
+    if validate:
+        transposed = mass_matrix.transpose(1, 2)
+        valid = (
+            torch.isfinite(mass_matrix).all()
+            & ((diagonal > 0) | ~joint_mask).all()
+            # The tolerances of torch.allclose.
+            & ((mass_matrix - transposed).abs() <= 1e-8 + 1e-5 * transposed.abs()).all()
+        )
+        if not valid:
+            raise ValueError("mass_matrix must be floating, finite, symmetric, and have positive valid diagonal")
     safe_diagonal = torch.where(joint_mask, diagonal, torch.ones_like(diagonal))
     denominator = torch.sqrt(safe_diagonal.unsqueeze(2) * safe_diagonal.unsqueeze(1))
     return mass_matrix / (denominator + epsilon)
@@ -762,6 +773,7 @@ class DaGetEncoder(nn.Module):
         actuator_features: torch.Tensor | None = None,
         dynamics_features: torch.Tensor | None = None,
         physics_memory: PhysicsMemory | None = None,
+        validate_inputs: bool = True,
     ) -> torch.Tensor:
         """Encode joint features at the current configuration q.
 
@@ -798,6 +810,11 @@ class DaGetEncoder(nn.Module):
             physics_memory (PhysicsMemory | None): Cached embodiment-only physics
                 keys and values from ``build_physics_memory``. Replaces
                 rigid_body_features and actuator_features.
+            validate_inputs (bool): Check input values: masks with a valid
+                token, a well-formed mass matrix, and the memory's mask. Shapes
+                are always checked. Turn it off only for inputs checked before,
+                as ``DaGetBfmPolicy`` does: each value check waits for the
+                device, which a CUDA Graph cannot capture.
 
         Returns:
             torch.Tensor: Joint representations of shape
@@ -830,7 +847,7 @@ class DaGetEncoder(nn.Module):
         if (
             joint_mask.shape != (batch_size, joint_count)
             or joint_mask.dtype != torch.bool
-            or not torch.all(joint_mask.any(dim=1))
+            or (validate_inputs and not torch.all(joint_mask.any(dim=1)))
         ):
             raise ValueError("each batch item must contain at least one valid joint")
         if context_states is not None:
@@ -845,7 +862,7 @@ class DaGetEncoder(nn.Module):
             if context_mask is not None and (
                 context_mask.shape != context_states.shape[:2]
                 or context_mask.dtype != torch.bool
-                or not torch.all(context_mask.any(dim=1))
+                or (validate_inputs and not torch.all(context_mask.any(dim=1)))
             ):
                 raise ValueError("context_mask must allow at least one token per item")
         elif context_mask is not None:
@@ -877,8 +894,8 @@ class DaGetEncoder(nn.Module):
                 raise ValueError(
                     "physics_memory is stale: parameters changed since it was built; rebuild it"
                 )
-            elif physics_memory.joint_mask.shape != joint_mask.shape or not torch.equal(
-                physics_memory.joint_mask, joint_mask
+            elif physics_memory.joint_mask.shape != joint_mask.shape or (
+                validate_inputs and not torch.equal(physics_memory.joint_mask, joint_mask)
             ):
                 raise ValueError("physics_memory was built for a different joint_mask")
             dynamics_tokens = self.physics_tokenizers["dynamics"](dynamics_features)
@@ -887,7 +904,7 @@ class DaGetEncoder(nn.Module):
             raise ValueError("physics inputs given but Physics Cross Attention is disabled")
         if self.config.use_mass_encoding:
             # Once per forward, not per layer: each check waits for the device.
-            mass_matrix = normalize_mass_matrix(mass_matrix, joint_mask, self.config.mass_epsilon)
+            mass_matrix = normalize_mass_matrix(mass_matrix, joint_mask, self.config.mass_epsilon, validate_inputs)
         if self.input_norm is not None:
             input_values = self.input_norm(input_values)
         hidden_states = self.input_projection(input_values)

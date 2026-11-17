@@ -612,6 +612,7 @@ class DaGetBfmModel(nn.Module):
         encoder: DaGetEncoder | None = None,
         adapter: nn.Module | None = None,
         train_encoder: bool = True,
+        validate_inputs: bool = True,
     ) -> torch.Tensor:
         """Encode privileged state tokens with the shared encoder core.
 
@@ -623,6 +624,7 @@ class DaGetBfmModel(nn.Module):
             encoder (DaGetEncoder | None): Target encoder override; defaults to the online encoder.
             adapter (nn.Module | None): Target state-adapter override; defaults to the online adapter.
             train_encoder (bool): Whether this call accumulates encoder parameter gradients.
+            validate_inputs (bool): Passed to ``DaGetEncoder.forward``.
 
         Returns:
             torch.Tensor: Per-joint embeddings ``[batch, joints, embedding_size]``.
@@ -636,7 +638,7 @@ class DaGetBfmModel(nn.Module):
             raise ValueError("state must include input_values and dynamics_features")
         if state["input_values"].ndim != 3 or state["input_values"].shape[-1] != self.config.state_token_size:
             raise ValueError("state input_values must be [batch, joints, state_token_size]")
-        inputs = dict(state)
+        inputs = dict(state, validate_inputs=validate_inputs)
         inputs["input_values"] = projection(inputs["input_values"])
         if source.config.use_mass_encoding:
             diagonal = inputs["dynamics_features"][..., 0].clamp_min(1e-8)

@@ -81,15 +81,15 @@ uv sync --all-extras
 uv run pytest
 ```
 
-The suite has 153 tests (the MuJoCo and HDF5 tests are skipped without the
-`sim` and `validation` extras):
+The suite has 159 tests (the MuJoCo and HDF5 tests are skipped without the
+`sim` and `validation` extras, and the CUDA Graph test without a GPU):
 
 - `test_embodiment.py`: URDF graphs, features, kinematics, mass matrix,
   batching, padding invariance.
 - `test_da_get_encoder.py`, `test_transformer.py`: the encoder and its building
   blocks.
 - `test_physics.py`:
-  - RNEA against closed forms and identities;
+  - RNEA against closed forms and identities, and `dynamics_terms` against the two tiers;
   - transmissions and frozen joints;
   - feature schema and body-frame values;
   - actuator specs, the torque-speed envelope, and motor labels;
@@ -137,6 +137,10 @@ The suite has 153 tests (the MuJoCo and HDF5 tests are skipped without the
   - environment resets reproduce a motion's state tokens, lying starts and fall
     behavior, motion priorities, EMD, and auxiliary rewards;
   - real and synthetic sources sharing a robot, and the training script on two robots.
+- `test_deployment.py`: `DaGetBfmPolicy` gives the training path's actions and B,
+  refreshes after a weight change, checks inputs on the CPU, and records no call that
+  waits for the device or copies from the host (the CUDA Graph replay test runs only
+  with a GPU).
 - `test_isaac_env.py`: the Isaac Lab adapter against a fake of its API: joint and
   body orders, quaternions and frames, contact penalties, randomization, batched writes,
   and stepping several robots. It does not run Isaac Lab.

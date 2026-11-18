@@ -66,9 +66,10 @@ class ModelArguments:
     fk_weight: float = 1.0
     fd_weight: float = 1.0
     id_weight: float = 1.0
+    response_weight: float = field(default=1.0, metadata={"help": "Task R: contact-constrained response to a torque change."})
+    inverse_response_weight: float = field(default=1.0, metadata={"help": "Task R^-1: torque change from its response."})
     motor_weight: float = 1.0
     effect_weight: float = 1.0
-    rbd_weight: float = field(default=0.0, metadata={"help": "Optional task F; 0 disables it."})
     init_from: str | None = field(default=None, metadata={"help": "Pretrained checkpoint to continue from."})
 
 
@@ -149,9 +150,10 @@ def main() -> None:
                 "fk": model_args.fk_weight,
                 "fd": model_args.fd_weight,
                 "id": model_args.id_weight,
+                "response": model_args.response_weight,
+                "inverse_response": model_args.inverse_response_weight,
                 "motor": model_args.motor_weight,
                 "effect": model_args.effect_weight,
-                "rbd": model_args.rbd_weight,
             },
             token_layout=datasets.token_layout(),
         )

@@ -106,7 +106,7 @@ def build_mjcf(
     friction: float = 0.9,
     timestep: float = 0.002,
     body_collision_radius: float | None = None,
-    armature: float = 1e-5,
+    armature: float | None = None,
 ) -> str:
     """Write MJCF for a robot with foot contacts and position actuators.
 
@@ -121,13 +121,16 @@ def build_mjcf(
         timestep (float): Physics step in s.
         body_collision_radius (float | None): Also give every link a floor-colliding
             sphere of this radius at its center of mass, so a fallen robot lies on the floor.
-        armature (float): Rotor inertia added to every joint. URDFs have none, and light links
-            with stiff gains need some to stay numerically stable.
+        armature (float | None): Rotor inertia of every joint; None (the default) takes
+            each joint's value from ``record.graph.armature``, so the simulated robot
+            and the analytic labels have the same inertia. URDFs have none, and light
+            links with stiff gains need some to stay numerically stable.
 
     Returns:
         str: MJCF XML.
     """
     graph = record.graph
+    rotor = graph.joint_armature.numpy() if armature is None else np.full(graph.num_joints, float(armature))
     surface = record.surface_contacts if record.surface_contacts is not None else len(record.contact_links) <= 2
     actuator = actuator_tensors(record.specs)
 
@@ -155,7 +158,7 @@ def build_mjcf(
         lines = [
             f'{indent}<body name="b_{name}" pos="{_vector(transform[:3, 3])}" quat="{_vector(_quaternion(transform[:3, :3]))}">',
             f'{indent}  <joint name="{name}" type="{kind}" axis="{_vector(graph.axes[index].numpy())}"{limits} '
-            f'damping="{float(graph.damping[index]):.6g}" frictionloss="{float(graph.friction[index]):.6g}" armature="{armature:.6g}"/>',
+            f'damping="{float(graph.damping[index]):.6g}" frictionloss="{float(graph.friction[index]):.6g}" armature="{rotor[index]:.6g}"/>',
             f"{indent}  " + _inertial(float(graph.body_mass[index]), graph.body_com[index].numpy(), graph.body_inertia[index].numpy()),
         ]
         lines += [f"{indent}  {geom}" for geom in spheres.get(index, [])]

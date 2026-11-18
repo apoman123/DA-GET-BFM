@@ -4,13 +4,21 @@ from dataclasses import dataclass, field
 
 
 def default_aux_reward_scales() -> dict[str, float]:
-    """Return BFM-Zero's weights (paper Table 4) for the embodiment-independent penalties."""
+    """Return the auxiliary reward weights.
+
+    The first five are BFM-Zero's weights (paper Table 4) for its embodiment-independent
+    penalties. The three torque penalties are ours (``model.rl.actions``); they are
+    normalized by each robot's own limits, and their weights are untuned starting points.
+    """
     return {
         "limits_dof_pos": -10.0,
         "penalty_action_rate": -0.1,
         "penalty_slippage": -2.0,
         "penalty_undesired_contact": -1.0,
         "penalty_feet_ori": -0.4,
+        "penalty_torque_limit": -2.0,
+        "penalty_torque_continuous": -0.5,
+        "penalty_power": -0.5,
     }
 
 

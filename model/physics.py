@@ -3,12 +3,13 @@
 Three feature groups describe each joint ``i`` (see ``model.physics_schema`` for
 symbols, units, and frames):
 
-* Rigid body ``[m_i, vech(I_i), r_i^CoM, a_i^axis, T_i^parent, jointType_i]``,
-  from URDF.
-* Actuator ``[tau^peak, tau^cont, omega^max, P^max, N, K_p, K_d, mode]``, from an
+* Rigid body ``[m_i, vech(I_i), r_i^CoM, a_i^axis, T_i^parent, jointType_i,
+  I_i^rotor]``, from URDF (and the rotor inertia setting).
+* Actuator ``[tau^peak, tau^cont, K_p, K_d, k_f, k_m]``, from an
   ``ActuatorSpec`` per joint (URDF values plus your overrides).
-* Dynamics ``[M_ii(q), c_i(q, qd), g_i(q), tau_hat_f, tau_{t-1}^applied,
-  |g_i| / (tau^cont + eps), known flag]``, computed from the state.
+* Dynamics ``[M_ii(q), c_i(q, qd), g_i(q), tau_hat_f, |g_i| / (tau^cont + eps)]``,
+  computed from the sensed state and the model only. No dynamics feature needs a
+  torque measurement or estimate.
 
 Rigid body and actuator features depend only on the embodiment and are
 computed once per robot. Dynamics features are split into tiers by what they
@@ -231,18 +232,18 @@ def actuator_tensors(
 
 
 def rigid_body_features(graph: EmbodimentGraph) -> torch.Tensor:
-    """Return ``[m, vech(I), r^CoM, a^axis, T^parent, jointType]`` per joint.
+    """Return ``[m, vech(I), r^CoM, a^axis, T^parent, jointType, I^rotor]`` per joint.
 
     The inertia is about the body's center of mass, and it, the center of mass,
     and the axis are expressed in body frame ``B_i``. ``T^parent`` is the
     transform from ``B_p(i)`` to ``B_i`` at ``q_i = 0``: translation in m and the
-    first two rotation columns.
+    first two rotation columns. ``I^rotor`` is ``graph.joint_armature``.
 
     Args:
         graph (EmbodimentGraph): Robot.
 
     Returns:
-        torch.Tensor: Float32 ``[J, 25]``.
+        torch.Tensor: Float32 ``[J, 26]``.
     """
     inertia = graph.body_inertia
     vech = inertia[:, [0, 0, 0, 1, 1, 2], [0, 1, 2, 1, 2, 2]]
@@ -260,6 +261,7 @@ def rigid_body_features(graph: EmbodimentGraph) -> torch.Tensor:
             graph.tree_transforms[:, :3, 3],
             rotation[:, :, :2].transpose(1, 2).reshape(-1, 6),
             joint_type,
+            graph.joint_armature[:, None],
         ),
         dim=1,
     )
@@ -439,46 +441,24 @@ def assemble_dynamics_features(
     coriolis: torch.Tensor,
     gravity: torch.Tensor,
     friction: torch.Tensor,
-    applied_torque_prev: torch.Tensor | None,
     continuous_torque: torch.Tensor,
-    torque_source: float | torch.Tensor = 1.0,
 ) -> torch.Tensor:
-    """Stack dynamics terms into the 7 dynamics features.
+    """Stack dynamics terms into the 5 dynamics features.
 
     Args:
         mass_diagonal (torch.Tensor): ``[..., J]`` M_ii(q).
         coriolis (torch.Tensor): ``[..., J]`` c_i(q, qd).
         gravity (torch.Tensor): ``[..., J]`` g_i(q).
         friction (torch.Tensor): ``[..., J]`` friction estimate.
-        applied_torque_prev (torch.Tensor | None): ``[..., J]`` measured
-            efforts of the previous step, or None when unknown (features are
-            then zero with the known flag off).
         continuous_torque (torch.Tensor): ``[J]`` tau^cont.
-        torque_source (float | torch.Tensor): Flag value when the previous
-            torque is given: 1 for measured, 0.5 for an inverse-dynamics
-            estimate (broadcast over ``[..., J]``).
 
     Returns:
-        torch.Tensor: Float32 ``[..., J, 7]``.
+        torch.Tensor: Float32 ``[..., J, 5]``.
     """
-    known = torch.ones_like(mass_diagonal) * torch.as_tensor(torque_source).to(mass_diagonal)
-    if applied_torque_prev is None:
-        applied_torque_prev = torch.zeros_like(mass_diagonal)
-        known = torch.zeros_like(mass_diagonal)
-    load = gravity.abs() / (continuous_torque.to(gravity) + EPSILON)
-    load = torch.where(continuous_torque.to(gravity) > 0, load, torch.zeros_like(load))
-    features = torch.stack(
-        (
-            mass_diagonal,
-            coriolis,
-            gravity,
-            friction,
-            applied_torque_prev.to(mass_diagonal),
-            load,
-            known,
-        ),
-        dim=-1,
-    )
+    continuous = continuous_torque.to(gravity)
+    load = gravity.abs() / (continuous + EPSILON)
+    load = torch.where(continuous > 0, load, torch.zeros_like(load))
+    features = torch.stack((mass_diagonal, coriolis, gravity, friction, load), dim=-1)
     assert features.shape[-1] == DYNAMICS_FEATURE_SIZE
     return features.to(torch.float32)
 
@@ -488,27 +468,23 @@ def dynamics_features(
     specs: Sequence[ActuatorSpec],
     positions: torch.Tensor,
     velocities: torch.Tensor,
-    applied_torque_prev: torch.Tensor | None = None,
     gravity: torch.Tensor | None = None,
     base_linear_velocity: torch.Tensor | None = None,
     base_angular_velocity: torch.Tensor | None = None,
-    torque_source: float = 1.0,
 ) -> torch.Tensor:
     """Compute all dynamics features at once (no caching).
 
     Args:
         graph (EmbodimentGraph): Robot.
-        specs (Sequence[ActuatorSpec]): Actuator specs, for tau^cont.
+        specs (Sequence[ActuatorSpec]): Actuator specs, for tau^cont and rotor drag.
         positions (torch.Tensor): ``[..., J]`` q_t.
         velocities (torch.Tensor): ``[..., J]`` qd_t.
-        applied_torque_prev (torch.Tensor | None): ``[..., J]`` tau_{t-1}.
         gravity (torch.Tensor | None): Gravity in the base frame.
         base_linear_velocity (torch.Tensor | None): ``[..., 3]`` floating base.
         base_angular_velocity (torch.Tensor | None): ``[..., 3]`` floating base.
-        torque_source (float): 1 if tau_{t-1} is measured, 0.5 if estimated.
 
     Returns:
-        torch.Tensor: Float32 ``[..., J, 7]``.
+        torch.Tensor: Float32 ``[..., J, 5]``.
     """
     positions = positions.to(torch.float64)
     velocities = velocities.to(torch.float64)
@@ -517,15 +493,7 @@ def dynamics_features(
     coriolis, friction = velocity_terms(
         graph, positions, velocities, base_linear_velocity, base_angular_velocity, tensors
     )
-    return assemble_dynamics_features(
-        mass_diagonal,
-        coriolis,
-        gravity_term,
-        friction,
-        applied_torque_prev,
-        tensors["continuous_torque"],
-        torque_source,
-    )
+    return assemble_dynamics_features(mass_diagonal, coriolis, gravity_term, friction, tensors["continuous_torque"])
 
 
 def torque_limit(tensors: Mapping[str, torch.Tensor], velocities: torch.Tensor) -> torch.Tensor:
@@ -546,6 +514,63 @@ def torque_limit(tensors: Mapping[str, torch.Tensor], velocities: torch.Tensor) 
     power = tensors["max_power"].to(velocities)
     limit = torch.minimum(peak, power / speed.clamp_min(EPSILON))
     return torch.where(speed <= tensors["max_velocity"].to(velocities), limit, torch.zeros_like(limit))
+
+
+def torque_limit_excess(tensors: Mapping[str, torch.Tensor], torque: torch.Tensor, velocities: torch.Tensor) -> torch.Tensor:
+    """Return how far efforts exceed the torque-speed envelope, over peak torque.
+
+    ``relu(|tau| - tau^max(qd)) / tau^peak`` per joint, zero for passive joints. It is
+    zero inside the envelope and dimensionless, so it can be summed over joints of
+    robots of any size.
+
+    Args:
+        tensors (Mapping[str, torch.Tensor]): Output of ``actuator_tensors``.
+        torque (torch.Tensor): ``[..., J]`` requested or applied efforts.
+        velocities (torch.Tensor): ``[..., J]`` joint velocities.
+
+    Returns:
+        torch.Tensor: ``[..., J]`` excess, nonnegative.
+    """
+    actuated = tensors["mode"].to(torque.device) != ACTUATOR_MODES.index("passive")
+    excess = (torque.abs() - torque_limit(tensors, velocities.to(torque))).clamp_min(0)
+    excess = excess / (tensors["peak_torque"].to(torque) + EPSILON)
+    return torch.where(actuated, excess, torch.zeros_like(excess))
+
+
+def envelope_targets(
+    tensors: Mapping[str, torch.Tensor],
+    targets: torch.Tensor,
+    positions: torch.Tensor,
+    velocities: torch.Tensor,
+) -> torch.Tensor:
+    """Move PD position targets so the effort they request stays inside the envelope.
+
+    For a position-mode joint the drive requests ``K_p (a - q) - K_d qd``. Where that
+    exceeds ``tau^max(qd)``, the target is moved to the one whose request equals the
+    limit, ``a' = q + (clip(tau) + K_d qd) / K_p``. Other joints are unchanged. The same
+    function runs in the training simulators and on the robot, so the policy is trained
+    on the targets it will send.
+
+    Args:
+        tensors (Mapping[str, torch.Tensor]): Output of ``actuator_tensors``.
+        targets (torch.Tensor): ``[..., J]`` position targets.
+        positions (torch.Tensor): ``[..., J]`` q at which the targets are sent.
+        velocities (torch.Tensor): ``[..., J]`` qd at that time.
+
+    Returns:
+        torch.Tensor: ``[..., J]`` targets whose request is within ``tau^max(qd)``.
+    """
+    targets = targets.to(torch.float64)
+    positions = positions.to(targets)
+    velocities = velocities.to(targets)
+    kp = tensors["kp"].to(targets)
+    kd = tensors["kd"].to(targets)
+    position_mode = (tensors["mode"].to(targets.device) == ACTUATOR_MODES.index("position")) & (kp > 0)
+    request = kp * (targets - positions) - kd * velocities
+    limit = torque_limit(tensors, velocities)
+    clipped = torch.maximum(torch.minimum(request, limit), -limit)
+    moved = positions + (clipped + kd * velocities) / kp.clamp_min(EPSILON)
+    return torch.where(position_mode & (clipped != request), moved, targets)
 
 
 def requested_torque(
@@ -672,15 +697,16 @@ class PhysicsFeatureCache:
       refresh;
     * velocity tier ``c(q, qd)``, ``tau_f(qd)``: every ``velocity_interval``
       steps, when ``qd`` changes by more than ``velocity_tolerance``, or when
-      the configuration tier refreshes;
-    * measurement tier ``tau_{t-1}``: every step.
+      the configuration tier refreshes.
+
+    No tier reads a torque: every feature comes from the sensed state and the model.
 
     Set an interval to 1 to recompute every step. Call ``reset(rows)`` when an
     environment resets.
 
     Attributes:
         graphs (tuple[EmbodimentGraph, ...]): One robot per row.
-        rigid_body_features (torch.Tensor): Float32 ``[B, J, 25]``, zero padded.
+        rigid_body_features (torch.Tensor): Float32 ``[B, J, 26]``, zero padded.
         actuator_features (torch.Tensor): Float32 ``[B, J, 6]``, zero padded.
         joint_mask (torch.Tensor): Bool ``[B, J]``.
         refresh_counts (dict[str, int]): Number of recomputations per tier, for
@@ -761,29 +787,23 @@ class PhysicsFeatureCache:
         self,
         positions: torch.Tensor,
         velocities: torch.Tensor,
-        applied_torque_prev: torch.Tensor | None = None,
         gravity: torch.Tensor | None = None,
         base_linear_velocity: torch.Tensor | None = None,
         base_angular_velocity: torch.Tensor | None = None,
-        torque_source: float = 1.0,
     ) -> torch.Tensor:
         """Return dynamics features for the current step.
 
         Args:
             positions (torch.Tensor): Padded ``[B, J]`` q_t.
             velocities (torch.Tensor): Padded ``[B, J]`` qd_t.
-            applied_torque_prev (torch.Tensor | None): Padded ``[B, J]`` measured
-                tau_{t-1}, or None if not measured.
             gravity (torch.Tensor | None): ``[3]`` or ``[B, 3]`` gravity in each
                 base frame (projected gravity times 9.81 for a floating base);
                 defaults to -z.
             base_linear_velocity (torch.Tensor | None): ``[B, 3]`` base frame.
             base_angular_velocity (torch.Tensor | None): ``[B, 3]`` base frame.
-            torque_source (float): 1 if applied_torque_prev is measured, 0.5
-                if it is an estimate.
 
         Returns:
-            torch.Tensor: Float32 ``[B, J, 7]``, zero on padding.
+            torch.Tensor: Float32 ``[B, J, 5]``, zero on padding.
 
         Raises:
             ValueError: Shapes do not match the cache.
@@ -805,17 +825,12 @@ class PhysicsFeatureCache:
             ]
             configuration, moved = self._configuration_tier(row, graph, q, row_gravity)
             velocity = self._velocity_tier(row, graph, q, qd, moved, twist)
-            torque = None
-            if applied_torque_prev is not None:
-                torque = applied_torque_prev[row, :count].detach().to("cpu", torch.float64)
             output[row, :count] = assemble_dynamics_features(
                 configuration.values[0],
                 velocity.values[0],
                 configuration.values[1],
                 velocity.values[1],
-                torque,
                 self._continuous[row],
-                torque_source,
             )
         return output.to(positions.device)
 

@@ -2,6 +2,7 @@
 
 from dataclasses import dataclass
 
+from model.physics_schema import ACTUATOR_FEATURE_SIZE, DYNAMICS_FEATURE_SIZE, RIGID_BODY_FEATURE_SIZE
 
 ENCODER_SIZES: dict[str, dict[str, int]] = {
     "tiny": {"hidden_size": 64, "num_hidden_layers": 2, "num_attention_heads": 2, "intermediate_size": 256},
@@ -63,9 +64,9 @@ class DaGetConfig:
     use_input_layer_norm: bool = True
     use_physics_cross_attention: bool = False
     physics_cross_attention_layers: tuple[int, ...] | None = None
-    rigid_body_feature_size: int = 25
-    actuator_feature_size: int = 6
-    dynamics_feature_size: int = 7
+    rigid_body_feature_size: int = RIGID_BODY_FEATURE_SIZE
+    actuator_feature_size: int = ACTUATOR_FEATURE_SIZE
+    dynamics_feature_size: int = DYNAMICS_FEATURE_SIZE
     physics_tokenizer_hidden_size: int | None = None
 
     @classmethod
@@ -164,6 +165,13 @@ class DaGetConfig:
             and self.physics_tokenizer_hidden_size <= 0
         ):
             raise ValueError("physics feature and tokenizer sizes must be positive")
+        schema = (RIGID_BODY_FEATURE_SIZE, ACTUATOR_FEATURE_SIZE, DYNAMICS_FEATURE_SIZE)
+        if self.use_physics_cross_attention and physics_sizes != schema:
+            raise ValueError(
+                f"physics feature sizes {physics_sizes} differ from the schema {schema} "
+                "(rigid body, actuator, dynamics). Checkpoints from before the torque-free "
+                "schema (25, 6, 7) cannot be loaded; pretrain again."
+            )
 
     @property
     def physics_layers(self) -> tuple[int, ...]:

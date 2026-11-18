@@ -156,12 +156,13 @@ With `use_physics_cross_attention=True`, every encoder layer (or those in
 `physics_cross_attention_layers`) adds Physics Cross Attention after
 self-attention. Observation tokens attend to `3J` physics tokens:
 
-* rigid body (25): `m`, `vech(I)` about the CoM in body frame `B_i`, `r^CoM`,
-  `a^axis`, `T^parent`, joint type;
+* rigid body (26): `m`, `vech(I)` about the CoM in body frame `B_i`, `r^CoM`,
+  `a^axis`, `T^parent`, joint type, reflected rotor inertia (`armature`);
 * actuator (6): `τ^peak`, `τ^cont`, `K_p`, `K_d`, and propeller `k_f` and `k_m`;
-* dynamics (7): `M_ii(q)`, `c(q, qd, base twist)`, `g(q)` with gravity in the
-  base frame, friction plus rotor drag, `τ_{t-1}`, `|g| / τ^cont`, and the
-  source of `τ_{t-1}` (1 measured, 0.5 estimated, 0 unknown).
+* dynamics (5): `M_ii(q)` (with rotor inertia), `c(q, qd, base twist)`, `g(q)`
+  with gravity in the base frame, friction plus rotor drag, and `|g| / τ^cont`.
+  No column is a torque, so a robot needs no torque sensor
+  (see `docs/dynamics.md`, "Why training uses no estimated torque").
 
 Each group has its own asinh-scaled MLP tokenizer
 (`PhysicsFeatureTokenizer`). The attention bias is a per-head graph distance
@@ -177,11 +178,20 @@ The modules:
   and update tiers.
 * `model/physics.py`: feature extraction, plus `PhysicsFeatureCache` for tiered
   recomputation at control time.
-* `model/dynamics.py`: RNEA for fixed and floating bases, the floating-base
-  mass matrix and forward dynamics, contact-force distribution, rotor thrust,
-  and `estimate_joint_efforts` for datasets without torque sensors.
-* `model/pretraining.py`: the auxiliary heads A to F.
-* `model/training/`: the data pipeline and Trainer.
+* `model/dynamics.py`: RNEA for fixed and floating bases (with rotor inertia),
+  the floating-base mass matrix and forward dynamics, contact maps and the
+  contact Jacobian, the contact-constrained response `constrained_response`,
+  contact-force distribution, rotor thrust, and `estimate_joint_efforts`
+  (analysis only; training never uses estimated torques).
+* `model/pretraining.py`: the auxiliary heads A, B, C, R, R⁻¹, D and E.
+* `model/training/`: the data pipeline and Trainer. `episodes.py` labels each
+  variant with its torque source (`none`, `measured`, `exact`) and stores the
+  response operator `G(q)`; `dataset.py` draws the response tasks' torque
+  changes per sample.
+* `model/rl/actions.py`: `ActionMap` (actions to PD targets inside the torque
+  envelope, shared by simulators and robot) and `TorqueMonitor` (torque penalties).
+* `model/rl/physics_replay.py`: physics-loss episodes from RL rollouts, labelled
+  without torque.
 
 See the repository README for the full description, the training commands,
 and the recommended datasets.

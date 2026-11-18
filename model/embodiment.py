@@ -26,8 +26,9 @@ child-body inertia, which matter once robots no longer share joint axes.
 
 from __future__ import annotations
 
+import fnmatch
 import math
-from dataclasses import dataclass, field
+from dataclasses import dataclass, field, replace
 from pathlib import Path
 from typing import Literal, Mapping, Sequence
 
@@ -265,6 +266,42 @@ def _virtual_tokens(joint: UrdfJoint) -> list[tuple[str, str, torch.Tensor]]:
     ]
 
 
+def resolve_armature(
+    armature: float | Mapping[str, float] | torch.Tensor | None, joint_names: Sequence[str]
+) -> torch.Tensor | None:
+    """Turn an armature setting into a float64 ``[J]`` tensor (None for zero).
+
+    Args:
+        armature (float | Mapping[str, float] | torch.Tensor | None): One value,
+            ``{joint-name glob: value}`` (first match wins), a ``[J]`` tensor, or None.
+        joint_names (Sequence[str]): Token joint names.
+
+    Returns:
+        torch.Tensor | None: Per-joint values, or None when every value is zero.
+
+    Raises:
+        ValueError: A value is negative or nonfinite, or a tensor has the wrong shape.
+    """
+    if armature is None:
+        return None
+    if isinstance(armature, torch.Tensor):
+        values = armature.to(torch.float64).clone()
+        if values.shape != (len(joint_names),):
+            raise ValueError(f"armature must have shape ({len(joint_names)},), got {tuple(values.shape)}")
+    elif isinstance(armature, Mapping):
+        values = torch.zeros(len(joint_names), dtype=torch.float64)
+        for index, name in enumerate(joint_names):
+            for pattern, value in armature.items():
+                if fnmatch.fnmatchcase(name, pattern):
+                    values[index] = float(value)
+                    break
+    else:
+        values = torch.full((len(joint_names),), float(armature), dtype=torch.float64)
+    if not bool(torch.isfinite(values).all()) or bool((values < 0).any()):
+        raise ValueError("armature must be finite and nonnegative")
+    return values if bool((values > 0).any()) else None
+
+
 @dataclass(frozen=True)
 class EmbodimentGraph:
     """Hold one robot's per-DoF embodiment graph, features, and kinematics.
@@ -325,6 +362,11 @@ class EmbodimentGraph:
             link, or -1 for the root body.
         link_transforms (torch.Tensor): Float64 ``[L, 4, 4]`` link frame in the
             carrying body's frame.
+        armature (torch.Tensor | None): Float64 ``[J]`` reflected rotor inertia of
+            each joint's drive, in kg m^2 (revolute) or kg (prismatic). It adds
+            ``armature_j`` to ``M_jj`` and ``armature_j qdd_j`` to the joint effort,
+            the joint-space rotor model MuJoCo and Isaac Lab use. URDF has no such
+            value; None means zero (see ``joint_armature``).
     """
 
     name: str
@@ -358,6 +400,32 @@ class EmbodimentGraph:
     link_names: tuple[str, ...] = field(repr=False, default=())
     link_bodies: torch.Tensor = field(repr=False, default=None)
     link_transforms: torch.Tensor = field(repr=False, default=None)
+    armature: torch.Tensor | None = field(repr=False, default=None)
+
+    @property
+    def joint_armature(self) -> torch.Tensor:
+        """Return the float64 ``[J]`` reflected rotor inertia (zero when unset)."""
+        if self.armature is None:
+            return torch.zeros(self.num_joints, dtype=torch.float64)
+        return self.armature
+
+    def with_armature(self, armature: float | Mapping[str, float] | torch.Tensor | None) -> EmbodimentGraph:
+        """Return a copy with a new reflected rotor inertia per joint.
+
+        Args:
+            armature (float | Mapping[str, float] | torch.Tensor | None): One value
+                for every joint, ``{joint-name glob: value}`` (the first matching
+                pattern wins, unmatched joints get zero), a ``[J]`` tensor, or None
+                for zero.
+
+        Returns:
+            EmbodimentGraph: The same robot with ``armature`` set.
+
+        Raises:
+            ValueError: A value is negative or nonfinite, or the tensor has the
+                wrong shape.
+        """
+        return replace(self, armature=resolve_armature(armature, self.joint_names))
 
     @property
     def num_joints(self) -> int:
@@ -388,6 +456,7 @@ class EmbodimentGraph:
         sibling_edges: bool = True,
         frozen_joints: Mapping[str, float] | None = None,
         floating_base: bool | None = None,
+        armature: float | Mapping[str, float] | None = None,
     ) -> EmbodimentGraph:
         """Build an embodiment graph with one token per URDF degree of freedom.
 
@@ -414,6 +483,9 @@ class EmbodimentGraph:
                 skipped (the usual ``world -> floating -> pelvis`` layout).
                 Many legged URDFs have no floating joint and start at the trunk;
                 pass True for them.
+            armature (float | Mapping[str, float] | None): Reflected rotor
+                inertia of each joint's drive (see the attribute and
+                ``with_armature``); None means zero.
 
         Returns:
             EmbodimentGraph: The graph, features, and kinematic data.
@@ -547,6 +619,7 @@ class EmbodimentGraph:
             link_names=tuple(links),
             link_bodies=torch.tensor([body for body, _ in links.values()], dtype=torch.long),
             link_transforms=torch.stack([transform for _, transform in links.values()]),
+            armature=resolve_armature(armature, tuple(token.name for token in tokens)),
         )
 
     def normalize_joint_positions(self, positions: torch.Tensor) -> torch.Tensor:
@@ -653,7 +726,8 @@ class EmbodimentGraph:
                 caller already has it.
 
         Returns:
-            torch.Tensor: Symmetric positive semidefinite ``[..., J, J]``.
+            torch.Tensor: Symmetric positive semidefinite ``[..., J, J]``,
+                including the rotor inertia ``armature`` on the diagonal.
 
         Raises:
             ValueError: positions does not end with dimension J.
@@ -691,6 +765,8 @@ class EmbodimentGraph:
         flat_angular = angular.transpose(-3, -2).reshape(*angular.shape[:-3], joints, -1)
         rotational = flat_angular @ spun.reshape(*angular.shape[:-3], joints, -1).transpose(-1, -2)
         matrix = translational + rotational
+        if self.armature is not None:
+            matrix = matrix + torch.diag_embed(self.armature.to(dtype=dtype, device=device).expand(matrix.shape[:-1]))
         return 0.5 * (matrix + matrix.transpose(-1, -2))
 
     def _depth_order(self) -> list[int]:

@@ -130,7 +130,8 @@ def recursive_newton_euler(
 ) -> RneaResult:
     """Run the recursive Newton-Euler algorithm on the tree, one depth level at a time.
 
-    Friction is not included (see ``friction_efforts``).
+    Friction is not included (see ``friction_efforts``). The rotor inertia
+    ``graph.armature`` adds ``armature_j qdd_j`` to each joint effort.
 
     Args:
         graph (EmbodimentGraph): Robot.
@@ -247,6 +248,9 @@ def recursive_newton_euler(
             force = force.index_add(joint_dim, parents, child_force)
             moment = moment.index_add(joint_dim, parents, child_moment + cross(lever, child_force, dim=-1))
     efforts = torch.where(prismatic[:, 0], (axes * force).sum(-1), (axes * moment).sum(-1))
+    if graph.armature is not None:
+        # Rotor inertia reflected through the gearbox, in joint space.
+        efforts = efforts + graph.armature.to(dtype=dtype, device=device) * accelerations
     base_wrench = torch.cat((base_force, base_moment), dim=-1)
     if base_external_wrench is not None:
         base_wrench = base_wrench - base_external_wrench.to(positions)
@@ -671,6 +675,101 @@ def determinate_torque_projector(
     ambiguous = (u * keep[..., None, :]) @ u.transpose(-1, -2)
     eye = torch.eye(graph.num_joints, dtype=positions.dtype, device=positions.device)
     return eye - ambiguous, keep.sum(-1)
+
+
+def contact_jacobian(
+    graph: EmbodimentGraph,
+    positions: torch.Tensor,
+    contact_links: Sequence[str],
+    active: torch.Tensor,
+    surface: bool,
+) -> torch.Tensor:
+    """Jacobian of the contact constraints over ``nu = (v_base, omega_base, qd)``.
+
+    Each active point contact contributes the three rows of its point velocity, and a
+    surface contact also the three rows of its body's angular velocity, all in the base
+    frame. It is the transpose of ``[A; -B]`` from ``contact_maps``: a contact wrench
+    ``f`` enters the equations of motion as ``J^T f``. Inactive contacts give zero rows.
+
+    Args:
+        graph (EmbodimentGraph): Floating-base robot.
+        positions (torch.Tensor): ``[..., J]`` q.
+        contact_links (Sequence[str]): Contact links.
+        active (torch.Tensor): Bool ``[..., C]`` contact state.
+        surface (bool): Contacts also constrain rotation (flat feet).
+
+    Returns:
+        torch.Tensor: ``[..., n, 6 + J]`` with ``n`` = 3 (point) or 6 (surface) per contact.
+    """
+    matrix_a, matrix_b = contact_maps(graph, positions, contact_links, active, surface)
+    return torch.cat((matrix_a, -matrix_b), dim=-2).transpose(-1, -2)
+
+
+def constrained_response(
+    graph: EmbodimentGraph,
+    positions: torch.Tensor,
+    contact_links: Sequence[str] = (),
+    active: torch.Tensor | None = None,
+    surface: bool = False,
+    damping: float = 1e-9,
+) -> torch.Tensor:
+    """Return the linear map from a joint-torque change to the acceleration change.
+
+    With the equations of motion ``M(q) nu_dot + h(q, nu) = S^T tau + J^T lambda`` and
+    contacts that hold (``J nu_dot + J_dot nu = 0``), a torque change ``delta_tau`` at the
+    same state changes the accelerations by
+
+        delta_nu_dot = [M^-1 - M^-1 J^T (J M^-1 J^T)^-1 J M^-1] S^T delta_tau = G delta_tau
+
+    (Featherstone, *Rigid Body Dynamics Algorithms*, Springer 2008, on constrained
+    dynamics). ``G`` depends only on the configuration, the inertia (with rotor
+    inertia) and which contacts hold. It needs neither the applied torque, nor the
+    velocity terms ``h``, nor the contact forces, so it can be computed exactly at any
+    recorded state, including states of datasets without torque sensors. Torque
+    changes that only push the feet against each other (internal forces) give no
+    acceleration change; ``determinate_torque_projector`` removes exactly those.
+
+    The contacts are assumed to hold (no slip, no lift-off) under the change, and
+    friction and damping do not depend on torque, so they drop out. A fixed base gives
+    ``M^-1`` with zero base rows; a floating base without contacts the free-floating
+    inverse inertia.
+
+    Args:
+        graph (EmbodimentGraph): Robot.
+        positions (torch.Tensor): ``[..., J]`` q.
+        contact_links (Sequence[str]): Contact links of a floating base.
+        active (torch.Tensor | None): Bool ``[..., C]`` contact state; None means no
+            contact.
+        surface (bool): Contacts also constrain rotation (flat feet).
+        damping (float): Relative regularization of ``J M^-1 J^T``, for inactive
+            contacts and redundant constraints.
+
+    Returns:
+        torch.Tensor: ``[..., 6 + J, J]``: rows are the base linear and angular
+            acceleration change (base frame, zero for a fixed base) and ``delta_qdd``.
+    """
+    joints = graph.num_joints
+    dtype, device = positions.dtype, positions.device
+    batch = positions.shape[:-1]
+    if not graph.floating_base:
+        mass = graph.mass_matrix(positions)
+        eye = torch.eye(joints, dtype=dtype, device=device).expand(*batch, joints, joints)
+        joint_response = torch.linalg.solve(mass, eye)
+        return torch.cat((positions.new_zeros((*batch, 6, joints)), joint_response), dim=-2)
+    full = floating_mass_matrix(graph, positions)
+    selection = torch.zeros((6 + joints, joints), dtype=dtype, device=device)
+    selection[6:] = torch.eye(joints, dtype=dtype, device=device)
+    response = torch.linalg.solve(full, selection.expand(*batch, 6 + joints, joints))
+    if contact_links and active is not None and bool(active.any()):
+        jacobian = contact_jacobian(graph, positions, contact_links, active.to(torch.bool), surface)
+        weighted = torch.linalg.solve(full, jacobian.transpose(-1, -2))
+        operational = jacobian @ weighted
+        count = operational.shape[-1]
+        scale = operational.diagonal(dim1=-2, dim2=-1).sum(-1) / count
+        eye = torch.eye(count, dtype=dtype, device=device)
+        operational = operational + (damping * scale.clamp_min(1e-12))[..., None, None] * eye
+        response = response - weighted @ torch.linalg.solve(operational, jacobian @ response)
+    return response
 
 
 @dataclass(frozen=True)

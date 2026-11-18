@@ -24,8 +24,11 @@ from model.physics import (
     actuator_features,
     actuator_specs,
     dynamics_features,
+    envelope_targets,
     rigid_body_features,
+    torque_limit,
 )
+from model.dynamics import constrained_response
 from model.tokenization_da_get import DaGetTokenizer
 from model.urdf import UrdfRobot, parse_urdf
 
@@ -50,8 +53,11 @@ __all__ = [
     "actuator_features",
     "actuator_specs",
     "collate_embodiments",
+    "constrained_response",
     "dynamics_features",
+    "envelope_targets",
     "parse_urdf",
     "rigid_body_features",
+    "torque_limit",
     "TruncatedNormal",
 ]

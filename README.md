@@ -36,11 +36,13 @@ URDF + dynamics ─────────────────► DaGetEnco
 | Part | State |
 |---|---|
 | Encoder for fixed-base, floating-base, and multirotor robots | Done and tested |
-| Rigid-body dynamics and torque estimation | Done; checked against real Go1 and ANYmal D data |
-| Physics pretraining (six tasks, Hugging Face `Trainer`) | Done; short training runs only |
+| Rigid-body dynamics with rotor inertia, contact-constrained torque response | Done; response checked against MuJoCo (3% with stiff contacts) |
+| Torque-free physics supervision: no estimated torque enters training or inference | Done and tested ([why](docs/dynamics.md#why-training-uses-no-estimated-torque)) |
+| Physics pretraining (seven tasks, Hugging Face `Trainer`) | Done; short training runs only |
 | Training data: synthetic, MuJoCo ground contact, Hub datasets, converters | Done |
 | BFM networks: backward map, discriminator, actor, forward map, critics | Done and unit tested |
 | Online off-policy FB-CPR training across robots | Logic done and tested on MuJoCo; **only short runs, so no policy is trained yet** |
+| Actuator limits in RL: torque-envelope target clipping (same code on the robot), three torque penalties, metrics | Done and tested on MuJoCo ([details](docs/bfm.md#actuator-torque-limits)) |
 | 50 Hz deployment (`DaGetBfmPolicy`, CUDA Graphs) | Done; on an RTX 5070 Ti a G1 step takes at most 6.3 ms, 12.6 ms with live tracking, for every encoder size (budget 20 ms; robot communication not included) ([details](docs/bfm.md#inference-latency-at-50-hz)) |
 | Isaac Lab simulation (self-collision, getting up, prioritized motions) | **Written against Isaac Lab 3 and tested with a fake only; never run in Isaac Lab, which needs a GPU** |
 | **Prompting one robot with another's motion** | **B and D are shared, but nothing aligns behaviors across robots yet** ([details](docs/bfm.md#sharing-z-across-robots)) |
@@ -51,6 +53,8 @@ URDF + dynamics ─────────────────► DaGetEnco
 |---|---|---|
 | Per-joint tokens, graph attention bias, `da_get_zero` preset | GET-Zero | Floating bases and multirotors |
 | Mass-matrix attention bias, Physics Cross Attention, physics pretraining | This repo | |
+| Contact-constrained response task (labels `G(q) δτ` without any torque) | This repo, from constrained rigid-body dynamics (Featherstone 2008) | |
+| Torque-envelope target clipping and torque penalties | This repo | Added on top of BFM-Zero's auxiliary rewards |
 | Backward map and discriminator heads, truncated-normal policy, latent inference | BFM-Zero / FB-CPR | One shared DA-GET encoder with a state-token adapter; padding mask |
 | Actor and forward map interfaces | BFM-Zero / FB-CPR | Rebuilt to read joint embeddings and cross-attend to z; one action per joint |
 | Training losses, z mixture, rollout logic, fall starts, motion priorities, hyperparameters | BFM-Zero / FB-CPR | Per-robot worlds, buffers, and prompts; encoder tuned with physics losses |
@@ -90,15 +94,24 @@ without it:
 
 The encoder receives three physics feature groups with one row per joint, in
 the same order as `graph.joint_names`. `rigid_body_features` has shape
-`[B, J, 25]`, `actuator_features` has `[B, J, 6]`, and
-`dynamics_features` has `[B, J, 7]`; `B` is the batch size and `J` is the
+`[B, J, 26]`, `actuator_features` has `[B, J, 6]`, and
+`dynamics_features` has `[B, J, 5]`; `B` is the batch size and `J` is the
 padded joint count. Padded rows are zero and excluded by `joint_mask`. The
 column names, units, and normalization scales are defined in
 [`model/physics_schema.py`](model/physics_schema.py). Joint-space values use
 SI units: revolute joints use rad, rad/s, and N m; prismatic joints use m,
 m/s, and N.
 
-### Rigid-body features: 25 values per joint
+**No feature is a torque.** Every value comes from the robot model (URDF,
+actuator data) and the sensed state (joint encoders, IMU). A robot, a simulator,
+and a recorded dataset therefore produce the same features, and nothing needs a
+torque sensor or a torque estimate. Earlier versions also fed the previous joint
+torque (`[B, J, 7]` dynamics features, `[B, J, 25]` rigid-body features); see
+[why that was removed](docs/dynamics.md#why-training-uses-no-estimated-torque).
+Checkpoints of that schema are rejected with a clear error and must be
+pretrained again.
+
+### Rigid-body features: 26 values per joint
 
 These describe the link driven by each joint. `EmbodimentGraph.from_urdf`
 reads the URDF's joint origins, axes, and link `<inertial>` elements, merges
@@ -116,10 +129,13 @@ packs the following values once per robot:
 | `parent_translation_x/y/z` | 3 | Translation from `B_p(i)` to `B_i` at joint position zero, in m. |
 | `parent_rotation_0` … `parent_rotation_5` | 6 | First two columns of that zero-position rotation matrix, flattened column first. |
 | `type_revolute`, `type_continuous`, `type_prismatic` | 3 | One-hot joint type from the URDF. |
+| `armature` | 1 | Reflected rotor inertia `I_i^rotor` of the joint's drive (kg m², or kg for prismatic joints), `EmbodimentGraph.armature`. URDF has none: set it with the source key `armature` (one value or `{joint glob: value}`), `from_urdf(armature=...)` or `graph.with_armature(...)`. It adds `I_i^rotor` to `M_ii` and `I_i^rotor q̈_i` to the joint effort, like MuJoCo's and Isaac Lab's `armature`. |
 
-These values change only when the robot geometry or inertial parameters change.
-A URDF needs valid inertial data for dynamics calculations; measured masses and
-inertias are preferable to placeholders.
+These values change only when the robot geometry, inertial parameters or rotor
+inertia change. A URDF needs valid inertial data for dynamics calculations;
+measured masses and inertias are preferable to placeholders. The rotor inertia
+matters most on light, highly geared joints, where it can exceed the link's own
+inertia (Wensing et al., IEEE T-RO 2017).
 
 ### Actuator features: 6 values per joint
 
@@ -139,40 +155,32 @@ velocity limits on an actuated joint require an override or
 | `kp`, `kd` | 2 | Position and velocity controller gains from the actual controller, `ActuatorDefaults`, or an override. |
 | `thrust_coefficient`, `torque_coefficient` | 2 | Propeller coefficients `k_f` and `k_m` from rotor specifications: thrust is `k_f ω²` along the axis, and drag magnitude is `k_m ω²`. Zero for ordinary joints. |
 
-This changes the physics-token input width from 14 to 6. Encoder checkpoints
-trained with the old width cannot be loaded into the new architecture without
-converting those tokenizer weights or retraining the encoder.
-
 Supply real motor/controller data when available, for example
 `actuator_specs(graph, overrides={"*_knee_joint": {"continuous_torque": 23.7,
 "kp": 40.0, "kd": 1.0, "mode": "position"}})`. Dataset configs also accept
 `actuator_overrides` by joint name or glob pattern. These features are static
 until actuator parameters or the control mode change.
 
-### Dynamics features: 7 values per joint and time step
+### Dynamics features: 5 values per joint and time step
 
 These use the current joint position `q_t`, velocity `qd_t`, gravity in the
-base frame, and (when available) the previous applied joint effort. The
-functions in [`model/dynamics.py`](model/dynamics.py) compute the robot's
-mass matrix and inverse-dynamics terms; [`dynamics_features`](model/physics.py)
-assembles them in this order:
+base frame, and the base twist. The functions in
+[`model/dynamics.py`](model/dynamics.py) compute the robot's mass matrix and
+inverse-dynamics terms; [`dynamics_features`](model/physics.py) assembles them
+in this order:
 
 | Column | Calculation | Inputs and update trigger |
 |---|---|---|
-| `mass_diagonal` | `M_ii(q_t)`, diagonal of the joint-space mass matrix. | Joint positions or inertial parameters change. |
+| `mass_diagonal` | `M_ii(q_t)`, diagonal of the joint-space mass matrix, including the rotor inertia. | Joint positions, inertial parameters or rotor inertia change. |
 | `coriolis` | `c_i(q_t, qd_t, base twist)`, Coriolis and centrifugal effort. | Joint positions/velocities or floating-base velocity change. |
 | `gravity` | `g_i(q_t)`, gravity effort from inverse dynamics. | Joint positions or gravity direction in the base frame change. |
 | `friction` | Joint viscous/Coulomb estimate `d_i qd_i + μ_i tanh(qd_i / 0.01)`, plus `k_m ω_i\|ω_i\|` for thrust joints. | Joint velocity changes; coefficients come from the robot model. |
-| `applied_torque_prev` | Measured effort `τ_{i,t−1}`; zero if unavailable. | Every control step. |
 | `gravity_load` | `\|g_i\| / (τ_i^cont + 10⁻⁶)`; zero for passive joints. | Gravity effort or continuous effort limit changes. |
-| `applied_torque_known` | `1` for measured previous effort, `0.5` for an inverse-dynamics estimate, `0` when unavailable. | Every control step or when the effort source changes. |
 
 For a floating base, pass IMU projected gravity multiplied by `9.81 m/s²`
-and base linear/angular velocity in the base frame. If previous effort is
-missing, pass `None`; the value and source flag both become zero. A motion
-dataset without torque sensors can use
-[`estimate_joint_efforts`](model/dynamics.py), but its contact-dependent
-estimate is approximate; see [torque estimation](docs/dynamics.md#estimating-joint-torques-without-torque-sensors).
+and base linear/angular velocity in the base frame (the policy does not see the
+base linear velocity unless `observe_base_linear_velocity` is set, as in
+BFM-Zero).
 
 ```python
 import torch
@@ -184,18 +192,17 @@ from model.physics import (
 )
 
 features = JointFeatureConfig.da_get_zero()
-graph = EmbodimentGraph.from_urdf("assets/urdf/go1.urdf", features, floating_base=True)
+graph = EmbodimentGraph.from_urdf("assets/urdf/go1.urdf", features, floating_base=True, armature=0.01)
 specs = actuator_specs(graph)
-body = rigid_body_features(graph)         # [J, 25], computed once
+body = rigid_body_features(graph)         # [J, 26], computed once
 motor = actuator_features(specs)          # [J, 6], computed once
 
-# Replace these example values with joint encoders, effort sensors, and IMU data.
+# Replace these example values with joint encoders and IMU data. No torque sensor is needed.
 q_current = torch.zeros(1, graph.num_joints)
 qd_current = torch.zeros_like(q_current)
 gravity_base = torch.tensor([[0.0, 0.0, -9.81]])
-dynamic = dynamics_features(             # [N, J, 7], recompute as the state changes
-    graph, specs, q_current, qd_current,
-    applied_torque_prev=None, gravity=gravity_base,
+dynamic = dynamics_features(             # [N, J, 5], recompute as the state changes
+    graph, specs, q_current, qd_current, gravity=gravity_base,
 )
 
 # For mixed-robot batches, the cache stacks and pads the static groups and
@@ -205,18 +212,61 @@ dynamic_batch = physics.update(q_current, qd_current, gravity=gravity_base)
 ```
 
 Replace the example state with `q_current` and `qd_current` `[N, J]` from
-joint sensors. Pass measured `tau_previous` `[N, J]` as
-`applied_torque_prev` and `torque_source=1.0` when available. Pass
-`base_linear_velocity` and `base_angular_velocity` `[N, 3]` to include
-floating-base motion in `c`; `gravity_base` is `[N, 3]`. For a mixed-robot
-cache, give one graph/spec sequence per row and padded `[B, J]` state arrays.
-Set the cache intervals to 1 for fresh values
-every step; larger intervals reuse configuration and velocity terms until
-their age or change thresholds trigger a refresh. Call `physics.reset()`
-after an environment reset. The physics tokenizers map dimensional columns
-with `asinh(value / scale)` and pass unit vectors and one-hot flags through,
-then use learned projections. See [Physics Cross Attention](docs/encoder.md#6-physics-cross-attention)
+joint sensors. Pass `base_linear_velocity` and `base_angular_velocity` `[N, 3]`
+to include floating-base motion in `c`; `gravity_base` is `[N, 3]`. For a
+mixed-robot cache, give one graph/spec sequence per row and padded `[B, J]`
+state arrays. Set the cache intervals to 1 for fresh values every step; larger
+intervals reuse configuration and velocity terms until their age or change
+thresholds trigger a refresh. Call `physics.reset()` after an environment
+reset. The physics tokenizers map dimensional columns with
+`asinh(value / scale)` and pass unit vectors and one-hot flags through, then use
+learned projections. See [Physics Cross Attention](docs/encoder.md#6-physics-cross-attention)
 for how these groups enter the encoder.
+
+### What a robot needs at run time
+
+| Signal | Source on a robot | Used for |
+|---|---|---|
+| Joint positions and velocities `q`, `qd` | Joint encoders | Tokens, dynamics features, mass matrix |
+| Gravity direction and base angular velocity | IMU | Tokens, dynamics features |
+| Previous target and the PD gains | The controller's own command and configuration | Previous-action token features: the target and the effort `K_p (a − q) − K_d qd` it requests, computed, not measured |
+| Base linear velocity | State estimator (optional) | Only with `observe_base_linear_velocity` |
+| Joint torque | **Not needed** | — |
+
+The PD gains on the robot must equal the training gains (`gain_scale`, or the
+`kp`/`kd` overrides); otherwise the requested-effort features mean something
+else. Targets go through [`ActionMap`](model/rl/actions.py), the same code the
+simulators use, so the effort the robot's drives request stays inside each
+actuator's torque-speed envelope ([details](docs/bfm.md#actuator-torque-limits)).
+
+## How the encoder learns dynamics without torque labels
+
+Joint torques cannot be estimated reliably from recorded motion: on real robots
+the estimate is 43–97% off (Unitree Go1) and 47–72% off (ANYmal D), mostly from
+sources no estimator removes. Training therefore never estimates a torque. The
+encoder still learns each robot's own dynamics from three sources
+([details](docs/training.md#physics-pretraining)):
+
+1. **Exact inputs.** `M(q)` (attention bias and `M_ii`), `c`, `g`, friction and
+   the rigid-body and actuator features are computed from the model, never
+   measured.
+2. **The contact-constrained response, on every dataset.** For any recorded
+   state, the collator draws a torque change `δτ` and labels it with the exact
+   acceleration change `δν̇ = G(q) δτ`,
+   `G = [M⁻¹ − M⁻¹Jᵀ(J M⁻¹ Jᵀ)⁻¹J M⁻¹] Sᵀ` with the contacts holding
+   ([`constrained_response`](model/dynamics.py)). `G` depends only on the
+   configuration, the inertia and which feet are down: not on the applied
+   torque, the contact forces or differentiated accelerations. Tasks R and R⁻¹
+   learn it in both directions.
+3. **Exact torques where they exist.** Simulated sources (synthetic, MuJoCo
+   ground) record the applied torque together with the acceleration it produced;
+   only they train forward and inverse dynamics with full torques. Torque-sensor
+   data is off by default (`measured_torque_weight: 0`).
+
+Kinematic tasks (forward kinematics, action effect, motor feasibility) run on
+every dataset as before. During RL, the policy's own rollouts add response,
+effect and feasibility labels with the simulator's exact contacts
+([physics replay](docs/bfm.md#physics-losses-during-rl)).
 
 ## Quick start
 
@@ -263,7 +313,7 @@ encoder = DaGetEncoder(
 memory = encoder.build_physics_memory(               # cache rigid-body and actuator keys/values
     physics.rigid_body_features, physics.actuator_features, batch.joint_mask
 )
-dynamics = physics.update(                           # M_ii, c, g, friction, last torque
+dynamics = physics.update(                           # M_ii, c, g, friction, gravity load
     q[:, -1], qd[:, -1], gravity=gravity, base_angular_velocity=gyro
 )
 hidden = encoder(
@@ -337,10 +387,10 @@ losses. The encoder checkpoint must use the same `joint_features` and `history_s
 | Read this | To learn |
 |---|---|
 | [The DA-GET encoder](docs/encoder.md) | URDF to tokens, attention bias, Physics Cross Attention, batching, all encoder options |
-| [Dynamics and torque estimation](docs/dynamics.md) | Rigid-body dynamics, estimating missing torques, why the error is large |
-| [Physics pretraining](docs/training.md) | The six tasks, training commands, TensorBoard, data config format |
+| [Dynamics and torque](docs/dynamics.md) | Rigid-body dynamics, rotor inertia, the constrained response, why torque estimates are not used |
+| [Physics pretraining](docs/training.md) | The seven tasks, label sources, training commands, TensorBoard, data config format |
 | [Training data](docs/data.md) | MuJoCo ground contact, automatic configs, dataset converters, recommended datasets |
-| [Behavior foundation model](docs/bfm.md) | Actor, critics, B, and D; RL training; what differs from BFM-Zero; open questions |
+| [Behavior foundation model](docs/bfm.md) | Actor, critics, B, and D; RL training; torque limits; physics replay; deployment; open questions |
 | [Development notes](docs/development.md) | Full repository layout, test coverage, validation results, detailed limitations |
 | [Module notes](model/README.md) | Technical notes on the encoder code |
 
@@ -350,9 +400,10 @@ losses. The encoder checkpoint must use the same `joint_features` and `history_s
 model/                     library code
   modeling_da_get.py         DaGetEncoder and Physics Cross Attention
   modeling_bfm.py            backward map, discriminator, actor, forward map, critics
-  rl/                        FB-CPR agent, Isaac Lab and MuJoCo worlds, replay, evaluation, training loop
-  pretraining.py             physics pretraining model (heads A-F)
-  dynamics.py                rigid-body dynamics and torque estimation
+  rl/                        FB-CPR agent, Isaac Lab and MuJoCo worlds, action map and torque limits,
+                             physics replay, replay buffers, evaluation, training loop, deployment
+  pretraining.py             physics pretraining model (heads A, B, C, R, R^-1, D, E)
+  dynamics.py                rigid-body dynamics, constrained response, torque estimation (analysis only)
   training/, conversion/     data pipeline and dataset converters
 scripts/                   training, data config generator, converters, validation, latency benchmark
 configs/data/              example data configs
@@ -364,8 +415,15 @@ tests/                     test suite
 
 - **Robots must be tree-structured**, with inertials in the URDF. Closed
   kinematic loops are rejected, and Xacro and MJCF must be converted first.
-- **Estimated torques are approximate:** 43–97% error on a real Go1 and 47–72%
-  on ANYmal D. Prefer datasets with measured torques.
+- **Torque estimates are not used.** They are 43–97% off on a real Go1 and
+  47–72% on ANYmal D, so datasets without torque sensors supervise dynamics
+  only through the constrained response.
+- **The response assumes rigid contacts that hold.** MuJoCo's default soft
+  contacts change it by about 20% (3% with stiff contacts); without contact
+  sensors, which feet are down is detected heuristically and frames near a
+  contact change are dropped.
+- **Torque penalty weights are untuned** starting points, and the simulators
+  enforce only the constant peak torque within a control step.
 - **Simulated ground contact covers standing, not walking.** Locomotion comes
   from recorded datasets.
 - **The Isaac Lab adapter is unverified on a real simulator** and rotor robots are not
@@ -415,7 +473,20 @@ Motion datasets have their own licenses; see
   Approximation Error in Actor-Critic Methods.* ICML 2018 (clipped policy
   noise).
 - Roy Featherstone. *Rigid Body Dynamics Algorithms.* Springer, 2008 (RNEA,
-  floating-base dynamics).
+  floating-base and contact-constrained dynamics).
+- Emanuel Todorov, Tom Erez, and Yuval Tassa. *MuJoCo: A Physics Engine for
+  Model-Based Control.* IROS 2012 (ground-contact simulation and response check).
+- Xue Bin Peng, Marcin Andrychowicz, Wojciech Zaremba, and Pieter Abbeel.
+  *Sim-to-Real Transfer of Robotic Control with Dynamics Randomization.* ICRA
+  2018 (randomized inertia, center of mass, rotor inertia and motor strength).
+- Patrick M. Wensing, Albert Wang, Sangok Seok, David Otten, Jeffrey Lang, and
+  Sangbae Kim. *Proprioceptive Actuator Design in the MIT Cheetah: Impact
+  Mitigation and High-Bandwidth Physical Interaction for Dynamic Legged Robots.*
+  IEEE T-RO 2017 (reflected rotor inertia).
+- Jemin Hwangbo, Joonho Lee, Alexey Dosovitskiy, Dario Bellicoso, Vassilios
+  Tsounis, Vladlen Koltun, and Marco Hutter. *Learning Agile and Dynamic Motor
+  Skills for Legged Robots.* Science Robotics 2019 (actuator modelling; why
+  joint torque is hard to model from motion).
 - Taeyoung Lee, Melvin Leok, and N. Harris McClamroch. *Geometric Tracking
   Control of a Quadrotor UAV on SE(3).* CDC 2010 (flight controller).
 - Shuo Yang et al. *Multi-IMU Proprioceptive Odometry for Legged Robots.*

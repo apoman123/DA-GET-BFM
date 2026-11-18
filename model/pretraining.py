@@ -1,7 +1,9 @@
 """Pretrain the GET encoder with auxiliary physics heads (Hugging Face compatible).
 
-The encoder produces one embedding ``H_{t,i}`` per joint. Six auxiliary tasks
-train it; their weights are set in ``DaGetPhysicsPretrainingConfig``:
+The encoder produces one embedding ``H_{t,i}`` per joint. Seven auxiliary tasks
+train it; their weights are set in ``DaGetPhysicsPretrainingConfig``. None of them
+uses an estimated torque: torque labels come only from simulators (and, if enabled,
+torque sensors), and the response tasks need no torque at all.
 
 A. Forward kinematics: ``f_FK(H_i) -> (p_i, R_i)`` of every joint frame in the
    root frame. Positions are divided by the robot's characteristic length so
@@ -13,23 +15,33 @@ B. Action-conditioned forward dynamics: ``D_FD(H, tau^applied) -> qdd``, with a
    ``L_FD = 1/N_e sum_i ((qdd_hat_i - qdd_i) / sigma_i^a)^2``. For a floating
    base the generalized acceleration also contains the base linear and angular
    acceleration, predicted from the pooled mixed tokens and normalized per
-   robot.
+   robot. Only samples with exact (simulated) or measured torques.
 C. Inverse dynamics: ``D_ID(H, qdd^desired, base acc^desired) ->
    tau^required`` with the full desired acceleration vector mixed over the
-   graph; the desired base acceleration is given to every joint. For
-   estimated torques of robots in contact, the error is projected onto the
-   torque directions the motion determines (``id_projection``): internal
-   contact forces cannot be observed and are not supervised.
-   ``L_ID = 1/N_e sum_i ((tau_hat_i - tau_i) / (tau_i^cont + eps))^2``.
+   graph; the desired base acceleration is given to every joint. With contacts,
+   the error is projected onto the torque directions the motion determines
+   (``contact_projection``): internal contact forces cannot be observed from
+   motion and are not supervised.
+   ``L_ID = 1/N_e sum_i ((P (tau_hat - tau))_i / (tau_i^cont + eps))^2``. Same
+   samples as B.
+R. Contact-constrained response: ``D_R(H, delta_tau) -> delta_qdd`` (and the base
+   acceleration change), where ``delta_nu_dot = G(q) delta_tau`` is the exact
+   effect of a torque change with the contacts holding
+   (``model.dynamics.constrained_response``). The collator draws ``delta_tau`` for
+   every sample of every dataset, so robots recorded without any torque still
+   supervise their own inertia, contact constraints, and actuator scale.
+   ``L_R = 1/N_e sum_i ((delta_qdd_hat_i - delta_qdd_i) / s_i^R)^2`` plus
+   ``lambda_base`` times the normalized base term.
+R^-1. Inverse response: ``D_R^-1(H, delta_qdd, delta_base) -> delta_tau``, with the
+   error projected like C: ``L = 1/N_e sum_i ((P (dtau_hat - dtau))_i / tau_i^peak)^2``.
 D. Motor feasibility and capability margins: ``D_motor(H_i, a_i^proposal)``
    predicts peak and continuous feasibility flags and five margins.
    ``L_motor = lambda_f BCE + lambda_m Huber``.
 E. Cross-embodiment action effect: ``D_effect(H, a_t)`` predicts, for each
    end-effector frame, the displacement ``Delta p``, the next orientation
-   ``R_{t+1}``, and the next linear and angular velocity.
-F. Rigid-body dynamics consistency (optional, weight 0 by default): the
-   residual ``M qdd_hat + c + g + tau_f - tau^applied`` of the FD prediction,
-   weighted by ``1 / (tau^cont + eps)``.
+   ``R_{t+1}``, and the next linear and angular velocity. Without a recorded
+   command the action input is zero and the head predicts the next frame from the
+   state alone.
 
 All per-joint losses are averaged over the valid joints of each sample first
 (``1/N_e``) and then over samples, so robots with many joints do not dominate.
@@ -49,7 +61,7 @@ from transformers.utils import ModelOutput
 from model.configuration_da_get import DaGetConfig
 from model.modeling_da_get import DaGetEncoder, DaGetEncoderLayer
 
-LOSS_NAMES = ("fk", "fd", "id", "motor", "effect", "rbd")
+LOSS_NAMES = ("fk", "fd", "id", "response", "inverse_response", "motor", "effect")
 MOTOR_FLAG_COUNT = 2
 MOTOR_MARGIN_COUNT = 5
 ACTION_FEATURE_SIZE = 3
@@ -61,8 +73,8 @@ class DaGetPhysicsPretrainingConfig(PretrainedConfig):
     Attributes:
         encoder (dict): ``DaGetConfig`` fields.
         head_hidden_size (int | None): Head MLP width; defaults to the encoder width.
-        mixing_layers (int): Graph action-mixing layers in the FD, ID, and effect
-            heads; 0 makes those heads per-joint.
+        mixing_layers (int): Graph action-mixing layers in the FD, ID, response,
+            inverse-response, and effect heads; 0 makes those heads per-joint.
         fk_orientation (bool): Supervise orientation in FK (False for the
             position-only first pass).
         loss_weights (dict[str, float]): Weight of each task in the total loss.
@@ -72,7 +84,7 @@ class DaGetPhysicsPretrainingConfig(PretrainedConfig):
         lambda_effect_angular_velocity (float): Effect term weights.
         huber_delta (float): Huber transition point for margins.
         lambda_base_acceleration (float): Weight of the floating-base
-            acceleration term inside the FD loss.
+            acceleration term inside the FD and response losses.
         epsilon (float): Stabilizer in normalizations.
         token_layout (dict): Observation token layout used by the data
             collator, saved for reproducibility.
@@ -110,11 +122,12 @@ class DaGetPhysicsPretrainingConfig(PretrainedConfig):
         self.head_hidden_size = head_hidden_size
         self.mixing_layers = mixing_layers
         self.fk_orientation = fk_orientation
-        weights = {"fk": 1.0, "fd": 1.0, "id": 1.0, "motor": 1.0, "effect": 1.0, "rbd": 0.0}
+        weights = {name: 1.0 for name in LOSS_NAMES}
         weights.update(loss_weights or {})
         unknown = set(weights) - set(LOSS_NAMES)
         if unknown:
-            raise ValueError(f"unknown loss weights {sorted(unknown)}")
+            hint = " (task F, rbd, was removed with the torque estimates)" if "rbd" in unknown else ""
+            raise ValueError(f"unknown loss weights {sorted(unknown)}{hint}")
         self.loss_weights = weights
         self.lambda_position = lambda_position
         self.lambda_rotation = lambda_rotation
@@ -298,7 +311,7 @@ class GraphActionMixer(nn.Module):
 
 
 class DaGetForPhysicsPretraining(PreTrainedModel):
-    """GET encoder with the auxiliary physics heads A-F.
+    """GET encoder with the auxiliary physics heads A, B, C, R, R^-1, D and E.
 
     ``forward`` takes the batch produced by
     ``model.training.PhysicsDataCollator`` and returns the weighted loss, the
@@ -327,6 +340,11 @@ class DaGetForPhysicsPretraining(PreTrainedModel):
         self.fd_base_head = _mlp(hidden, head, 6)
         self.id_mixer = GraphActionMixer(encoder_config, 7, config.mixing_layers)
         self.id_head = _mlp(hidden, head, 1)
+        self.response_mixer = GraphActionMixer(encoder_config, 1, config.mixing_layers)
+        self.response_head = _mlp(hidden, head, 1)
+        self.response_base_head = _mlp(hidden, head, 6)
+        self.inverse_response_mixer = GraphActionMixer(encoder_config, 7, config.mixing_layers)
+        self.inverse_response_head = _mlp(hidden, head, 1)
         self.motor_mixer = GraphActionMixer(encoder_config, ACTION_FEATURE_SIZE, 0)
         self.motor_head = _mlp(hidden, head, MOTOR_FLAG_COUNT + MOTOR_MARGIN_COUNT)
         self.effect_mixer = GraphActionMixer(encoder_config, ACTION_FEATURE_SIZE, config.mixing_layers)
@@ -463,12 +481,39 @@ class DaGetForPhysicsPretraining(PreTrainedModel):
             torque = self.id_head(mixed).squeeze(-1)
             predictions["id_torque"] = torque
             error = torque - batch["id_target"]
-            if "id_projection" in batch:
+            if "contact_projection" in batch:
                 # Only the part of the torque that the motion determines is
                 # supervised; internal contact forces are unobservable.
                 scale = batch["torque_scale"] + eps
-                error = (batch["id_projection"] @ (error * scale)[..., None]).squeeze(-1) / scale
+                error = (batch["contact_projection"] @ (error * scale)[..., None]).squeeze(-1) / scale
             losses["id"] = masked_joint_mean(error.pow(2), batch["id_mask"], batch.get("torque_label_weight"))
+
+        if "response_torque" in batch:
+            mixed = self.response_mixer(embeddings, batch["response_torque"][..., None], distances, joint_mask)
+            response = self.response_head(mixed).squeeze(-1)
+            predictions["response_acceleration"] = response
+            loss = masked_joint_mean((response - batch["response_target"]).pow(2), batch["response_mask"])
+            base_mask = batch["response_base_mask"].to(response.dtype)
+            if bool(batch["response_base_mask"].any()):
+                pooled_mixed = (mixed * mask_float[..., None]).sum(1) / mask_float.sum(1, keepdim=True)
+                base_prediction = self.response_base_head(pooled_mixed)
+                predictions["response_base_acceleration"] = base_prediction
+                base_error = (base_prediction - batch["response_base_target"]).pow(2).mean(-1)
+                base_loss = (base_error * base_mask).sum() / base_mask.sum().clamp_min(1)
+                loss = loss + config.lambda_base_acceleration * base_loss
+            losses["response"] = loss
+
+        if "inverse_response_input" in batch:
+            mixed = self.inverse_response_mixer(embeddings, batch["inverse_response_input"], distances, joint_mask)
+            change = self.inverse_response_head(mixed).squeeze(-1)
+            predictions["inverse_response_torque"] = change
+            scale = batch["response_torque_scale"] + eps
+            error = change - batch["inverse_response_target"]
+            if "contact_projection" in batch:
+                # Torque changes that only press the feet together leave the
+                # accelerations unchanged, so they cannot be recovered from them.
+                error = (batch["contact_projection"] @ (error * scale)[..., None]).squeeze(-1) / scale
+            losses["inverse_response"] = masked_joint_mean(error.pow(2), batch["inverse_response_mask"])
 
         if "motor_input" in batch:
             mixed = self.motor_mixer(embeddings, batch["motor_input"], distances, joint_mask)
@@ -508,19 +553,6 @@ class DaGetForPhysicsPretraining(PreTrainedModel):
                 * (angular - batch["effect_angular_velocity"]).pow(2).sum(-1)
             )
             losses["effect"] = masked_joint_mean(per_joint, batch["effect_mask"])
-
-        if config.loss_weights.get("rbd", 0.0) > 0 and normalized_acceleration is not None:
-            acceleration = normalized_acceleration * batch["acceleration_scale"]
-            residual = (
-                (batch["mass_matrix"] @ acceleration[..., None]).squeeze(-1)
-                + batch["coriolis"]
-                + batch["gravity_torque"]
-                + batch["friction_torque"]
-                - batch["applied_torque"]
-            ) / (batch["torque_scale"] + eps)
-            # The residual has no contact or base-coupling terms, so it is only
-            # valid for fixed-base samples.
-            losses["rbd"] = masked_joint_mean(residual.pow(2), batch.get("rbd_mask", batch["fd_mask"]))
 
         loss = None
         if losses:

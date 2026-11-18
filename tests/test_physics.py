@@ -271,19 +271,19 @@ class PhysicsCacheTest(unittest.TestCase):
         specs = [actuator_specs(graph) for graph in graphs]
         cache = PhysicsFeatureCache(graphs, specs)
         joints = cache.joint_mask.shape[1]
-        q, qd, torque = random_state(graphs[1], batch=2, seed=3)
-        q, qd, torque = (value[:, :joints].float() for value in (q, qd, torque))
-        features = cache.update(q, qd, torque)
+        q, qd, _ = random_state(graphs[1], batch=2, seed=3)
+        q, qd = (value[:, :joints].float() for value in (q, qd))
+        features = cache.update(q, qd)
         for row, graph in enumerate(graphs):
             count = graph.num_joints
-            expected = dynamics_features(graph, specs[row], q[row, :count], qd[row, :count], torque[row, :count])
+            expected = dynamics_features(graph, specs[row], q[row, :count], qd[row, :count])
             torch.testing.assert_close(features[row, :count], expected, rtol=1e-4, atol=1e-5)
             self.assertTrue(torch.all(features[row, count:] == 0))
         slow = PhysicsFeatureCache(graphs, specs, configuration_interval=4, configuration_tolerance=0.5)
         for step in range(8):
-            slow.update(q + 0.01 * step, qd, torque)
+            slow.update(q + 0.01 * step, qd)
         self.assertEqual(slow.refresh_counts["configuration"], 2 * 2)
-        slow.update(q + 1.0, qd, torque)
+        slow.update(q + 1.0, qd)
         self.assertEqual(slow.refresh_counts["configuration"], 2 * 3)
 
 
@@ -372,3 +372,111 @@ class PhysicsCrossAttentionTest(unittest.TestCase):
 
 if __name__ == "__main__":
     unittest.main()
+
+
+class TorqueFreeDynamicsTest(unittest.TestCase):
+    """Rotor inertia, the contact-constrained response, and the torque envelope helpers."""
+
+    def test_armature_enters_the_mass_matrix_and_rnea(self) -> None:
+        """Rotor inertia adds to M_jj, to the effort of an accelerating joint, and to the features."""
+        from model.dynamics import recursive_newton_euler
+        from model.physics import rigid_body_features
+
+        plain = EmbodimentGraph.from_urdf(quadruped())
+        values = torch.linspace(0.01, 0.12, plain.num_joints, dtype=torch.float64)
+        graph = plain.with_armature(values)
+        q, qd, qdd = random_state(graph, batch=3, seed=1)
+        torch.testing.assert_close(graph.mass_matrix(q) - plain.mass_matrix(q), torch.diag_embed(values.expand(3, -1)))
+        difference = recursive_newton_euler(graph, q, qd, qdd).efforts - recursive_newton_euler(plain, q, qd, qdd).efforts
+        torch.testing.assert_close(difference, values * qdd)
+        torch.testing.assert_close(rigid_body_features(graph)[:, -1], values.float())
+        self.assertEqual(float(rigid_body_features(plain)[:, -1].abs().max()), 0.0)
+        patterns = plain.with_armature({"FL_*": 0.5, "*": 0.1}).joint_armature
+        self.assertTrue(all(value == (0.5 if name.startswith("FL_") else 0.1) for name, value in zip(plain.joint_names, patterns.tolist())))
+        self.assertIsNone(plain.with_armature(0.0).armature)
+        built = EmbodimentGraph.from_urdf(quadruped(), armature=0.02)
+        torch.testing.assert_close(built.joint_armature, torch.full((plain.num_joints,), 0.02, dtype=torch.float64))
+        with self.assertRaisesRegex(ValueError, "nonnegative"):
+            plain.with_armature(-1.0)
+
+    def test_response_without_contacts(self) -> None:
+        """A fixed base gives M^-1; a free base gives the floating-base forward dynamics' slope."""
+        from model.dynamics import constrained_response, floating_forward_dynamics
+
+        fixed = EmbodimentGraph.from_urdf(quadruped()).with_armature(0.01)
+        q, _, _ = random_state(fixed, batch=2, seed=2)
+        response = constrained_response(fixed, q)
+        self.assertEqual(response.shape, (2, 6 + fixed.num_joints, fixed.num_joints))
+        self.assertEqual(float(response[:, :6].abs().max()), 0.0)
+        torch.testing.assert_close(response[:, 6:], torch.linalg.inv(fixed.mass_matrix(q)))
+        free = EmbodimentGraph.from_urdf(quadruped(), floating_base=True).with_armature(0.01)
+        q, qd, _ = random_state(free, batch=2, seed=3)
+        torque = torch.randn(2, free.num_joints, dtype=torch.float64)
+        change = torch.randn(2, free.num_joints, dtype=torch.float64)
+        before = torch.cat(floating_forward_dynamics(free, q, qd, torque), dim=-1)
+        after = torch.cat(floating_forward_dynamics(free, q, qd, torque + change), dim=-1)
+        torch.testing.assert_close((constrained_response(free, q) @ change[..., None]).squeeze(-1), after - before)
+
+    def test_response_with_contacts_keeps_feet_still_and_ignores_internal_forces(self) -> None:
+        """J G = 0, G is blind to exactly the projector's undetermined directions, and J is the foot velocity map."""
+        from model.dynamics import constrained_response, contact_jacobian, determinate_torque_projector, frame_velocities
+
+        graph = EmbodimentGraph.from_urdf(quadruped(), floating_base=True).with_armature(0.01)
+        feet = ["FL_foot", "FR_foot", "RL_foot", "RR_foot"]
+        q, qd, _ = random_state(graph, batch=3, seed=4)
+        active = torch.tensor([[True] * 4, [True, False, False, True], [False] * 4])
+        response = constrained_response(graph, q, feet, active, False)
+        jacobian = contact_jacobian(graph, q, feet, active, False)
+        scale = float(response.abs().max())
+        self.assertLess(float((jacobian @ response).abs().max()), 1e-6 * scale)
+        projector, undetermined = determinate_torque_projector(graph, q, feet, active, False)
+        self.assertEqual(undetermined.tolist(), [6.0, 1.0, 0.0])
+        eye = torch.eye(graph.num_joints, dtype=torch.float64)
+        self.assertLess(float((response @ (eye - projector)).abs().max()), 1e-5 * scale)
+        torch.testing.assert_close(response[2], constrained_response(graph, q[2:]) [0])  # no foot down: free floating
+        # The Jacobian maps (v_base, w_base, qd) to the feet's point velocities.
+        base_linear, base_angular = torch.randn(3, 3, dtype=torch.float64), torch.randn(3, 3, dtype=torch.float64)
+        linear, angular = frame_velocities(graph, q, qd, base_linear, base_angular)
+        frames = graph.forward_kinematics(q)
+        points = graph.link_poses(q, feet)[..., :3, 3]
+        bodies = graph.link_bodies[graph.link_index(feet)].tolist()
+        expected = torch.stack(
+            [linear[:, body] + torch.linalg.cross(angular[:, body], points[:, index] - frames[:, body, :3, 3], dim=-1) for index, body in enumerate(bodies)],
+            dim=1,
+        ).reshape(3, -1)
+        everything = contact_jacobian(graph, q, feet, torch.ones(3, 4, dtype=torch.bool), False)
+        nu = torch.cat((base_linear, base_angular, qd), dim=-1)
+        torch.testing.assert_close((everything @ nu[..., None]).squeeze(-1), expected)
+
+    def test_envelope_helpers(self) -> None:
+        """Targets are moved exactly onto tau^max(qd); the excess is relu(|tau| - tau^max) / tau^peak."""
+        from dataclasses import replace
+
+        from model.physics import envelope_targets, requested_torque, torque_limit, torque_limit_excess
+
+        graph = EmbodimentGraph.from_urdf(quadruped())
+        specs = [replace(spec, mode="position", kp=20.0, kd=0.5) for spec in actuator_specs(graph)]
+        tensors = actuator_tensors(specs)
+        q, qd, _ = random_state(graph, batch=4, seed=5)
+        targets = q + torch.randn_like(q) * 3.0
+        moved = envelope_targets(tensors, targets, q, qd)
+        request = requested_torque(tensors, moved, q, qd)
+        limit = torque_limit(tensors, qd)
+        self.assertTrue(bool((request.abs() <= limit + 1e-9).all()))
+        inside = requested_torque(tensors, targets, q, qd).abs() <= limit
+        torch.testing.assert_close(moved[inside], targets[inside])
+        torch.testing.assert_close(request.abs()[~inside], limit[~inside])
+        torque = torch.tensor([[0.0] * graph.num_joints]).double()
+        torque[0, 0] = 3 * float(tensors["peak_torque"][0])
+        excess = torque_limit_excess(tensors, torque, torch.zeros_like(torque))
+        self.assertAlmostEqual(float(excess[0, 0]), 2.0, places=5)
+        self.assertEqual(float(excess[0, 1:].abs().max()), 0.0)
+
+    def test_schema_has_no_torque_and_old_checkpoints_are_rejected(self) -> None:
+        """The dynamics features are state-only; configs of the old sizes fail with a clear message."""
+        from model.physics_schema import feature_names
+
+        self.assertEqual(feature_names("dynamics"), ("mass_diagonal", "coriolis", "gravity", "friction", "gravity_load"))
+        self.assertEqual(feature_names("rigid_body")[-1], "armature")
+        with self.assertRaisesRegex(ValueError, "pretrain again"):
+            DaGetConfig(input_size=4, use_physics_cross_attention=True, rigid_body_feature_size=25, dynamics_feature_size=7)

@@ -14,7 +14,9 @@ The FB-CPR networks on the DA-GET encoder, how they train across robots in Isaac
   - [Data config: real and synthetic trajectories](#data-config-real-and-synthetic-trajectories)
   - [What is the same as BFM-Zero](#what-is-the-same-as-bfm-zero)
   - [What differs from BFM-Zero](#what-differs-from-bfm-zero)
+  - [Actuator torque limits](#actuator-torque-limits)
   - [Tuning the encoder](#tuning-the-encoder)
+  - [Physics losses during RL](#physics-losses-during-rl)
   - [Sharing z across robots](#sharing-z-across-robots)
   - [First run on a GPU machine](#first-run-on-a-gpu-machine)
   - [What TensorBoard shows](#what-tensorboard-shows)
@@ -200,7 +202,7 @@ tensorboard --logdir runs
 ### How one training step works
 
 ```text
-for every robot:  z from the rollout context ─► actor ─► targets
+for every robot:  z from the rollout context ─► actor ─► targets ─► ActionMap (torque envelope)
 one simulation:   all robots advance together (Isaac Lab)
 for every robot:  transition ─► that robot's replay buffer
 
@@ -210,7 +212,8 @@ every update:     equal share of each robot's replay + its expert motion windows
                     ├─ one backward pass over the encoder and:
                     │    F, B: successor-measure Bellman loss + orthonormality of B
                     │    Q_D, Q_R: Bellman losses on discriminator and auxiliary rewards
-                    │    physics heads A–F: pretraining losses on a dataset batch
+                    │    physics heads A, B, C, R, R⁻¹, D, E: pretraining losses on a batch
+                    │      from the data config or (physics replay) from the rollouts
                     ├─ actor: maximize Fᵀz + λ_D Q_D + λ_R Q_R (encoder does not move)
                     └─ soft-update every target network, including the target encoder
 ```
@@ -244,7 +247,7 @@ These keys of a robot's first expert source configure its worlds:
 | `nominal_pose` | zero, clamped to the limits | Joint targets at zero action; set this to a standing pose |
 | `gain_scale` | 1.0 | PD gains: `K_p = 2 · gain_scale · τ^peak`, `K_d = 0.03 K_p` |
 | `action_scale` | 1.25 | Target offset in rad at `\|action\| = 1` (BFM-Zero: 0.25 × 5) |
-| `armature` | 0.01 | Rotor inertia per joint in kg m². URDFs have none, and without it G1 diverged in MuJoCo. Use real motor values where you have them |
+| `armature` | 0.01 | Rotor inertia per joint in kg m², one value or `{joint glob: value}`. URDFs have none, and without it G1 diverged in MuJoCo. The RL robot's graph gets the same value, so its physics tokens, the physics-replay labels and both simulators agree. Use real motor values where you have them |
 | `simulation_urdf` | `urdf` | Isaac Lab: URDF whose collision meshes resolve |
 | `ros_package_paths` | none | Isaac Lab: `[{"name": ..., "path": ...}]` for `package://` meshes |
 | `undesired_contact_links` | every link but the feet | Isaac Lab: regexes of penalized links (BFM-Zero's G1: pelvis, shoulders, hips) |
@@ -273,7 +276,7 @@ of the paper):
 | Fall starts | 30% of episodes start lying on the back or front, so the policy learns to get up |
 | Motion sampling | Priority `2^(2 · clip(EMD, 0.5, 2))` from each motion's tracking EMD, updated every evaluation, for episode starts and expert windows |
 | Randomization | Friction, link mass, base center of mass, nominal pose, pushes, sensor noise |
-| Auxiliary rewards | Joint limits −10, action rate −0.1, foot slip −2, undesired contact −1, feet orientation −0.4 |
+| Auxiliary rewards | Joint limits −10, action rate −0.1, foot slip −2, undesired contact −1, feet orientation −0.4 (three torque penalties are added here, [below](#actuator-torque-limits)) |
 | Self-collision | On in Isaac Lab |
 | Asymmetry | The actor sees no base linear velocity and has noisy sensors; critics also read the clean state |
 
@@ -290,14 +293,79 @@ of the paper):
 | Ankle-roll penalty left out | It names G1 joints |
 | Replay is not saved in checkpoints | Resuming continues with an empty buffer |
 | Rotor robots are not supported | Not needed yet; `NotImplementedError` |
+| Targets pass through `ActionMap`, which keeps the requested effort inside each actuator's torque-speed envelope | BFM-Zero relies on the simulator's constant effort limit only; see [Actuator torque limits](#actuator-torque-limits) |
+| Three torque penalties (limit, continuous load, power) | Normalized by each robot's own limits, so they fit every robot |
+| No torque in any observation | BFM-Zero's G1 has no torque input either; earlier versions of this repo fed the last torque, now removed ([why](dynamics.md#why-training-uses-no-estimated-torque)) |
+| Physics losses on the policy's own rollouts (physics replay) | Keeps the encoder's dynamics faithful on the states the policy visits |
+
+### Actuator torque limits
+
+The actor outputs normalized actions; a PD drive turns the resulting position targets
+into torque. A policy that asks for far more torque than a motor has saturates it,
+heats it, or behaves differently on hardware. Three layers handle this, and none needs a
+torque measurement on the robot.
+
+**1. The simulators clip at peak torque.** Isaac Lab's actuator `effort_limit` and
+MuJoCo's `forcerange` are `τ^peak`, as on the hardware's motor driver. This is the only
+limit inside a control step (the PD effort changes over the four physics steps).
+
+**2. `ActionMap` keeps the request inside the torque-speed envelope.**
+[`model/rl/actions.py`](../model/rl/actions.py) maps an action to a target as BFM-Zero
+does (`nominal + action_scale · a`, clipped to the joint limits) and then moves each
+position-mode target so the effort the PD law requests at the current state,
+`K_p (a − q) − K_d qd`, stays within the envelope
+
+```text
+τ^max(qd) = min(τ^peak, P^max / |qd|)   for |qd| ≤ ω^max,   0 beyond
+```
+
+(`model.physics.envelope_targets`; the same `torque_limit` defines the motor
+feasibility labels of task D). The moved target is `q + (clip(τ) + K_d qd) / K_p`.
+The environments call it every control step (`EnvConfig.clip_to_envelope`,
+`--clip_to_envelope`, default true), and **the robot must call the same code**, so the
+policy is trained on exactly the targets it will send:
+
+```python
+from model.rl import ActionMap
+
+action_map = ActionMap(record, nominal_pose, action_scale=1.25)   # the training values
+targets, raw = action_map(actions, q, qd)    # numpy [N, J]; send `targets` to the drives
+```
+
+The observation's previous-action features use the sent (clipped) target, in training
+and on the robot alike.
+
+**3. Torque penalties shape the policy.** `TorqueMonitor` adds three auxiliary rewards,
+each a sum over actuated joints and dimensionless, so one weight fits every robot:
+
+| Reward | Formula | Weight (default) |
+|---|---|---|
+| `penalty_torque_limit` | `relu(\|τ_req\| − τ^max(qd)) / τ^peak` of the actor's raw targets, before `ActionMap` clips them: how far the actor asks beyond the envelope | −2.0 |
+| `penalty_torque_continuous` | `relu(EMA[(τ / τ^cont)²] − 1)`, the load averaged over `thermal_time_constant` (1 s, `EnvConfig`): sustained torque above the continuous rating, a thermal proxy | −0.5 |
+| `penalty_power` | `relu(\|τ qd\| − P^max) / P^max` | −0.5 |
+
+`τ` is the simulator's applied torque (exact there; never a policy input). The weights
+are ours, not BFM-Zero's, and untuned. They enter Q_R with BFM-Zero's penalties through
+`aux_reward_scales`.
+
+TensorBoard shows, per robot: `rollout/<robot>/torque_request_over_envelope` (share of
+joints whose raw request exceeds the envelope), `torque_at_envelope` (share at ≥ 99% of
+it after clipping), `torque_rms_over_continuous`, and `torque_load_over_continuous`
+(the largest load average).
+
+**Limits of this design.** The envelope is enforced at the control rate; within a
+step only the simulator's constant peak clip applies, and Isaac Lab's implicit PD
+cannot express the speed-dependent envelope. A robot whose firmware runs the PD loop
+at a higher rate should apply its own envelope there too. The motor heads of task D
+learn the same envelope, but they do not constrain actions.
 
 ### Tuning the encoder
 
 `DaGetEncoder` starts from the pretrained checkpoint and keeps training:
 
 - **F, Q_D, Q_R** update it, so it learns what the values need.
-- **Physics heads A–F** update it on batches of the data config, so it stays faithful
-  to the dynamics.
+- **Physics heads** (A, B, C, R, R⁻¹, D, E) update it on batches of the data config and
+  of the policy's own rollouts, so it stays faithful to the dynamics.
 - **The actor does not update it**, so the actor cannot move the critics' inputs.
 - **A target encoder** (soft update, rate `fb_target_tau`) feeds the Bellman targets.
 
@@ -313,6 +381,41 @@ of the paper):
 These learning rates and weights are not from BFM-Zero, which has no encoder. They are
 starting points and have not been tuned. The checkpoint folder holds the tuned encoder
 in `encoder/`, loadable with `from_pretrained`.
+
+### Physics losses during RL
+
+Offline physics batches cover the states their sources visit. The **physics replay**
+([`model/rl/physics_replay.py`](../model/rl/physics_replay.py)) adds the states the
+policy visits. For `physics_replay_envs` environments per robot it records contiguous
+chunks of `physics_replay_length` control steps: joint state, base twist, gravity, the
+targets sent, and the simulator's foot contacts. Each chunk becomes a processed episode
+(`process_episode`):
+
+| Task | Label from the rollout |
+|---|---|
+| A. FK | Exact kinematics |
+| R, R⁻¹ | `G(q) δτ` with the **simulator's contact set** (no detection needed) |
+| D | The sent targets (PD request computed) and random proposals |
+| E | Next frame, conditioned on the sent target |
+| B, C | **Not used**: a control step spans four physics steps whose PD torque changes with the state, so the step's torque and the recorded state change are not one instant's pair. Exact B and C labels come from the offline simulated sources, which record both together |
+
+Labels use the RL robot's graph (nominal inertia plus rotor inertia). With mass
+randomization on, the simulated robot differs from it by a few percent, the same
+mismatch a real robot has against its URDF, and the same convention as the policy's
+tokens (nominal parameters).
+
+A share `physics_replay_fraction` (default 0.5) of the physics batches comes from the
+replay once it has an episode; up to two queued chunks are processed before each update
+round, and `physics_replay_episodes` (default 32) episodes per robot are kept.
+
+| Flag | Default | Meaning |
+|---|---|---|
+| `--physics_replay` | true | Record rollouts for the physics losses |
+| `--physics_replay_fraction` | 0.5 | Share of physics batches from the replay |
+| `--physics_replay_envs` | 4 | Environments recorded per robot |
+| `--physics_replay_length` | 200 | Control steps per recorded episode |
+| `--physics_replay_episodes` | 32 | Episodes kept per robot |
+| `--clip_to_envelope` | true | `ActionMap` keeps the request inside the torque envelope |
 
 ### Sharing z across robots
 
@@ -348,6 +451,8 @@ python scripts/train_bfm.py --data_config configs/rl/go1_h1_ground.json \
   importer must keep fixed joints, so that feet remain separate links.
 - `undesired_contact` is 0 while standing, then 1 when lying down or in self-contact.
 - `rollout/<robot>/fallen_fraction` is about 0.3 at the start of training.
+- `rollout/<robot>/torque_request_over_envelope` falls as training proceeds, and
+  `torque_load_over_continuous` stays near or below 1 for a standing robot.
 - Friction randomization uses a PhysX-only call (`root_view.set_material_properties`),
   so another physics backend needs a change there.
 
@@ -358,8 +463,10 @@ python scripts/train_bfm.py --data_config configs/rl/go1_h1_ground.json \
 | `train/fb_loss`, `fb_diag`, `fb_offdiag`, `orth_loss` | F and B |
 | `train/disc_loss`, `disc_expert_loss`, `disc_train_loss`, `mean_disc_reward` | Discriminator |
 | `train/critic_loss`, `aux_critic_loss`, `Q_discriminator`, `Q_aux`, `Q_fb`, `actor_loss` | Critics and actor |
-| `train/physics/loss`, `physics/loss_fk`, … | Physics auxiliary losses of the encoder |
-| `train/aux_rew/*` | Each unscaled auxiliary reward |
+| `train/physics/loss`, `physics/loss_fk`, `loss_response`, … | Physics auxiliary losses of the encoder |
+| `train/aux_rew/*` | Each unscaled auxiliary reward, including `penalty_torque_limit`, `penalty_torque_continuous`, `penalty_power` |
+| `rollout/<robot>/torque_request_over_envelope`, `torque_at_envelope`, `torque_rms_over_continuous`, `torque_load_over_continuous` | Torque-limit use ([details](#actuator-torque-limits)) |
+| `physics_replay/episodes` | Rollout episodes available to the physics losses |
 | `train/frames_per_second`, `gradient_steps` | Throughput |
 | `rollout/<robot>/fallen_fraction`, `episode_length` | How much of the time each robot is down |
 | `eval/<robot>/tracking_mpjpe`, `tracking_emd`, `tracking_fallen` | Tracking: the paper's `mean_t ‖q_t − q_ref‖`, the EMD behind priorities, and worlds fallen at the end |
@@ -381,7 +488,7 @@ The first table is the work of every control step, at batch 1:
 
 | Part | What it runs | Where |
 |---|---|---|
-| `observation` | Policy tokens, dynamics features and mass matrix (`EmbodimentObserver.policy_physics`) | CPU, float64 |
+| `observation` | Policy tokens, dynamics features and mass matrix (`EmbodimentObserver.policy_physics`); no torque input | CPU, float64 |
 | `act (eager)` | `DaGetFbCprAgent.act`, the training path | `--device` |
 | `act (policy)` | `DaGetBfmPolicy.act`, the deployment path (below) | `--device` |
 | `reference state` | State view of a reference frame, for a motion streamed live | CPU, float64 |
@@ -398,7 +505,10 @@ the actor and B heads, and F, Q_D, Q_R and D, which only training runs) and the 
 prompts (goal z, reward z over 1000 buffer states, tracking z of a 500-frame motion).
 
 Measured on an RTX 5070 Ti, policy path with CUDA Graphs, batch 1 (the CUDA Graph test of
-`tests/test_deployment.py` passed on the same machine):
+`tests/test_deployment.py` passed on the same machine). These numbers predate the
+torque-free schema, whose dynamics features have 5 columns instead of 7 and whose
+observation no longer takes the previous torque; the work per step is the same or
+slightly less, but rerun the benchmark to record current numbers:
 
 | Robot | Encoder | `act` eager → policy (median) | `control step` median / p99 / max | `+ live tracking` median / p99 / max |
 |---|---|---|---|---|
@@ -420,9 +530,16 @@ slower than this desktop: run the benchmark there before deploying.
 ```python
 from model.rl import DaGetBfmPolicy
 
+from model.rl import ActionMap, DaGetBfmPolicy
+
 policy = DaGetBfmPolicy(agent.model, observer, device="cuda")
-dynamics, mass = observer.policy_physics(sensed_state, previous_torque)
+action_map = ActionMap(observer.record, nominal_pose, action_scale=1.25)  # same as training
+
+local, global_features = observer.policy_step(sensed_state, previous_target, previous_q, previous_qd)
+# ... append them to local_history / global_history (oldest first) ...
+dynamics, mass = observer.policy_physics(sensed_state)                 # no torque needed
 action = policy.act(local_history, global_history, dynamics, mass, z)  # [1, J] on the CPU
+targets, _ = action_map(action.numpy(), q, qd)                         # send these to the drives
 b = policy.backward(observer.state_view(reference_state))             # raw B(s), [1, z_dim]
 ```
 
@@ -458,8 +575,12 @@ What keeps `observation` small on the CPU:
   robots yet. See [Sharing z across robots](#sharing-z-across-robots).
 - **Inputs to the GET tokens.** BFM-Zero's actor sees `state`, `last_action`,
   and a proprioceptive history. Here those go into the GET tokens: joint
-  history via `DaGetTokenizer`, and the last applied torque via the dynamics
-  features. Base-level signals can go in as context tokens.
+  history via `DaGetTokenizer`, and the last action as its target and the PD
+  effort it requests. No torque measurement enters. Base-level signals can go in
+  as context tokens.
+- **Contact compliance.** The response labels assume rigid contacts; MuJoCo's
+  default soft contacts differ by about 20%. Whether to stiffen the simulators'
+  contacts or to model compliance in the labels is open.
 - **Tuning.** The shared encoder's learning rate, physics weight, and state
   adapter have no reference values.
 - **Offline training.** Training needs a simulator, as in BFM-Zero.

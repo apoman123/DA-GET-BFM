@@ -111,7 +111,6 @@ def benchmark(robot: str, size: str, device: torch.device, arguments: argparse.N
     joints = observer.graph.num_joints
     state, previous, reference = (random_state(joints, generator) for _ in range(3))
     target = previous.q.clone()
-    torque = torch.zeros(1, joints, dtype=torch.float64)
     local_history = torch.zeros(1, history, joints, 5, dtype=torch.float64)
     global_history = torch.zeros(1, history, 11, dtype=torch.float64)
     z = model.sample_z(1).cpu()
@@ -122,7 +121,7 @@ def benchmark(robot: str, size: str, device: torch.device, arguments: argparse.N
         local, global_features = observer.policy_step(state, target, previous.q, previous.qd)
         local_history[:, :-1], local_history[:, -1] = local_history[:, 1:].clone(), local
         global_history[:, :-1], global_history[:, -1] = global_history[:, 1:].clone(), global_features
-        dynamics, mass = observer.policy_physics(state, torque)
+        dynamics, mass = observer.policy_physics(state)
         return Observation(local_history.float(), global_history.float(), dynamics, mass, view)
 
     observation = observe()

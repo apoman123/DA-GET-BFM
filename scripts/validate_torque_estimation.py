@@ -4,8 +4,12 @@ Uses the MIPO Unitree Go1 recordings (``Open-IO/mipo-go1-odometry`` on the
 Hugging Face Hub, AGPL-3.0, from Cerberus2.0). They have 400 Hz joint
 positions, velocities, and measured torques (Unitree's current-based
 estimate), a body IMU, and foot-force sensors. The script estimates the
-torques from kinematics alone, the way the training pipeline does for
-datasets without torque, and compares them with the measured torques.
+torques from kinematics alone with ``estimate_episode_efforts`` and compares
+them with the measured torques.
+
+This is the measurement behind the design decision that training never uses
+estimated torques (``docs/dynamics.md``): the estimate is 43-97% off. Run it on
+a new robot or dataset to see how far its estimate would be off.
 
 Usage::
 
@@ -39,7 +43,7 @@ if str(ROOT) not in sys.path:
 
 from model import EmbodimentGraph, JointFeatureConfig, actuator_specs  # noqa: E402
 from model.dynamics import STANDARD_GRAVITY, quaternion_to_matrix  # noqa: E402
-from model.training.episodes import EmbodimentRecord, Trajectory, process_episode  # noqa: E402
+from model.training.episodes import EmbodimentRecord, Trajectory, estimate_episode_efforts  # noqa: E402
 
 REPOSITORY = "Open-IO/mipo-go1-odometry"
 LEGS = ("FL", "FR", "RL", "RR")
@@ -114,9 +118,9 @@ def evaluate(name: str, data, urdf: Path, floating: bool, contacts, use_imu: boo
         imu_specific_force=data["specific_force"] if use_imu else None,
         contacts=contacts,
     )
-    episode = process_episode(record, trajectory)
-    estimate = episode["applied_torque"][:, 0].double()
-    projection = episode["id_projection"].double()
+    analysis = estimate_episode_efforts(record, trajectory)
+    estimate = analysis["efforts"].double()
+    projection = analysis["projection"].double()
     measured = data["tau"]
     keep = slice(10, -10)
     error = (estimate - measured)[keep]

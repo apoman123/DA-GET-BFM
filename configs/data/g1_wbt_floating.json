@@ -3,7 +3,7 @@
   "joint_features": "da_get_zero",
   "eval_fraction": 0.05,
   "seed": 0,
-  "max_estimate_residual": 0.5,
+  "max_contact_residual": 0.5,
   "sources": [
     {
       "type": "huggingface",

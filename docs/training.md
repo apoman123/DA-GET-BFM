@@ -2,18 +2,21 @@
 
 [← Back to the README](../README.md)
 
-The six auxiliary tasks that train the encoder, how to run them with the Hugging Face `Trainer`, and the data config format.
+The seven auxiliary tasks that train the encoder, where their labels come from (never from an estimated torque), how to run them with the Hugging Face `Trainer`, and the data config format.
 
 ## Contents
 
 - [Physics pretraining](#physics-pretraining)
+  - [Where the labels come from](#where-the-labels-come-from)
   - [Shared notation and loss reduction](#shared-notation-and-loss-reduction)
   - [A. Forward kinematics](#a-forward-kinematics)
   - [B. Forward dynamics](#b-forward-dynamics)
   - [C. Inverse dynamics](#c-inverse-dynamics)
+  - [R. Contact-constrained response](#r-contact-constrained-response)
+  - [R-inv. Inverse response (R⁻¹)](#r-inv-inverse-response)
   - [D. Motor feasibility](#d-motor-feasibility)
   - [E. Action effect](#e-action-effect)
-  - [F. Rigid-body dynamics consistency](#f-rigid-body-dynamics-consistency)
+  - [Removed: F. Rigid-body dynamics consistency](#removed-f-rigid-body-dynamics-consistency)
 - [Training with the Hugging Face Trainer](#training-with-the-hugging-face-trainer)
   - [Watching training in TensorBoard](#watching-training-in-tensorboard)
   - [Data config](#data-config)
@@ -22,18 +25,42 @@ The six auxiliary tasks that train the encoder, how to run them with the Hugging
 
 `DaGetForPhysicsPretraining` (`model/pretraining.py`) is a Hugging Face
 `PreTrainedModel`, so `save_pretrained`, `from_pretrained`, and `push_to_hub`
-all work. It wraps the encoder with six heads. $N_e$ is the number of valid
+all work. It wraps the encoder with seven heads. $N_e$ is the number of valid
 joints of a sample's robot. Every per-joint loss is averaged per robot first,
-so a 29-DoF humanoid does not outweigh a 4-rotor drone.
+so a 29-DoF humanoid does not outweigh a 4-rotor drone. No task uses an
+estimated torque ([why](dynamics.md#why-training-uses-no-estimated-torque)).
 
 | Task | Head input | Target | Loss |
 |---|---|---|---|
 | **A. Forward kinematics** | $H_i$ | $p_i/L_e$ ($L_e$ = robot size) and $R_i\in SO(3)$ of every joint frame in the base frame | $\frac{1}{N_e}\sum_i[\lambda_p\lVert\hat p_i-p_i\rVert^2+\lambda_R d_{SO(3)}(\hat R_i,R_i)^2]$; `fk_orientation=False` omits orientation |
 | **B. Forward dynamics** | $[H_i;E_\tau(\tau_i^{\mathrm{applied}})]$ passed through `mixing_layers` of graph action mixing | $\ddot q_t$; for a floating base also base linear and angular acceleration | $\frac{1}{N_e}\sum_i[(\hat{\ddot q}_i-\ddot q_i)/\sigma_i^a]^2$, plus $\lambda_{\mathrm{base}}$ times normalized base-acceleration MSE |
-| **C. Inverse dynamics** | $[H_i;E(\ddot q_i^{\mathrm{desired}},a_{\mathrm{base}}^{\mathrm{desired}})]$ with graph mixing | $\tau^{\mathrm{required}}$ from inverse dynamics, including contacts for legged robots | $\frac{1}{N_e}\sum_i[(P(\hat\tau-\tau))_i/(\tau_i^{\mathrm{cont}}+\varepsilon)]^2$; $P=I$ for measured or simulated torques |
+| **C. Inverse dynamics** | $[H_i;E(\ddot q_i^{\mathrm{desired}},a_{\mathrm{base}}^{\mathrm{desired}})]$ with graph mixing | The applied torque that produced that acceleration (simulated, or measured if enabled) | $\frac{1}{N_e}\sum_i[(P(\hat\tau-\tau))_i/(\tau_i^{\mathrm{cont}}+\varepsilon)]^2$; $P$ removes internal contact forces, $P=I$ without contacts |
+| **R. Constrained response** | $[H_i;E(\delta\tau_i/\tau_i^{\mathrm{peak}})]$ with graph mixing | $\delta\ddot q$ and the base acceleration change, $G(q)\,\delta\tau$ with the contacts holding | $\frac{1}{N_e}\sum_i[(\widehat{\delta\ddot q}_i-\delta\ddot q_i)/s_i^R]^2$ plus $\lambda_{\mathrm{base}}$ times normalized base MSE |
+| **R⁻¹. Inverse response** | $[H_i;E(\delta\ddot q_i/s_i^R,\delta a_{\mathrm{base}})]$ with graph mixing | $\delta\tau$ | $\frac{1}{N_e}\sum_i[(P(\widehat{\delta\tau}-\delta\tau))_i/\tau_i^{\mathrm{peak}}]^2$ |
 | **D. Motor feasibility** | $[H_i;E(a_i^{\mathrm{proposal}})]$ | Peak and continuous feasibility flags; peak torque, continuous torque, power, speed, and joint-position margins | $\lambda_f\operatorname{BCEWithLogits}+\lambda_m\operatorname{Huber}$ |
 | **E. Action effect** | $[H_i;E(a_i)]$ with graph mixing | At end-effector frames, in the base frame at $t$: $\Delta p$, $R_{t+1}$, $v_{t+1}$, $\omega_{t+1}$ | $\lambda_p\lVert\widehat{\Delta p}-\Delta p\rVert^2+\lambda_R d_{SO(3)}(\hat R,R)^2+\lambda_v\lVert\hat v-v\rVert^2+\lambda_\omega\lVert\hat\omega-\omega\rVert^2$ |
-| **F. RBD consistency** (optional) | The FD prediction | $r=M\hat{\ddot q}+c+g+\tau_f-\tau^{\mathrm{applied}}$ | $\frac{1}{N_e}\sum_i[r_i/(\tau_i^{\mathrm{cont}}+\varepsilon)]^2$; fixed-base samples only |
+
+### Where the labels come from
+
+Each sample is one frame and one *action variant* of it. Variant 0 is what was
+executed; simulated data adds probe variants (other torques, simulated one step);
+other data adds proposal variants (random torques, for task D only). Each variant has
+a torque source: `exact` (a simulator's applied torque), `measured` (a torque sensor)
+or `none`.
+
+| Data | A | B, C | R, R⁻¹ | D | E |
+|---|---|---|---|---|---|
+| `synthetic` source (analytic simulation; exact) | ✓ | ✓ executed and probes, weight 1 | ✓ | ✓ commands and probes | ✓ |
+| `mujoco` source (ground contact; exact) | ✓ | ✓ executed and probes, weight 1 | ✓ (MuJoCo's contacts) | ✓ | ✓ |
+| Recorded data with a torque sensor (`torque_key`) | ✓ | weight `measured_torque_weight` (default 0) | ✓ | ✓ | ✓ |
+| Recorded data with commands (`action_key`) | ✓ | — | ✓ | ✓ commands (PD request computed) and proposals | ✓ conditioned on the command |
+| Recorded motion only (mocap, retargeted) | ✓ | — | ✓ | ✓ proposals | ✓ unconditioned (next frame from the state) |
+| RL rollouts ([physics replay](bfm.md#physics-losses-during-rl)) | ✓ | — | ✓ (simulator contacts) | ✓ targets and proposals | ✓ conditioned on the target |
+
+R and R⁻¹ need to know which feet are down and what holds the base: frames within
+`contact_margin_steps` of a contact change, frames whose detected contacts leave
+more than `max_contact_residual` of the weight unexplained, and floating robots
+without contacts, rotors or a recorded support wrench get no response labels.
 
 ### Shared notation and loss reduction
 
@@ -52,12 +79,12 @@ position target in rad or m. For position control,
 a target $a_i$ requests the PD torque or force
 $\tau_i^{\mathrm{request}}=K_{p,i}(a_i-q_i)-K_{d,i}\dot q_i$,
 where $K_{p,i}$ and $K_{d,i}$ are the position and velocity gains.
-$\tau^{\mathrm{request}}$ is this pre-limit demand;
+$\tau^{\mathrm{request}}$ is this pre-limit demand, computed from the command;
 $\tau^{\mathrm{applied}}$ is the actuator output after its limits and
-controller dynamics. The applied value comes from simulation or an actuator
-measurement when available; for recordings without such measurements, the
-data pipeline uses an approximate inverse-dynamics estimate. The requested
-and applied values can differ when the actuator saturates.
+controller dynamics. The applied value comes only from a simulator or, if
+enabled, a torque sensor. Recordings without either have no applied torque, and
+nothing estimates one. The requested and applied values can differ when the
+actuator saturates.
 
 $\tau^{\mathrm{peak}}$ and $\tau^{\mathrm{cont}}$ are short-term and
 sustainable actuator torque or force limits. $L_e$ is the robot's
@@ -80,11 +107,11 @@ $$
 
 If no weights are supplied, $w_b=1$; an entirely empty mask or zero total
 confidence weight yields zero.
-FD and ID use $w_b=1$ for measured/exact simulated torque and
-$w_b=0.3$ by default for an inverse-dynamics estimate. The total objective
-is $\mathcal L=\sum_{k}\alpha_k\mathcal L_k$, where $k$ runs over A–F
-and $\alpha_k$ is the configured task weight: 1 for A–E and 0 for F by
-default. Every coefficient denoted $\lambda$ below defaults to 1.
+FD and ID use $w_b=1$ for exact simulated torque, $w_b=$ `measured_torque_weight`
+(default 0) for torque-sensor data, and $w_b=0$ otherwise. The total objective
+is $\mathcal L=\sum_{k}\alpha_k\mathcal L_k$, where $k$ runs over A, B, C, R,
+R⁻¹, D and E and $\alpha_k$ is the configured task weight, 1 by default.
+Every coefficient denoted $\lambda$ below defaults to 1.
 
 ### A. Forward kinematics
 
@@ -130,8 +157,9 @@ torque or force encourages the encoder to retain those physical
 differences. Graph mixing matters because the inverse mass matrix couples
 the action at one joint to motion at other joints; a floating base can move
 as well. The loss may help the shared representation anticipate the
-consequences of BFM actions. Its supervision is weaker where executed
-torque or force is only estimated from recorded motion and contacts.
+consequences of BFM actions. It trains only where the executed torque is
+known: simulated data (and torque-sensor data if enabled). Task R carries the
+same physics (how a torque change accelerates the robot) to every other dataset.
 
 **Meaning and target.** This teaches how applied torque or force accelerates
 the joints and, for floating robots, the base. The head receives $H_i$ and
@@ -157,8 +185,7 @@ $\hat y^{\mathrm{base}}$ is the pooled-head prediction.
 $B_{\mathrm{base}}$ contains rows with known base acceleration and eligible
 applied torque or force; the second term is omitted when this set is empty.
 $\lambda_{\mathrm{base}}$ controls its weight. $m^{\mathrm{FD}}$ selects
-actuated joints with measured or exact torque, or estimated torque when
-estimated labels are allowed and their contact residual passes the threshold.
+actuated joints of variants whose torque source has a positive weight $w_b$.
 
 ### C. Inverse dynamics
 
@@ -167,10 +194,9 @@ applied torque or force; inverse dynamics asks what torque or force a
 desired motion would require. This gives a capability-oriented signal:
 the same acceleration may be easy for one robot and near an actuator
 limit for another. It can discourage a representation that explains
-motion without encoding how costly the motion is to produce. On real
-contact-rich recordings, different unobserved contact forces can explain
-the same motion. The projection and reliability mask reduce that
-ambiguity but cannot make estimated torques exact.
+motion without encoding how costly the motion is to produce. With several
+feet down, different contact forces explain the same motion, so only the
+motion-determined part of the torque is supervised.
 
 **Meaning and target.** This teaches the torque or force required for a desired
 acceleration. The head receives $H_i$, desired $\ddot q_i/\sigma_i^a$,
@@ -187,13 +213,70 @@ e_i=\frac{
 \mathcal L_{\mathrm{ID}}=\mathcal A(e_i^2,m^{\mathrm{ID}},w).
 $$
 
-$\tau^{\mathrm{required}}$ is the inverse-dynamics label.
-$\odot$ denotes elementwise multiplication. $P$ is the motion-determined
-torque projector for estimated torques in contact; $P=I$ for measured or
-exact simulated torques. $m^{\mathrm{ID}}$ selects actuated joints with
-reliable labels. Estimated frames with an unexplained base wrench above
-the configured fraction of robot weight are excluded. Projection removes
-unobservable internal-force directions, not measurement/model error.
+$\tau^{\mathrm{required}}$ is the applied torque of the variant, which produced
+its acceleration. $\odot$ denotes elementwise multiplication. $P$ is the
+motion-determined torque projector of the frame's contact set
+(`determinate_torque_projector`); $P=I$ without contacts. A simulator's
+contact solver picks one of many internal-force distributions, which the state
+does not reveal, so even exact simulated torques are only supervised on
+$P\tau$. $m^{\mathrm{ID}}$ selects the same samples as $m^{\mathrm{FD}}$, except
+frames whose *detected* contacts fail the `max_contact_residual` check, because $P$
+needs the right contact set.
+
+### R. Contact-constrained response
+
+**Why this loss exists.** Tasks B and C need the applied torque, which most
+recorded data lacks and which cannot be estimated reliably. The response to a
+torque *change* needs no torque at all: at any state,
+$\delta\dot\nu=G(q)\,\delta\tau$ with
+$G=[M^{-1}-M^{-1}J^\top(JM^{-1}J^\top)^{-1}JM^{-1}]S^\top$, where $J$ is the
+Jacobian of the contacts that hold
+([derivation](dynamics.md#the-contact-constrained-response)). $G$ is each robot's
+own constrained inverse inertia: how hard each joint is to accelerate, how the
+joints and the base couple, and how the feet on the ground change that. It depends
+on $q$, the inertia (with rotor inertia) and the contact set only, so it is an
+exact label for every frame of every dataset, including motion-capture data.
+
+**Meaning and target.** `process_episode` stores $G$ (`response_operator`,
+$[6+J]\times J$) per frame. The collator draws, for every sample, a torque change
+$\delta\tau_i=\pm f_i\,\tau_i^{\mathrm{peak}}$ with $f_i$ log-uniform in
+`response_range` (default $[0.02,1]$), random sign, zero on passive joints. The
+head receives $\delta\tau_i/\tau_i^{\mathrm{peak}}$, mixes it over the graph, and
+predicts $\hat y_i$ for $y_i=\delta\ddot q_i/s_i^R$, plus the six base rows from
+the pooled tokens for floating robots:
+
+$$
+\mathcal L_{\mathrm R}=
+ \mathcal A((\hat y_i-y_i)^2,m^{\mathrm R},1)
+ +\lambda_{\mathrm{base}}\frac{1}{|B_{\mathrm R}|}
+ \sum_{b\in B_{\mathrm R}}\frac16\sum_{r=1}^{6}
+ (\hat y^{\mathrm{base}}_{b,r}-y^{\mathrm{base}}_{b,r})^2 .
+$$
+
+$s^R_r=\operatorname{RMS}_t\sqrt{\sum_k G_{rk}^2(\tau_k^{\mathrm{peak}})^2}$ over the
+robot's valid frames is the typical acceleration change from a full-peak change
+on every joint (floored at 1% of the largest joint value and at $10^{-3}$; base rows
+at $10^{-2}$). $m^{\mathrm R}$ selects the valid joints of frames with response
+labels (see [above](#where-the-labels-come-from)); $B_{\mathrm R}$ those of
+floating robots.
+
+### R-inv. Inverse response
+
+**Why this loss exists.** The mirror of C for torque changes: which torque change
+produces a desired change of motion. It ties accelerations back to each actuator's
+scale. Torque changes that only press the feet together leave the motion
+unchanged ($G(I-P)=0$), so only $P\delta\tau$ is recoverable.
+
+**Meaning and target.** The head receives $\delta\ddot q_i/s^R_i$ and the six
+normalized base rows (broadcast to every joint), mixes them over the graph, and
+predicts $\hat z_i$ for $z_i=\delta\tau_i/\tau_i^{\mathrm{peak}}$:
+
+$$
+e_i=\frac{[P((\hat z-z)\odot\tau^{\mathrm{peak}})]_i}{\tau_i^{\mathrm{peak}}},\qquad
+\mathcal L_{\mathrm R^{-1}}=\mathcal A(e_i^2,m^{\mathrm{R^{-1}}},1),
+$$
+
+with $m^{\mathrm{R^{-1}}}$ the actuated joints of frames with response labels.
 
 ### D. Motor feasibility
 
@@ -202,11 +285,18 @@ can still demand more torque or force than the motor can produce.
 Feasibility labels connect a proposed command to the actuator's
 short-term and sustainable limits. The continuous flag separates a
 command that is briefly executable from one that can be sustained.
-This is relevant to BFM's angle-target actions, but the pretraining
-head does not clip BFM actions at runtime. Its input already contains
-the requested torque or force calculated from the command and gains;
-a low motor loss alone therefore does **not** prove that the encoder or
-actor independently learned to use $K_p$ and $K_d$.
+This is relevant to BFM's angle-target actions; the runtime limit itself is
+enforced by the action map ([actuator torque limits](bfm.md#actuator-torque-limits)).
+Its input already contains the requested torque or force calculated from the
+command and gains; a low motor loss alone therefore does **not** prove that the
+encoder or actor independently learned to use $K_p$ and $K_d$.
+
+**Which proposals.** Recorded commands and simulated probes, and, for data
+without probes, `proposal_variants` (default 2) random torque proposals per frame
+(log-uniform 2–200% of peak, random sign). All labels are computed from the
+proposal, the state and the actuator limits, so they are exact. A recorded frame
+with neither a command nor a known torque has no executed proposal; its variant 0
+is skipped by this head.
 
 **Meaning and target.** Given $H_i$ and a proposed action, predict whether
 the actuator can execute it. The three action features are requested torque
@@ -330,39 +420,22 @@ The four $\lambda$ values weight displacement, rotation, linear velocity,
 and angular velocity. $m^{\mathrm{effect}}$ selects configured end-effectors
 with a valid next state; the last trajectory frame has no such label.
 The head receives the same action features as D and mixes them across joints.
+When a recording has no command and no known torque, the action features are
+zero (as at the first frame of an episode) and the head predicts the next frame
+from the state and its history alone; the target is still exact kinematics.
 
-### F. Rigid-body dynamics consistency
+### Removed: F. Rigid-body dynamics consistency
 
-**Why this loss exists.** The predicted acceleration from B should also
-satisfy the fixed-base equation of motion with the applied torque or
-force. This residual is a physics consistency check on the *prediction*,
-rather than another head with a separate label. With accurate analytic
-FD labels it mostly repeats B, so its task weight defaults to zero.
-The implemented residual omits floating-base and contact terms; applying
-it to those samples would penalize physically valid motion.
+Task F checked whether B's predicted acceleration satisfied the fixed-base
+equation of motion with the applied torque. It needed the applied torque, it
+duplicated B wherever that torque is exact, and it could not handle contacts.
+It was removed together with the torque estimates. A config with
+`loss_weights={"rbd": ...}` is rejected with an explanation.
 
-**Meaning and target.** Check whether predicted acceleration satisfies
-the fixed-base equation of motion. This optional loss is off by default
-because it largely duplicates B when analytic labels are available.
-
-$$
-\hat{\ddot q}_i=\sigma_i^a\hat y_i,\qquad
-r_i=\frac{[M(q)\hat{\ddot q}]_i+c_i(q,\dot q)+g_i(q)
- +\tau_{f,i}(\dot q)-\tau_i^{\mathrm{applied}}}
- {\tau_i^{\mathrm{cont}}+\varepsilon},\qquad
-\mathcal L_{\mathrm{RBD}}=\mathcal A(r_i^2,m^{\mathrm{RBD}},1).
-$$
-
-$M(q)$ is the joint-space mass matrix, $c_i$ is Coriolis/centrifugal
-torque or force, $g_i$ gravity torque or force, and $\tau_{f,i}$ friction
-torque or force.
-$m^{\mathrm{RBD}}$ selects actuated fixed-base joints with eligible FD
-labels. Floating-base contacts and base coupling are absent from this
-residual, so floating-base samples are excluded.
-
-Weights: `--fk_weight`, `--fd_weight`, `--id_weight`, `--motor_weight`,
-`--effect_weight`, `--rbd_weight`, plus the `lambda_*` fields of
-`DaGetPhysicsPretrainingConfig` (including `lambda_base_acceleration`).
+Weights: `--fk_weight`, `--fd_weight`, `--id_weight`, `--response_weight`,
+`--inverse_response_weight`, `--motor_weight`, `--effect_weight`, plus the
+`lambda_*` fields of `DaGetPhysicsPretrainingConfig` (including
+`lambda_base_acceleration`, which also weights the base rows of R).
 
 ## Training with the Hugging Face Trainer
 
@@ -393,8 +466,10 @@ example to pretrain on legged, humanoid, and flying robots together. Every
 - `--physics_layers 0,2`, `--mass_encoding`, `--mixing_layers`;
 - `--fk_orientation false`, and the task weights.
 
-The Trainer logs `loss_fk`, `loss_fd`, `loss_id`, `loss_motor`, `loss_effect`,
-`loss_rbd`, and the matching `eval_loss_*` next to the total loss.
+The Trainer logs `loss_fk`, `loss_fd`, `loss_id`, `loss_response`,
+`loss_inverse_response`, `loss_motor`, `loss_effect`, and the matching
+`eval_loss_*` next to the total loss. A batch without a task's labels (for
+example a recorded-only batch for FD) logs zero for that task.
 `runs/<name>` then holds a `from_pretrained` checkpoint and `embodiments.json`.
 Load the encoder for downstream use with:
 
@@ -419,8 +494,8 @@ chart, for example with and without Physics Cross Attention.
 | Tag | Meaning |
 |---|---|
 | `train/loss`, `eval/loss` | Weighted total loss |
-| `train/loss_fk`, `_fd`, `_id`, `_motor`, `_effect`, `_rbd` | Mean of each task loss since the last log |
-| `eval/loss_fk`, `_fd`, `_id`, `_motor`, `_effect`, `_rbd` | Each task loss on held-out episodes |
+| `train/loss_fk`, `_fd`, `_id`, `_response`, `_inverse_response`, `_motor`, `_effect` | Mean of each task loss since the last log |
+| `eval/loss_fk`, `_fd`, `_id`, `_response`, `_inverse_response`, `_motor`, `_effect` | Each task loss on held-out episodes (R and R⁻¹ use fresh torque changes each evaluation) |
 | `train/learning_rate`, `train/grad_norm`, `train/epoch` | Optimizer state |
 | `eval/runtime`, `eval/samples_per_second`, `eval/steps_per_second` | Evaluation speed |
 
@@ -444,21 +519,54 @@ A data config is JSON. Relative paths start from the config file.
   "history_size": 3,
   "joint_features": "da_get_zero",
   "eval_fraction": 0.05,
-  "allow_estimated_torque_for_fd": true,
-  "use_estimated_previous_torque": true,
-  "max_estimate_residual": 0.5,
-  "estimated_torque_weight": 0.3,
+  "seed": 0,
+  "measured_torque_weight": 0.0,
+  "max_contact_residual": 0.5,
+  "contact_margin_steps": 2,
+  "proposal_variants": 2,
+  "response_range": [0.02, 1.0],
   "sources": [ { "type": "synthetic", ... }, { "type": "huggingface", ... } ]
 }
 ```
 
-**`"type": "synthetic"`** simulates a URDF robot with the analytic dynamics.
-Each of `randomized_embodiments` variants perturbs:
-- link masses and inertias;
-- link lengths (inertia is scaled consistently);
+| Key | Default | Meaning |
+|---|---|---|
+| `history_size` | 3 | Observation history of the tokens |
+| `joint_features` | `da_get_zero` | Hardware features of the tokens (`cross_embodiment`, or `JointFeatureConfig` fields) |
+| `eval_fraction`, `seed` | 0.05, 0 | Episodes held out; split and proposal seed |
+| `measured_torque_weight` | 0.0 | Loss weight of FD/ID labels from torque sensors. Simulated torques always weigh 1. Off by default: sensor torques (Unitree's current-based estimate, for example) are themselves approximate |
+| `max_contact_residual` | 0.5 | Response labels of frames whose *detected* contacts leave more than this fraction of the weight in the base wrench unexplained are dropped |
+| `contact_margin_steps` | 2 | Frames before and after a contact change without response labels |
+| `proposal_variants` | 2 | Random torque proposals per frame (task D) for data without probes |
+| `response_range` | `[0.02, 1.0]` | Torque changes of R and R⁻¹, as fractions of peak torque (log-uniform, random sign) |
+| `include_probe_variants` | true | Index probe and proposal variants as samples |
+| `cache_dir` | `.cache/physics_data` | Processed-data cache |
+
+Keys of the earlier estimate-based pipeline (`allow_estimated_torque_for_fd`,
+`use_estimated_previous_torque`, `estimated_torque_weight`,
+`max_estimate_residual`) are rejected with a message naming their replacement.
+
+Every source accepts `armature` (rotor inertia, one value or `{joint glob: value}`,
+[details](dynamics.md#rotor-inertia-armature)), `actuator_overrides`, and the graph
+keys (`joint_names`, `frozen_joints`, `floating_base`, ...).
+
+**`"type": "synthetic"`** simulates a URDF robot with the analytic dynamics. Its
+applied torques are exact (`exact_dynamics`). Each of `randomized_embodiments`
+variants perturbs (`randomization`, defaults in brackets):
+- link masses and inertias (`mass` [0.8, 1.2]);
+- link centers of mass, by up to `com_offset` (0.1) of each link's radius of
+  gyration per axis;
+- link lengths (inertia is scaled consistently; `length` [0.9, 1.1]);
 - damping and friction, as fractions of each joint's own limits, so the same
-  ranges suit a finger, a knee, and a propeller;
-- torque and speed limits.
+  ranges suit a finger, a knee, and a propeller (`damping`, `friction` [0, 0.02]);
+- torque and speed limits (`torque`, `velocity` [0.8, 1.2]);
+- each joint's rotor inertia, if the source sets one (`armature` [0.5, 1.5]).
+
+These are true parameters of the variant: its physics tokens describe them, so
+"same kinematics, different dynamics" samples teach the encoder to read the
+physics tokens (dynamics randomization, Peng et al., ICRA 2018). In RL the
+opposite convention holds: the simulator randomizes masses while the tokens stay
+nominal, as on a real robot whose true masses are unknown.
 
 `base_modes` is cycled over the variants:
 
@@ -472,7 +580,9 @@ Commands are clipped to the torque-speed envelope before they are applied, so
 labels always use the executed torque, never an unexecuted proposal. Each state
 also gets `probe_torques` extra torques (log-uniform from 2% to 200% of peak,
 random sign), each simulated one step. This tests action conditioning at a
-fixed pose and gives the motor head infeasible proposals. This source does not
+fixed pose and gives the motor head infeasible proposals. The `floating` mode has
+no ground contact (the harness wrench is recorded and does not depend on the
+torque), so its probes and response labels are exact. This source does not
 simulate ground contact; use the
 [`mujoco` source](data.md#ground-contact-in-synthetic-data-mujoco) or recorded
 datasets for that.
@@ -486,10 +596,10 @@ columns that are concatenated in order.
 |---|---|
 | `urdf`, `joint_names` | URDF joint of each recorded state entry, in order. Unlisted joints are frozen (`frozen_joints` gives their positions, default 0). |
 | `state_key`, `state_indices` | Position columns and which entries to use. A null index means the position is not recorded (rotors); it is integrated from the velocity. |
-| `velocity_key`, `torque_key` | Optional columns. Without velocities, positions are finite-differenced. Without torques, torques are [estimated](dynamics.md#estimating-joint-torques-without-torque-sensors). |
+| `velocity_key`, `torque_key` | Optional columns. Without velocities, positions are finite-differenced. A torque column is a sensor (`measured`, weight `measured_torque_weight`); without one the episode has no torque labels and nothing is estimated. |
 | `action_key`, `action_indices`, `action_type` | Commands (`position`, `velocity`, or `torque`; rotor joints keep the `thrust` mode). Set `actuator_defaults.kp`/`kd` for position control so requested torques are meaningful. |
 | `state_scale`, `state_offset` | $q_{\mathrm{URDF}}=\mathrm{scale}\cdot q+\mathrm{offset}$, for sign, unit (degrees), or zero-offset differences. |
-| `floating_base` | The base is free (legged robots, drones). |
+| `floating_base` | The base is free (legged robots, drones). Data of part of a robot whose support is not recorded (arms of a standing humanoid) should use `false`: a free base without contacts, rotors or support wrench gets no response labels. |
 | `base_orientation_key` (+ `_indices`, `base_orientation_format`: `wxyz`, `xyzw`, `rpy`, `matrix`), `base_position_key` | Base pose in the world. |
 | `base_linear_velocity_key`, `base_angular_velocity_key` (+ `_frame`: `base` or `world`) | Base twist; IMU gyros give angular velocity in the base frame. |
 | `projected_gravity_key`, `imu_acceleration_key` | Unit gravity direction and accelerometer specific force, both in the base frame. |

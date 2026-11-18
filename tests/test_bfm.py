@@ -4,6 +4,7 @@ import unittest
 
 import torch
 
+from model.physics_schema import ACTUATOR_FEATURE_SIZE, DYNAMICS_FEATURE_SIZE, RIGID_BODY_FEATURE_SIZE
 from model import BfmConfig, DaGetBfmModel, DaGetConfig, DaGetEncoder
 from model.modeling_bfm import TruncatedNormal
 
@@ -38,9 +39,9 @@ def state_inputs(count: int, joints: int, order: torch.Tensor | None = None, val
     """Return random state-encoder inputs of a robot without graph edges, optionally with joints reordered."""
     values = values or {
         "input_values": torch.randn(count, joints, STATE),
-        "rigid_body_features": torch.randn(count, joints, 25),
-        "actuator_features": torch.randn(count, joints, 6),
-        "dynamics_features": torch.randn(count, joints, 7),
+        "rigid_body_features": torch.randn(count, joints, RIGID_BODY_FEATURE_SIZE),
+        "actuator_features": torch.randn(count, joints, ACTUATOR_FEATURE_SIZE),
+        "dynamics_features": torch.randn(count, joints, DYNAMICS_FEATURE_SIZE),
     }
     inputs = {key: value if order is None else value[:, order] for key, value in values.items()}
     return {

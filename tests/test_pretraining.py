@@ -23,6 +23,7 @@ from model.pretraining import (
     rotation_from_6d,
 )
 from model.training import PhysicsPretrainingTrainer, build_physics_datasets
+from model.training.episodes import TORQUE_SOURCES
 from tests.test_embodiment import humanoid, quadruped
 
 ARM_JOINTS = ["left_shoulder", "left_elbow", "right_shoulder", "right_elbow"]
@@ -88,6 +89,8 @@ class PretrainingPipelineTest(unittest.TestCase):
                     "fps": 30,
                     "end_effectors": ["left_elbow", "right_elbow"],
                     "actuator_defaults": {"kp": 30.0, "kd": 1.0},
+                    # Upper-body data: the torso is held, so the arms see a fixed base.
+                    "floating_base": False,
                 },
             ],
         }
@@ -113,7 +116,7 @@ class PretrainingPipelineTest(unittest.TestCase):
         )
         torch.manual_seed(0)
         config = DaGetPhysicsPretrainingConfig.from_encoder_config(
-            encoder, loss_weights={"rbd": 0.1}, token_layout=self.datasets.token_layout(), **overrides
+            encoder, token_layout=self.datasets.token_layout(), **overrides
         )
         return DaGetForPhysicsPretraining(config)
 
@@ -132,10 +135,13 @@ class PretrainingPipelineTest(unittest.TestCase):
         self.assertEqual(arm.effect_mask.tolist(), [False, True, False, True])
         self.assertTrue(torch.all(arm.acceleration_scale > 0))
         _, episode = next(item for item in self.datasets.train.episodes if item[0] == 2)
-        self.assertFalse(bool(episode["torque_measured"][0]))
-        self.assertEqual(episode["applied_torque"].shape[1], 1)
+        # No torque sensor: no torque anywhere, the executed variant plus two proposals.
+        self.assertEqual(episode["torque_source"].unique().tolist(), [TORQUE_SOURCES.index("none")])
+        self.assertEqual(float(episode["applied_torque"].abs().max()), 0.0)
+        self.assertEqual(episode["applied_torque"].shape[1], 3)
         quadruped_episode = next(item for item in self.datasets.train.episodes if item[0] == 0)[1]
         self.assertEqual(quadruped_episode["applied_torque"].shape[1], 2)
+        self.assertEqual(quadruped_episode["torque_source"].unique().tolist(), [TORQUE_SOURCES.index("exact")])
         root = Path(self.directory.name)
         self.assertEqual(len(list((root / "cache").glob("*.pt"))), 1)
         again = build_physics_datasets(self.config_path, cache_dir=root / "cache")
@@ -149,12 +155,13 @@ class PretrainingPipelineTest(unittest.TestCase):
         self.assertEqual(batch["input_values"].shape[-1], self.datasets.token_size)
         for name, value in batch.items():
             self.assertTrue(torch.isfinite(value.float()).all(), name)
-        for name in ("fd_mask", "id_mask", "motor_mask", "effect_mask"):
+        for name in ("fd_mask", "id_mask", "motor_mask", "effect_mask", "response_mask", "inverse_response_mask"):
             self.assertFalse(bool((batch[name] & ~mask).any()), name)
         self.assertTrue(torch.all(batch["input_values"][~mask] == 0))
+        self.assertTrue(bool(batch["response_mask"].any()))
 
     def test_forward_losses_and_training_reduce_loss(self) -> None:
-        """All six losses are computed and a few steps of Adam reduce the total."""
+        """All seven losses are computed and a few steps of Adam reduce the total."""
         model = self.model()
         batch = self.batch()
         output = model(**batch)
@@ -169,6 +176,71 @@ class PretrainingPipelineTest(unittest.TestCase):
             loss.backward()
             optimizer.step()
         self.assertLess(float(model(**batch).loss.detach()), 0.7 * first)
+
+    def test_data_without_torque_gives_no_torque_labels_or_inputs(self) -> None:
+        """Samples of a dataset without torque sensors train R, R^-1, FK, D and E, never FD or ID."""
+        dataset = self.datasets.train
+        arm = [index for index, (episode, _, _) in enumerate(dataset.index) if dataset.episodes[episode][0] == 2]
+        samples = [dataset[index] for index in arm[:24]]
+        batch = self.datasets.collator()(samples)
+        self.assertFalse(bool(batch["fd_mask"].any()))
+        self.assertFalse(bool(batch["id_mask"].any()))
+        self.assertEqual(float(batch["torque_label_weight"].max()), 0.0)
+        self.assertTrue(bool(batch["response_mask"].any()))
+        self.assertTrue(bool(batch["inverse_response_mask"].any()))
+        self.assertTrue(bool(batch["motor_mask"].any()))  # commands and proposals
+        # The previous-action token features come from the recorded commands, never from a torque estimate.
+        self.assertEqual(float(batch["fd_torque"].abs().max()), 0.0)
+
+    def test_response_targets_are_the_exact_response(self) -> None:
+        """The collator's response target is G(q) dtau, normalized, for the drawn torque change."""
+        torch.manual_seed(3)
+        dataset = self.datasets.train
+        sample = dataset[0]
+        record = self.datasets.records[sample["embodiment"]]
+        batch = self.datasets.collator()([sample])
+        peak = record.actuator["peak_torque"].float()
+        change = batch["response_torque"][0] * peak
+        expected = sample["response_operator"].float() @ change
+        torch.testing.assert_close(batch["response_target"][0] * record.response_scale[6:], expected[6:], rtol=1e-4, atol=1e-6)
+        torch.testing.assert_close(batch["inverse_response_target"][0], batch["response_torque"][0])
+        fractions = batch["response_torque"][0].abs()
+        self.assertTrue(bool(((fractions >= 0.02 - 1e-6) & (fractions <= 1.0 + 1e-6)).all()))
+
+    def test_removed_config_keys_are_rejected(self) -> None:
+        """Keys of the estimate-based pipeline fail loudly instead of being ignored."""
+        for key in ("use_estimated_previous_torque", "estimated_torque_weight", "allow_estimated_torque_for_fd", "max_estimate_residual"):
+            with self.assertRaisesRegex(ValueError, key):
+                build_physics_datasets({**self.config, key: 0.5})
+        with self.assertRaisesRegex(ValueError, "rbd"):
+            DaGetPhysicsPretrainingConfig(loss_weights={"rbd": 0.1})
+
+    def test_floating_base_without_known_support_has_no_response(self) -> None:
+        """A floating robot with no feet, rotors or recorded support wrench gets no response labels."""
+        config = json.loads(json.dumps(self.config))
+        config["sources"] = [{**config["sources"][1], "floating_base": True}]
+        root = Path(self.directory.name)
+        path = root / "floating.json"
+        path.write_text(json.dumps({**config, "eval_fraction": 0.0}))
+        datasets = build_physics_datasets(path, cache_dir=root / "cache_floating")
+        for _, episode in datasets.train.episodes:
+            self.assertFalse(bool(episode["response_valid"].any()))
+
+    def test_measured_torques_are_off_by_default(self) -> None:
+        """Torque-sensor labels need measured_torque_weight; simulated ones always count."""
+        from model.training.dataset import CollatorSettings, PhysicsDataCollator
+
+        dataset = self.datasets.train
+        index = next(i for i, (episode, _, variant) in enumerate(dataset.index) if dataset.episodes[episode][0] == 0 and variant == 0)
+        sample = dict(dataset[index])
+        measured = {**sample, "torque_source": TORQUE_SOURCES.index("measured")}
+        records = self.datasets.records
+        default = PhysicsDataCollator(records, 2)([sample, measured])
+        self.assertEqual(default["torque_label_weight"].tolist(), [1.0, 0.0])
+        self.assertFalse(bool(default["fd_mask"][1].any()))
+        enabled = PhysicsDataCollator(records, 2, CollatorSettings(measured_torque_weight=0.5))([sample, measured])
+        self.assertEqual(enabled["torque_label_weight"].tolist(), [1.0, 0.5])
+        self.assertTrue(bool(enabled["fd_mask"][1].any()))
 
     def test_position_only_fk_and_disabled_tasks(self) -> None:
         """fk_orientation=False drops the rotation term; weight 0 removes a task."""
@@ -271,6 +343,20 @@ class PretrainingPipelineTest(unittest.TestCase):
         self.assertIn("loss_fk", logged[0])
         self.assertIn("eval_loss_motor", metrics)
         self.assertTrue(np.isfinite(metrics["eval_loss"]))
+
+
+class ExampleConfigTest(unittest.TestCase):
+    """The shipped data configs use only current keys."""
+
+    def test_example_configs_have_no_removed_keys(self) -> None:
+        """Every config under configs/ passes check_data_config."""
+        from model.training.dataset import check_data_config
+
+        root = Path(__file__).resolve().parents[1] / "configs"
+        paths = sorted(root.rglob("*.json"))
+        self.assertTrue(paths)
+        for path in paths:
+            check_data_config(json.loads(path.read_text()))
 
 
 class LossHelpersTest(unittest.TestCase):

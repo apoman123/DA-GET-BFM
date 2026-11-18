@@ -13,8 +13,9 @@ class PhysicsPretrainingTrainer(Trainer):
     """Trainer for ``DaGetForPhysicsPretraining``.
 
     Besides the weighted total ``loss``, it logs the running mean of each task
-    loss as ``loss_fk``, ``loss_fd``, ``loss_id``, ``loss_motor``,
-    ``loss_effect``, and ``loss_rbd`` (and ``eval_loss_*`` during evaluation).
+    loss as ``loss_fk``, ``loss_fd``, ``loss_id``, ``loss_response``,
+    ``loss_inverse_response``, ``loss_motor``, and ``loss_effect`` (and
+    ``eval_loss_*`` during evaluation).
     """
 
     def __init__(self, *args: Any, **kwargs: Any) -> None:

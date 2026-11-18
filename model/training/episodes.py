@@ -3,23 +3,28 @@
 A trajectory is a recorded or simulated sequence of joint states for one
 embodiment, optionally with the state of a floating base. ``process_episode``
 computes, once per frame, everything training needs: the dynamics features, the
-mass matrix, FK targets, and the labels of every auxiliary task. The dataset
-builder caches the result on disk, so the analytic dynamics run once per
-dataset rather than once per epoch.
+mass matrix, FK targets, the contact-constrained response, and the labels of every
+auxiliary task. The dataset builder caches the result on disk, so the analytic
+dynamics run once per dataset rather than once per epoch.
 
 Missing signals are reconstructed:
 
 * joint velocities and accelerations by finite differences;
 * the base twist from the base pose, and base accelerations from the twist;
 * gravity in the base frame from the base orientation or projected gravity;
-* foot contacts from foot height along gravity and foot speed;
-* joint torques by inverse dynamics, fixed base or floating base with contact
-  forces (``model.dynamics.estimate_joint_efforts``).
+* foot contacts from foot height along gravity and foot speed.
+
+Joint torques are never estimated for training. Inverse-dynamics estimates from
+kinematics are 43-97% off on real robots (``docs/dynamics.md``), so a dataset
+without torque sensors gets no torque labels and no torque inputs. Its dynamics
+supervision is the contact-constrained response ``G(q)``, which is exact for the
+model and needs no torque. ``estimate_episode_efforts`` keeps the estimator for
+analysis.
 
 Each frame can carry several *action variants*. Variant 0 is what was executed.
-Synthetic data adds probe variants: other torques applied at the same state,
-which test action conditioning at a fixed pose (task B) and give infeasible
-proposals for the motor head (task D).
+Simulated data adds probe variants: other torques applied at the same state, which
+test action conditioning at a fixed pose (task B) and give infeasible proposals for
+the motor head (task D). Other data adds proposal variants for the motor head.
 """
 
 from __future__ import annotations
@@ -32,6 +37,7 @@ import torch
 from model.dynamics import (
     STANDARD_GRAVITY,
     BaseMotion,
+    constrained_response,
     determinate_torque_projector,
     estimate_joint_efforts,
     floating_forward_dynamics,
@@ -57,6 +63,9 @@ from model.physics_schema import ACTUATOR_MODES
 
 ACTION_TYPES = ("torque", "position", "velocity")
 BASE_FEATURE_SIZE = 11
+# Where a variant's torque comes from. Only "measured" and "exact" torques enter
+# training; nothing is estimated.
+TORQUE_SOURCES = ("none", "measured", "exact")
 
 
 @dataclass
@@ -67,7 +76,7 @@ class EmbodimentRecord:
         name (str): Label for logs.
         graph (EmbodimentGraph): Robot graph.
         specs (tuple[ActuatorSpec, ...]): One actuator spec per joint.
-        rigid_body_features (torch.Tensor): ``[J, 25]``.
+        rigid_body_features (torch.Tensor): ``[J, 26]``.
         actuator_features (torch.Tensor): ``[J, 6]``.
         joint_features (torch.Tensor): ``[J, F]`` GET-Zero hardware features.
         effect_mask (torch.Tensor): Bool ``[J]`` end-effector joints for task E.
@@ -81,6 +90,9 @@ class EmbodimentRecord:
             displacement, linear velocity, and angular velocity, set from data.
             Effect targets are divided by them so translation and rotation
             terms have comparable magnitude.
+        response_scale (torch.Tensor): ``[6 + J]`` RMS acceleration change from a
+            full-peak torque change (base rows, then joints), set from data. The
+            response targets are divided by it.
     """
 
     name: str
@@ -95,6 +107,7 @@ class EmbodimentRecord:
     acceleration_scale: torch.Tensor = field(default=None)
     base_acceleration_scale: torch.Tensor = field(default=None)
     effect_scales: torch.Tensor = field(default=None)
+    response_scale: torch.Tensor = field(default=None)
 
     @classmethod
     def build(
@@ -171,8 +184,10 @@ class Trajectory:
             from positions when None.
         accelerations (torch.Tensor | None): ``[T, J]`` qdd; finite-differenced
             from velocities when None.
-        applied_torque (torch.Tensor | None): ``[T, J]`` measured efforts; the
-            inverse-dynamics estimate is used when None.
+        applied_torque (torch.Tensor | None): ``[T, J]`` efforts from a torque
+            sensor, or the exact applied torque of a simulator (with
+            ``exact_dynamics``). None means unknown: the episode then has no torque
+            labels and no torque inputs (nothing is estimated).
         actions (torch.Tensor | None): ``[T, J]`` commands sent at each frame.
         action_type (str): ``torque``, ``position``, or ``velocity``.
         gravity (torch.Tensor | None): ``[T, 3]`` or ``[3]`` gravity in the base
@@ -202,7 +217,7 @@ class Trajectory:
             wrench on the base (synthetic harness, pushes), for exact labels.
         exact_dynamics (bool): The data come from a simulator whose applied
             torques produce the recorded accelerations exactly (with contacts),
-            so inverse-dynamics labels equal the applied torques.
+            so the torques are exact labels (torque source ``exact``).
         probe_executed (torch.Tensor | None): ``[T, K, J]`` executed probe
             torques computed by a simulator (with contacts).
         probe_accelerations (torch.Tensor | None): ``[T, K, J]`` joint
@@ -526,25 +541,141 @@ def _effect_targets(
     return position_next - poses[..., :3, 3], rotation_next, linear, angular
 
 
+def _contact_state(
+    record: EmbodimentRecord,
+    trajectory: Trajectory,
+    q: torch.Tensor,
+    qd: torch.Tensor,
+    gravity: torch.Tensor,
+    base: _BaseTrack,
+    height_tolerance: float,
+    speed_tolerance: float,
+) -> tuple[torch.Tensor | None, bool]:
+    """Return the contact flags ``[T, C]`` (None without contact links) and whether they were given."""
+    if not (record.graph.floating_base and record.contact_links):
+        return None, False
+    if trajectory.contacts is not None:
+        return trajectory.contacts.to(torch.bool), True
+    return detect_contacts(record, q, qd, gravity, base, height_tolerance, speed_tolerance), False
+
+
+def _stable_contacts(contacts: torch.Tensor, margin: int) -> torch.Tensor:
+    """Return bool ``[T]``: no contact changes within ``margin`` frames of each frame."""
+    steps = contacts.shape[0]
+    stable = torch.ones(steps, dtype=torch.bool)
+    if steps < 2 or margin <= 0:
+        return stable
+    changes = torch.nonzero((contacts[1:] != contacts[:-1]).any(-1)).squeeze(-1)
+    for change in changes.tolist():
+        # The change happens between frames ``change`` and ``change + 1``.
+        stable[max(change - margin + 1, 0) : min(change + margin + 1, steps)] = False
+    return stable
+
+
+def estimate_episode_efforts(
+    record: EmbodimentRecord,
+    trajectory: Trajectory,
+    contact_height_tolerance: float = 0.03,
+    contact_speed_tolerance: float = 0.5,
+) -> dict[str, torch.Tensor]:
+    """Estimate joint torques of an episode by inverse dynamics, for analysis only.
+
+    Training never uses these estimates (see ``docs/dynamics.md``): they are 43-97%
+    off on real robots. This function exists to measure that error against datasets
+    with torque sensors (``scripts/validate_torque_estimation.py``) and to test the
+    estimator.
+
+    Args:
+        record (EmbodimentRecord): Robot.
+        trajectory (Trajectory): Episode.
+        contact_height_tolerance (float): See ``detect_contacts``.
+        contact_speed_tolerance (float): See ``detect_contacts``.
+
+    Returns:
+        dict[str, torch.Tensor]: ``efforts`` ``[T, J]``, ``projection`` ``[T, J, J]``
+            (the motion-determined part, ``determinate_torque_projector``),
+            ``residual`` ``[T]`` (unexplained base wrench in N), and ``contacts``
+            ``[T, C]`` (empty without contact links).
+    """
+    graph = record.graph
+    q = trajectory.positions.to(torch.float64)
+    steps, joints = q.shape
+    dt = trajectory.dt
+    continuous = torch.tensor([kind == "continuous" for kind in graph.joint_types])
+    qd = trajectory.velocities.to(torch.float64) if trajectory.velocities is not None else _difference(q, dt, continuous)
+    qdd = trajectory.accelerations.to(torch.float64) if trajectory.accelerations is not None else _difference(qd, dt)
+    gravity = base_gravity(trajectory, steps)
+    base = reconstruct_base(trajectory, steps, gravity)
+    if not graph.floating_base:
+        zeros = torch.zeros((steps, 3), dtype=torch.float64)
+        base = _BaseTrack(False, False, zeros, zeros, zeros, zeros, False, None, None)
+    contacts, _ = _contact_state(record, trajectory, q, qd, gravity, base, contact_height_tolerance, contact_speed_tolerance)
+    estimate = estimate_joint_efforts(
+        graph, q, qd, qdd, gravity,
+        BaseMotion(base.linear_velocity, base.angular_velocity, base.linear_acceleration, base.angular_acceleration),
+        record.contact_links if contacts is not None else None, contacts, record.actuator,
+        surface_contacts=record.surface_contacts, base_external_wrench=trajectory.base_external_wrench,
+    )
+    projection = torch.eye(joints, dtype=torch.float64).expand(steps, joints, joints)
+    if contacts is not None and bool(contacts.any()):
+        surface = record.surface_contacts if record.surface_contacts is not None else len(record.contact_links) <= 2
+        projection, _ = determinate_torque_projector(graph, q, list(record.contact_links), contacts, surface)
+    return {
+        "efforts": estimate.efforts,
+        "projection": projection,
+        "residual": estimate.residual_wrench.norm(dim=-1),
+        "contacts": contacts if contacts is not None else torch.zeros((steps, 0), dtype=torch.bool),
+    }
+
+
+def _proposals(record: EmbodimentRecord, steps: int, count: int, seed: int) -> torch.Tensor:
+    """Return ``[T, K, J]`` random torque proposals: random sign, log-uniform 2%-200% of peak."""
+    generator = torch.Generator().manual_seed(seed)
+    peak = record.actuator["peak_torque"]
+    shape = (steps, count, record.graph.num_joints)
+    fraction = torch.exp(torch.empty(shape, dtype=torch.float64).uniform_(math.log(0.02), math.log(2.0), generator=generator))
+    sign = torch.randint(0, 2, shape, generator=generator).to(torch.float64) * 2 - 1
+    return sign * fraction * peak
+
+
 def process_episode(
     record: EmbodimentRecord,
     trajectory: Trajectory,
     feature_dtype: torch.dtype = torch.float32,
-    use_estimated_previous_torque: bool = True,
     contact_height_tolerance: float = 0.03,
     contact_speed_tolerance: float = 0.5,
+    proposal_variants: int = 2,
+    contact_margin_steps: int = 2,
+    seed: int = 0,
 ) -> dict[str, torch.Tensor]:
-    """Compute features and labels for every frame and action variant.
+    """Compute features and labels for every frame and action variant, without torque estimates.
+
+    Torque enters only where it is known exactly or measured: a simulator's applied
+    torque (``exact_dynamics``), a dataset's torque sensor (``applied_torque``), or a
+    command converted by the known control law. Datasets without either get no
+    torque labels and no torque inputs; their dynamics supervision is the
+    contact-constrained response ``G(q)`` (``model.dynamics.constrained_response``),
+    which needs no torque.
+
+    Variants of each frame:
+
+    * variant 0: what was executed. Torque source ``exact`` (simulation),
+      ``measured`` (torque sensor) or ``none``.
+    * probe variants (simulated data): other torques at the same state, simulated one
+      step, all ``exact``.
+    * proposal variants (data without probes): random torque proposals at the
+      recorded state, for the motor-feasibility head only.
 
     Args:
         record (EmbodimentRecord): Embodiment of the trajectory.
         trajectory (Trajectory): Raw data.
         feature_dtype (torch.dtype): Storage dtype.
-        use_estimated_previous_torque (bool): Put the inverse-dynamics
-            estimate of ``tau_{t-1}`` in the dynamics features (flag 0.5) when
-            no torque is measured; otherwise it is zero with flag 0.
         contact_height_tolerance (float): See ``detect_contacts``.
         contact_speed_tolerance (float): See ``detect_contacts``.
+        proposal_variants (int): Proposal variants per frame of data without probes.
+        contact_margin_steps (int): Frames before and after a contact change whose
+            response labels are dropped (the contact set is uncertain there).
+        seed (int): Seed of the proposals.
 
     Returns:
         dict[str, torch.Tensor]: Per-frame ``[T, ...]`` and per-variant
@@ -558,6 +689,8 @@ def process_episode(
     q = trajectory.positions.to(torch.float64)
     if q.ndim != 2 or q.shape[1] != joints:
         raise ValueError(f"positions must be [T, {joints}] for {record.name}")
+    if trajectory.exact_dynamics and trajectory.applied_torque is None:
+        raise ValueError(f"{record.name}: exact_dynamics needs the applied torque")
     steps = q.shape[0]
     dt = trajectory.dt
     continuous = torch.tensor([kind == "continuous" for kind in graph.joint_types])
@@ -577,88 +710,90 @@ def process_episode(
     if not floating:
         zeros = torch.zeros((steps, 3), dtype=torch.float64)
         base = _BaseTrack(False, False, zeros, zeros, zeros, zeros, False, None, None)
-    motion = BaseMotion(
-        base.linear_velocity, base.angular_velocity, base.linear_acceleration, base.angular_acceleration
-    )
     actuator = record.actuator
-    contacts = None
-    if floating and record.contact_links:
-        contacts = (
-            trajectory.contacts.to(torch.bool)
-            if trajectory.contacts is not None
-            else detect_contacts(
-                record, q, qd, gravity, base, contact_height_tolerance, contact_speed_tolerance
-            )
-        )
-
-    def estimate(accelerations: torch.Tensor, base_motion: BaseMotion):
-        return estimate_joint_efforts(
-            graph,
-            q,
-            qd,
-            accelerations,
-            gravity,
-            base_motion,
-            record.contact_links if contacts is not None else None,
-            contacts,
-            actuator,
-            surface_contacts=record.surface_contacts,
-            base_external_wrench=trajectory.base_external_wrench,
-        )
-
-    measured = trajectory.applied_torque is not None
-    first_estimate = estimate(qdd, motion)
-    applied = trajectory.applied_torque.to(torch.float64) if measured else first_estimate.efforts
-    residual = first_estimate.residual_wrench.norm(dim=-1)
-    if trajectory.exact_dynamics:
-        residual = torch.zeros_like(residual)
     has_thrust = bool((actuator["mode"] == ACTUATOR_MODES.index("thrust")).any())
-    if not record.contact_links and not has_thrust:
-        # No contact model: the base is held by something not modelled (a
-        # stand, a harness, legs the dataset does not record). The joint
-        # efforts are still right; the base wrench is simply that support.
-        residual = torch.zeros_like(residual)
+    contacts, contacts_given = _contact_state(
+        record, trajectory, q, qd, gravity, base, contact_height_tolerance, contact_speed_tolerance
+    )
+    surface = record.surface_contacts if record.surface_contacts is not None else len(record.contact_links) <= 2
+    links = list(record.contact_links)
+
+    # Torque source of what was executed.
+    if trajectory.exact_dynamics:
+        source0 = TORQUE_SOURCES.index("exact")
+    elif trajectory.applied_torque is not None:
+        source0 = TORQUE_SOURCES.index("measured")
+    else:
+        source0 = TORQUE_SOURCES.index("none")
+    known0 = source0 != TORQUE_SOURCES.index("none")
+    applied = trajectory.applied_torque.to(torch.float64) if known0 else torch.zeros_like(q)
+
+    # Contact-set checks. Contacts from a sensor or a simulator are trusted; detected
+    # contacts are checked by how well they explain the base wrench the motion needs.
+    # This check uses the inverse-dynamics machinery, but only its residual: no
+    # estimated torque is kept.
+    residual = torch.zeros(steps, dtype=torch.float64)
+    if contacts is not None and not contacts_given:
+        residual = estimate_joint_efforts(
+            graph, q, qd, qdd, gravity,
+            BaseMotion(base.linear_velocity, base.angular_velocity, base.linear_acceleration, base.angular_acceleration),
+            links, contacts, actuator, surface_contacts=record.surface_contacts,
+            base_external_wrench=trajectory.base_external_wrench,
+        ).residual_wrench.norm(dim=-1)
+
     mass_diagonal, gravity_term = configuration_terms(graph, q, gravity)
     coriolis, friction = velocity_terms(
         graph, q, qd, base.linear_velocity if floating else None,
         base.angular_velocity if floating else None, actuator,
     )
-    previous, source = None, 1.0
-    if measured or use_estimated_previous_torque:
-        previous = torch.cat((torch.zeros_like(applied[:1]), applied[:-1]))
-        source = 1.0 if measured else 0.5
-    dynamics = assemble_dynamics_features(
-        mass_diagonal, coriolis, gravity_term, friction, previous, actuator["continuous_torque"], source
-    )
+    dynamics = assemble_dynamics_features(mass_diagonal, coriolis, gravity_term, friction, actuator["continuous_torque"])
     mass_matrix = graph.mass_matrix(q)
     poses = graph.forward_kinematics(q)
     length = graph.characteristic_length
-    # Estimated torques are only determined up to internal contact forces;
-    # the inverse-dynamics loss is applied after this projection.
+
+    # Contact-constrained response G(q) and the torque directions it determines.
+    response = constrained_response(graph, q, links if contacts is not None else (), contacts, surface)
     projection = torch.eye(joints, dtype=torch.float64).expand(steps, joints, joints)
-    if contacts is not None and not measured and not trajectory.exact_dynamics:
-        surface = record.surface_contacts if record.surface_contacts is not None else len(record.contact_links) <= 2
-        projection, _ = determinate_torque_projector(graph, q, list(record.contact_links), contacts, surface)
+    if contacts is not None and bool(contacts.any()):
+        projection, _ = determinate_torque_projector(graph, q, links, contacts, surface)
+    # The response needs to know what holds the base. A floating robot without contact
+    # links, rotors or a recorded support wrench hangs from something unmodelled.
+    support_known = (
+        not floating or has_thrust or bool(links) or trajectory.base_external_wrench is not None
+    )
+    response_valid = torch.full((steps,), support_known)
+    if contacts is not None:
+        response_valid &= _stable_contacts(contacts, contact_margin_steps)
 
     # Variant 0: what was executed.
     if trajectory.actions is not None:
         commands0 = trajectory.actions.to(torch.float64)
         requested0 = _requested(record, commands0, trajectory.action_type, q, qd)
-        action_type0 = trajectory.action_type
+        features0 = action_features(record, commands0, trajectory.action_type, requested0)
+    elif known0:
+        requested0 = applied
+        features0 = action_features(record, None, "torque", applied)
     else:
-        commands0, requested0, action_type0 = None, applied, "torque"
+        # Nothing about the action is known: zero action features, as at the first
+        # frame of an episode. The effect head then predicts the next frame from the
+        # state alone, and the motor head skips this variant.
+        requested0 = torch.zeros_like(q)
+        features0 = torch.zeros((steps, joints, 3), dtype=torch.float64)
     base_acceleration0 = torch.cat((base.linear_acceleration, base.angular_acceleration), dim=-1)
-    variant_torque = [applied]
-    variant_acceleration = [qdd]
-    variant_base_acceleration = [base_acceleration0]
-    variant_requested = [requested0]
-    variant_features = [action_features(record, commands0, action_type0, requested0)]
     valid = torch.ones(steps, dtype=torch.bool)
     valid[-1] = False
     if trajectory.transition_valid is not None:
         valid &= trajectory.transition_valid
+    variant_torque = [applied]
+    variant_acceleration = [qdd]
+    variant_base_acceleration = [base_acceleration0]
+    variant_requested = [requested0]
+    variant_features = [features0]
     variant_valid = [valid]
-    next_states = []  # per variant: (q_next, qd_next, base_next) for frames 0..T-2
+    variant_source = [torch.full((steps,), source0, dtype=torch.int8)]
+    variant_motor = [torch.full((steps,), trajectory.actions is not None or known0)]
+    variant_base_known = [torch.full((steps,), bool(floating and base.known))]
+    next_states: list = []  # per variant: (q_next, qd_next, base_next) for frames 0..T-2, or None
     if floating and base.known:
         if base.pose_known:
             relative = base.orientation[:-1].transpose(-1, -2) @ base.orientation[1:]
@@ -670,7 +805,7 @@ def process_episode(
     else:
         base_next0 = None
     next_states.append((q[1:], qd[1:], base_next0))
-    # Probe variants: other torques at the same state, simulated one step.
+    # Probe variants: other torques at the same state, simulated one step (exact).
     if trajectory.probe_torques is not None:
         limit = torque_limit(actuator, qd)
         wrenches = rotor_wrenches(graph, actuator, q, qd)
@@ -719,26 +854,35 @@ def process_episode(
             variant_features.append(action_features(record, probe, "torque", probe))
             next_states.append(((q + dt * velocity_next)[:-1], velocity_next[:-1], base_next))
             variant_valid.append(torch.ones(steps, dtype=torch.bool))
+            variant_source.append(torch.full((steps,), TORQUE_SOURCES.index("exact"), dtype=torch.int8))
+            variant_motor.append(torch.ones(steps, dtype=torch.bool))
+            variant_base_known.append(torch.full((steps,), bool(floating)))
+    elif proposal_variants > 0:
+        # Proposal variants: feasibility of random torques at the recorded state.
+        for proposal in _proposals(record, steps, proposal_variants, seed).unbind(1):
+            variant_torque.append(torch.zeros_like(q))
+            variant_acceleration.append(torch.zeros_like(q))
+            variant_base_acceleration.append(torch.zeros_like(base_acceleration0))
+            variant_requested.append(proposal)
+            variant_features.append(action_features(record, proposal, "torque", proposal))
+            next_states.append(None)
+            variant_valid.append(torch.zeros(steps, dtype=torch.bool))
+            variant_source.append(torch.full((steps,), TORQUE_SOURCES.index("none"), dtype=torch.int8))
+            variant_motor.append(torch.ones(steps, dtype=torch.bool))
+            variant_base_known.append(torch.zeros(steps, dtype=torch.bool))
     torque = torch.stack(variant_torque, dim=1)
     acceleration = torch.stack(variant_acceleration, dim=1)
     base_acceleration = torch.stack(variant_base_acceleration, dim=1)
     requested = torch.stack(variant_requested, dim=1)
+    source = torch.stack(variant_source, dim=1)
+    labeled = source != TORQUE_SOURCES.index("none")
     variants = torque.shape[1]
     q_variants = q[:, None].expand_as(torque)
     qd_variants = qd[:, None].expand_as(torque)
-    # Required torque (task C) for each variant's joint and base acceleration.
-    required = []
-    for index in range(variants):
-        if trajectory.exact_dynamics and (index == 0 or trajectory.probe_accelerations is not None):
-            # Simulated with contacts: the applied torque is the required torque.
-            required.append(torque[:, index])
-            continue
-        variant_motion = BaseMotion(
-            base.linear_velocity, base.angular_velocity,
-            base_acceleration[:, index, :3], base_acceleration[:, index, 3:],
-        )
-        required.append(estimate(acceleration[:, index], variant_motion).efforts)
-    required = torch.stack(required, dim=1)
+    # Inverse-dynamics labels (task C): the torque that produced each labeled
+    # variant's acceleration. With contacts, the loss keeps only its
+    # motion-determined part (``contact_projection``).
+    required = torch.where(labeled[..., None], torque, torch.zeros_like(torque))
     flags, margins, margin_mask = motor_labels(graph, actuator, q_variants, qd_variants, requested)
 
     # Effect labels: next frame of each variant, in the base frame at t.
@@ -746,9 +890,10 @@ def process_episode(
     effect_rotation = torch.eye(3, dtype=torch.float64).expand(steps, variants, joints, 3, 3).clone()
     effect_linear = torch.zeros_like(effect_delta)
     effect_angular = torch.zeros_like(effect_delta)
-    for index, (positions_next, velocities_next, base_next) in enumerate(next_states):
-        if positions_next.shape[0] == 0:
+    for index, entry in enumerate(next_states):
+        if entry is None or entry[0].shape[0] == 0:
             continue
+        positions_next, velocities_next, base_next = entry
         delta, rotation_next, linear_next, angular_next = _effect_targets(
             graph, poses[:-1], positions_next, velocities_next, base_next
         )
@@ -763,6 +908,10 @@ def process_episode(
             for value in (effect_delta, effect_linear, effect_angular)
         ]
     )
+    base_known = torch.stack(variant_base_known, dim=1)
+    peak = torch.where(record.actuated, actuator["peak_torque"], torch.zeros_like(actuator["peak_torque"]))
+    response_gain = (response.pow(2) * peak.pow(2)).sum(-1)  # [T, 6 + J]
+    labeled_count = labeled.sum()
 
     def store(value: torch.Tensor) -> torch.Tensor:
         return value.to(feature_dtype) if value.is_floating_point() else value
@@ -781,9 +930,6 @@ def process_episode(
         ),
         dim=-1,
     )
-    base_known = torch.full((steps, variants), bool(floating and base.known))
-    if trajectory.probe_torques is not None and floating:
-        base_known[:, 1:] = True
     return {
         # Per frame [T, ...]
         "positions_normalized": store(graph.normalize_joint_positions(q)),
@@ -791,22 +937,23 @@ def process_episode(
         "base_features": store(base_features),
         "dynamics_features": store(dynamics),
         "mass_matrix": store(mass_matrix),
-        "coriolis": store(coriolis),
-        "gravity_torque": store(gravity_term),
-        "friction_torque": store(friction),
         "fk_position": store(poses[..., :3, 3] / length),
         "fk_rotation": store(poses[..., :3, :3]),
-        "torque_measured": torch.full((steps,), measured or trajectory.exact_dynamics),
-        "id_projection": store(projection),
+        "contact_projection": store(projection),
+        "response_operator": store(response),
+        "response_valid": response_valid,
+        "contact_residual": store(residual),
+        "contacts_detected": torch.full((steps,), contacts is not None and not contacts_given),
         "floating_base": torch.full((steps,), floating),
-        "estimate_residual": store(residual),
         # Per variant [T, V, ...]
+        "torque_source": source,
         "applied_torque": store(torque),
         "acceleration": store(acceleration),
         "base_acceleration": store(base_acceleration),
         "base_acceleration_known": base_known,
         "required_torque": store(required),
         "action_features": store(torch.stack(variant_features, dim=1)),
+        "motor_valid": torch.stack(variant_motor, dim=1),
         "motor_flags": store(flags),
         "motor_margins": store(margins),
         "motor_margin_mask": margin_mask,
@@ -815,23 +962,29 @@ def process_episode(
         "effect_linear_velocity": store(effect_linear),
         "effect_angular_velocity": store(effect_angular),
         "effect_valid": torch.stack(variant_valid, dim=1),
-        "_acceleration_rms": (acceleration.pow(2).mean(dim=(0, 1))).sqrt(),
-        "_acceleration_count": torch.tensor(steps * variants),
-        "_base_acceleration_squares": (base_acceleration.pow(2) * base_known[..., None]).sum(dim=(0, 1)),
-        "_base_acceleration_count": base_known.sum(),
+        # Statistics for finalize_acceleration_scales.
+        "_acceleration_squares": (acceleration.pow(2) * labeled[..., None]).sum(dim=(0, 1)),
+        "_acceleration_count": labeled_count,
+        "_base_acceleration_squares": (base_acceleration.pow(2) * (base_known & labeled)[..., None]).sum(dim=(0, 1)),
+        "_base_acceleration_count": (base_known & labeled).sum(),
         "_effect_squares": effect_squares,
         "_effect_count": effect_valid.sum(),
+        "_response_squares": (response_gain * response_valid[:, None]).sum(0),
+        "_response_count": response_valid.sum(),
     }
 
 
 def finalize_acceleration_scales(
     records: list[EmbodimentRecord], episodes: list[tuple[int, dict[str, torch.Tensor]]]
 ) -> None:
-    """Set each record's sigma^a, base acceleration, and effect scales from data.
+    """Set each record's acceleration, base acceleration, effect, and response scales from data.
 
-    sigma^a is the RMS joint acceleration over all frames and variants, floored
-    at 1% of the robot's largest joint RMS (and at 1e-3) so a joint that barely
-    moves does not blow up the FD loss.
+    * ``acceleration_scale`` sigma^a: RMS joint acceleration over variants with torque
+      labels, floored at 1% of the robot's largest joint RMS (and at 1e-3) so a joint
+      that barely moves does not blow up the FD loss; ones without torque labels.
+    * ``response_scale``: RMS of ``sqrt(sum_k G_rk^2 tau_k^peak^2)`` over valid
+      frames, the typical acceleration change from a full-peak torque change on every
+      joint. It normalizes the response targets (6 base rows, then joints).
 
     Args:
         records (list[EmbodimentRecord]): Records to update in place.
@@ -839,27 +992,39 @@ def finalize_acceleration_scales(
     """
     totals: dict[int, dict[str, torch.Tensor | int]] = {}
     for index, episode in episodes:
-        entry = totals.setdefault(index, {"acc": 0, "acc_n": 0, "base": 0, "base_n": 0, "eff": 0, "eff_n": 0})
-        count = int(episode["_acceleration_count"])
-        entry["acc"] = entry["acc"] + episode["_acceleration_rms"].pow(2) * count
-        entry["acc_n"] += count
+        entry = totals.setdefault(
+            index, {"acc": 0, "acc_n": 0, "base": 0, "base_n": 0, "eff": 0, "eff_n": 0, "res": 0, "res_n": 0}
+        )
+        entry["acc"] = entry["acc"] + episode["_acceleration_squares"]
+        entry["acc_n"] += int(episode["_acceleration_count"])
         entry["base"] = entry["base"] + episode["_base_acceleration_squares"]
         entry["base_n"] += int(episode["_base_acceleration_count"])
         entry["eff"] = entry["eff"] + episode["_effect_squares"]
         entry["eff_n"] += int(episode["_effect_count"])
+        entry["res"] = entry["res"] + episode["_response_squares"]
+        entry["res_n"] += int(episode["_response_count"])
     for index, record in enumerate(records):
+        joints = record.graph.num_joints
         record.effect_scales = torch.ones(3)
         record.base_acceleration_scale = torch.ones(6)
+        record.acceleration_scale = torch.ones(joints)
+        record.response_scale = torch.ones(6 + joints)
         entry = totals.get(index)
         if entry is None:
-            record.acceleration_scale = torch.ones(record.graph.num_joints)
             continue
-        rms = (entry["acc"] / max(entry["acc_n"], 1)).sqrt()
-        floor = max(float(rms.max()) * 0.01, 1e-3)
-        record.acceleration_scale = rms.clamp_min(floor).to(torch.float32)
+        if entry["acc_n"]:
+            rms = (entry["acc"] / entry["acc_n"]).sqrt()
+            floor = max(float(rms.max()) * 0.01, 1e-3)
+            record.acceleration_scale = rms.clamp_min(floor).to(torch.float32)
         if entry["base_n"]:
             base_rms = (entry["base"] / entry["base_n"]).sqrt()
             record.base_acceleration_scale = base_rms.clamp_min(1e-2).to(torch.float32)
         if entry["eff_n"]:
             effect_rms = (entry["eff"] / entry["eff_n"]).sqrt()
             record.effect_scales = effect_rms.clamp_min(1e-4).to(torch.float32)
+        if entry["res_n"]:
+            response_rms = (entry["res"] / entry["res_n"]).sqrt()
+            joint_rms = response_rms[6:]
+            joint_floor = max(float(joint_rms.max()) * 0.01, 1e-3) if joint_rms.numel() else 1e-3
+            base_rms = response_rms[:6].clamp_min(1e-2)
+            record.response_scale = torch.cat((base_rms, joint_rms.clamp_min(joint_floor))).to(torch.float32)

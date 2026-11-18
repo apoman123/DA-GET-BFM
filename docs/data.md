@@ -21,7 +21,8 @@ sim`). It builds a MuJoCo model from the same embodiment graph:
 - one body per token with the graph's merged inertia (so MuJoCo and our
   dynamics agree; the mass matrix and bias forces match to 1e-7 in the tests);
 - a free root joint, and hinge or slide joints with the URDF limits, damping,
-  and friction;
+  friction and each joint's rotor inertia (`armature`, default 1e-5 kg m², also
+  entered in the robot graph so labels and simulation agree);
 - position actuators (PD inside the simulator, which keeps stiff gains stable)
   limited to the peak torque;
 - collision spheres at the contact links, one per point foot or four corners
@@ -45,8 +46,11 @@ runs; the feet carry the rest.
 - probe torques solved by MuJoCo with the contacts in place, so task B covers
   action conditioning while standing on the ground.
 
-The inverse-dynamics labels equal the applied torques, and no contact
-estimation is needed.
+The torque source of these episodes is `exact`: task B and C labels are the applied
+torques (C projected onto the motion-determined part when feet are down), and the
+response labels use MuJoCo's own contact flags. MuJoCo's default contacts are slightly
+soft; the rigid-contact response differs from MuJoCo's by about 20% with them and 3%
+with stiff contacts ([details](dynamics.md#assumptions-and-checks)).
 
 ```bash
 uv sync --extra sim
@@ -140,8 +144,11 @@ uv run python scripts/make_data_config.py --urdf assets/urdf/anymal_d.urdf --dat
 
 The conventions (quaternion order, frames, units, contact codes) were checked
 against downloaded files of each dataset. Kinematic-only datasets (LocoMuJoCo,
-AMASS, LAFAN1) have no contacts or torques; contacts are detected and torques
-estimated, and retargeted motions can exceed actuator limits.
+AMASS, LAFAN1) have no contacts or torques. They need **no torque estimate**: they
+train FK, the action effect (unconditioned), motor feasibility on random proposals,
+and the contact-constrained response, whose labels need only the configuration and
+which feet are down (detected from kinematics). Retargeted motions can exceed actuator
+limits.
 
 ## Recommended training datasets
 
@@ -149,9 +156,11 @@ The tasks need joint-level trajectories of robots with a known URDF or MJCF.
 Below, ✅ means the `huggingface` source reads the dataset directly, ⚙️ means
 `scripts/convert_dataset.py` converts it, and 🔧 means it needs your own
 conversion to a table with `episode_index`, `frame_index`, and one vector
-column per signal (see [Converting datasets](#converting-datasets)). "Torque" says whether measured joint torques are included. Without
-them, torques are
-[estimated](dynamics.md#estimating-joint-torques-without-torque-sensors). Facts were checked against
+column per signal (see [Converting datasets](#converting-datasets)). "Torque" says whether measured joint torques are included. They are
+used for FD/ID only with `measured_torque_weight > 0` (default 0) and are otherwise
+useful to [check torque estimates](dynamics.md#how-accurate-is-it). Without them,
+nothing is estimated: the data supervises dynamics through the
+[constrained response](dynamics.md#the-contact-constrained-response). Facts were checked against
 each dataset's card, `meta/info.json`, or files on 2026-11-07. Check licenses
 before use.
 
@@ -160,10 +169,10 @@ before use.
 | Dataset | Robot | Size | Torque | Base and contacts | Format | License | Notes |
 |---|---|---|---|---|---|---|---|
 | [GrandTour](https://huggingface.co/datasets/leggedrobotics/grand_tour_dataset) (`leggedrobotics/grand_tour_dataset`) | ANYmal D, 12 | 52 missions | **yes** (joint torque, current, commands, PD gains) | estimator pose and twist, IMUs, GNSS, per-foot contact state and wrench | zarr in tar ⚙️ `grandtour` | MIT on the card, CC BY-SA 4.0 on the website | The best fit: measured torques and contacts. Joint names match [anymal_d_simple_description](https://github.com/ANYbotics/anymal_d_simple_description) (`download_urdfs.py` fetches it). |
-| [MIPO-Go1](https://huggingface.co/datasets/Open-IO/mipo-go1-odometry) (`Open-IO/mipo-go1-odometry`) | Unitree Go1, 12 | 84 runs, about 1.6 h, 400 Hz | **yes** (current-based estimate) | body IMU with orientation, OptiTrack indoors, 4 foot-force sensors | HDF5 ⚙️ `mipo` | AGPL-3.0 | Used for the [torque-estimation check](dynamics.md#estimating-joint-torques-without-torque-sensors). Streams are unsynchronized; joint names `FL0`…`RR2` map to `FL_hip_joint`… |
+| [MIPO-Go1](https://huggingface.co/datasets/Open-IO/mipo-go1-odometry) (`Open-IO/mipo-go1-odometry`) | Unitree Go1, 12 | 84 runs, about 1.6 h, 400 Hz | **yes** (current-based estimate) | body IMU with orientation, OptiTrack indoors, 4 foot-force sensors | HDF5 ⚙️ `mipo` | AGPL-3.0 | Used for the [torque-estimation check](dynamics.md#how-accurate-is-it). Streams are unsynchronized; joint names `FL0`…`RR2` map to `FL_hip_joint`… |
 | [DFKI Go2 state estimation](https://zenodo.org/records/19336009) | Unitree Go2, 12 | 27 runs, 1 kHz, 5.4 GB | **yes** (`JointState.effort`) | Vicon / RTK GNSS, IMU, foot contact flags and forces | ROS 2 bags 🔧 | CC BY 4.0 | Needs the dfki-quad message definitions. |
 | [Leg-KILO](https://github.com/ouguangjun/legkilo-dataset) | Unitree Go1, 12 | 7 sequences, 50 Hz unique | unverified | IMU, onboard odometry, foot forces | ROS 1 bags 🔧 | CC BY 4.0 | Ground truth from offline map optimization. |
-| [Kine2Go](https://huggingface.co/datasets/MIMUW-Robotics/kine2go) (`MIMUW-Robotics/kine2go`) | Unitree Go2, 12 (simulated) | 800 rollouts, 60 Hz | no (PPO actions and PD gains) | base pose and twist | npy + pickle 🔧 | per clip: CC BY-NC 4.0 / CC BY-SA 4.0 / BSD-3 | Rebuild PD torques from actions and gains, or estimate. Open the pickles in a sandbox. |
+| [Kine2Go](https://huggingface.co/datasets/MIMUW-Robotics/kine2go) (`MIMUW-Robotics/kine2go`) | Unitree Go2, 12 (simulated) | 800 rollouts, 60 Hz | no (PPO actions and PD gains) | base pose and twist | npy + pickle 🔧 | per clip: CC BY-NC 4.0 / CC BY-SA 4.0 / BSD-3 | Use the PPO actions as `action_key` with the PD gains: the effect and motor tasks then see the commanded targets (nothing is estimated). Open the pickles in a sandbox. |
 
 **Humanoids and bipeds (floating base)**
 
@@ -208,12 +217,14 @@ has `unitree_g1`, `unitree_h1`, `unitree_go1`, `unitree_go2`, `booster_t1`,
 G1, H1, H1_2, Go1, and Go2 (`scripts/download_urdfs.py` fetches three).
 
 **A suggested mix for cross-embodiment pretraining:**
-- the measured-torque quadruped sets (GrandTour, MIPO, DFKI Go2) for real
-  dynamics;
+- the quadruped sets with contact sensors (GrandTour, MIPO, DFKI Go2) for real
+  locomotion with known contact sets (their torques can be enabled with
+  `measured_torque_weight`, or kept for validation);
 - MuJoCo ground data for exact contact dynamics of every legged robot you
   care about;
 - G1 WBT and LocoMuJoCo for humanoid motion;
 - NeuroBEM for real rotor dynamics;
 - synthetic fixed, floating, and flight data for every robot you care about
-  (exact torques, probes, limits);
+  (exact torques, probes, limits, randomized inertia and rotor inertia): the only
+  source of full-torque B and C labels besides MuJoCo;
 - held-out robots or randomized variants for evaluation.

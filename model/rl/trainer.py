@@ -4,7 +4,9 @@ Mirrors BFM-Zero's ``Workspace.train_online``: parallel environments act with th
 and fill a replay buffer, random actions seed it, a fixed number of gradient steps runs per
 collected batch, and periodic evaluations set the motion priorities. Each robot has its own
 environments, replay buffer and expert motions, and every update draws an equal share of
-each robot. Physics pretraining batches keep tuning the encoder during RL.
+each robot. Physics pretraining batches keep tuning the encoder during RL: from the data
+config's sources and, with ``physics_replay``, from the policy's own rollouts
+(``model.rl.physics_replay``), both without any estimated torque.
 """
 
 from __future__ import annotations
@@ -29,7 +31,8 @@ from model.rl.configuration_fb_cpr import FbCprConfig
 from model.rl.envs import DomainRandomization, EmbodimentEnv, EnvConfig, EnvStep, MujocoEmbodimentEnv, MujocoGroup
 from model.rl.evaluation import evaluate, motion_priorities
 from model.rl.observation import EmbodimentObserver, Observation, RobotState, trajectory_state
-from model.training.dataset import build_physics_datasets, joint_feature_config, load_data_config, resolve_path
+from model.rl.physics_replay import PhysicsReplay, PhysicsReplaySettings
+from model.training.dataset import CollatorSettings, build_physics_datasets, joint_feature_config, load_data_config, resolve_path
 from model.training.episodes import EmbodimentRecord, Trajectory
 from model.training.ground_sim import ContactGeometry, ground_specs
 from model.training.sources import SOURCE_TYPES
@@ -82,6 +85,14 @@ class TrainingArguments:
         fall_start_probability (float): Episodes that start lying down.
         terminate_on_fall (bool): End episodes when fallen (BFM-Zero: no).
         isaac_spacing (float): Distance between Isaac Lab worlds in m.
+        clip_to_envelope (bool): Keep the requested effort inside each actuator's
+            torque-speed envelope (``model.rl.actions.ActionMap``); the robot must do the same.
+        physics_replay (bool): Also train the physics losses on the policy's own rollouts.
+        physics_replay_fraction (float): Share of physics batches drawn from them, once
+            some are processed.
+        physics_replay_envs (int): Environments recorded per robot.
+        physics_replay_length (int): Control steps per recorded episode.
+        physics_replay_episodes (int): Episodes kept per robot.
     """
 
     data_config: str
@@ -114,6 +125,12 @@ class TrainingArguments:
     fall_start_probability: float = 0.3
     terminate_on_fall: bool = False
     isaac_spacing: float = 5.0
+    clip_to_envelope: bool = True
+    physics_replay: bool = True
+    physics_replay_fraction: float = 0.5
+    physics_replay_envs: int = 4
+    physics_replay_length: int = 200
+    physics_replay_episodes: int = 32
 
 
 @dataclass
@@ -145,7 +162,9 @@ def load_embodiments(data_config: str | Path | dict, arguments: TrainingArgument
     prompts; the default is true, except for ``synthetic`` sources, whose random PD motions
     only serve the physics auxiliary losses. Environment keys (``nominal_pose``,
     ``contact_geometry``, ``gain_scale``, ``action_scale``, and the Isaac Lab keys) are read
-    from the robot's first expert source.
+    from the robot's first expert source. The robot graph gets that source's rotor inertia
+    (``armature``, default 0.01 kg m^2), the value the simulators use, so the encoder's
+    physics tokens and the physics labels describe the simulated robot.
 
     Args:
         data_config (str | Path | dict): Data config.
@@ -176,7 +195,8 @@ def load_embodiments(data_config: str | Path | dict, arguments: TrainingArgument
                 raise ValueError(f"{record.name}: a floating robot needs contact_links for the RL environment")
             if name not in grouped:
                 specs = ground_specs(record.specs, float(source.get("gain_scale", 1.0)))
-                robot = EmbodimentRecord.build(name, record.graph, specs, contact_links=list(record.contact_links), surface_contacts=record.surface_contacts)
+                graph = record.graph.with_armature(source.get("armature", 0.01))
+                robot = EmbodimentRecord.build(name, graph, specs, contact_links=list(record.contact_links), surface_contacts=record.surface_contacts)
                 grouped[name] = (robot, [], source)
             robot = grouped[name][0]
             if list(robot.graph.joint_names) != list(record.graph.joint_names):
@@ -196,7 +216,8 @@ def load_embodiments(data_config: str | Path | dict, arguments: TrainingArgument
         env_config = EnvConfig(
             max_episode_steps=settings.max_episode_steps,
             action_scale=float(source.get("action_scale", 1.25)),
-            armature=float(source.get("armature", 0.01)),
+            armature=float(source.get("armature", 0.01)) if not isinstance(source.get("armature"), dict) else 0.01,
+            clip_to_envelope=settings.clip_to_envelope,
             fall_start_probability=settings.fall_start_probability,
             terminate_on_fall=settings.terminate_on_fall,
             nominal_pose=source.get("nominal_pose", {}),
@@ -250,7 +271,6 @@ class Rollout:
         self.local = torch.zeros((count, history, joints, 5), dtype=torch.float64)
         self.global_features = torch.zeros((count, history, 11), dtype=torch.float64)
         self.perceived: RobotState | None = None
-        self.torque = torch.zeros((count, joints), dtype=torch.float64)
         self.observation: Observation | None = None
         self.evaluating = False
 
@@ -283,8 +303,7 @@ class Rollout:
         local, global_features = self.observer.policy_step(self.perceived, None, None, None)
         self.local[:] = local[:, None]
         self.global_features[:] = global_features[:, None]
-        self.torque.zero_()
-        self.observation = self.observer.observation(self.local, self.global_features, state, self.perceived, None)
+        self.observation = self.observer.observation(self.local, self.global_features, state, self.perceived)
 
     def finish(self) -> tuple[Observation, EnvStep]:
         """Collect the environment step; return the next observation before any reset."""
@@ -293,8 +312,8 @@ class Rollout:
         local, global_features = self.observer.policy_step(perceived, step.target, self.perceived.q, self.perceived.qd)
         self.local = torch.cat((self.local[:, 1:], local[:, None]), dim=1)
         self.global_features = torch.cat((self.global_features[:, 1:], global_features[:, None]), dim=1)
-        next_observation = self.observer.observation(self.local, self.global_features, step.state, perceived, self.torque)
-        self.perceived, self.torque = perceived, step.torque
+        next_observation = self.observer.observation(self.local, self.global_features, step.state, perceived)
+        self.perceived = perceived
         return next_observation, step
 
     def reset_done(self, done: torch.Tensor, next_observation: Observation) -> None:
@@ -309,11 +328,10 @@ class Rollout:
         local, global_features = self.observer.policy_step(perceived, None, None, None)
         self.local[indices] = local[:, None].expand(-1, self.observer.history_size, -1, -1)
         self.global_features[indices] = global_features[:, None].expand(-1, self.observer.history_size, -1)
-        self.torque[indices] = 0.0
         for name in RobotState.__dataclass_fields__:
             getattr(self.perceived, name)[indices] = getattr(perceived, name)
         self.observation = next_observation
-        self.observation.assign(indices, self.observer.observation(self.local[indices], self.global_features[indices], subset, perceived, None))
+        self.observation.assign(indices, self.observer.observation(self.local[indices], self.global_features[indices], subset, perceived))
 
 
 def build_group(arguments: TrainingArguments, embodiments: list[Embodiment], pool: ThreadPoolExecutor | None, simulation: Any = None):
@@ -381,6 +399,20 @@ class FbCprTrainer:
             self.replays.append(ReplayBuffer(capacity, self.agent.reward_names, arguments.buffer_device))
         self.motions = [embodiment.motions for embodiment in self.embodiments]
         self.physics_batches = self._physics_batches() if self.config.train_encoder and self.config.physics_loss_weight > 0 else None
+        self.physics_replay: PhysicsReplay | None = None
+        if self.physics_batches is not None and arguments.physics_replay:
+            data_config, _ = load_data_config(arguments.data_config)
+            settings = PhysicsReplaySettings(
+                envs_per_robot=arguments.physics_replay_envs,
+                chunk_length=arguments.physics_replay_length,
+                episodes_per_robot=arguments.physics_replay_episodes,
+                proposal_variants=int(data_config.get("proposal_variants", 2)),
+                contact_margin_steps=int(data_config.get("contact_margin_steps", 2)),
+            )
+            self.physics_replay = PhysicsReplay(
+                [embodiment.record for embodiment in self.embodiments], observers[0].history_size,
+                self.embodiments[0].env_config.control_dt, settings, CollatorSettings.from_config(data_config), arguments.seed,
+            )
         self.output = Path(arguments.output_dir)
         self.output.mkdir(parents=True, exist_ok=True)
 
@@ -396,6 +428,22 @@ class FbCprTrainer:
                 yield from loader
 
         return cycle()
+
+    def _start_replay(self) -> None:
+        """(Re)start recording every robot's first environments into the physics replay."""
+        if self.physics_replay is None:
+            return
+        for robot, rollout in enumerate(self.rollouts):
+            self.physics_replay.start(robot, rollout.env.read_state(), rollout.env.foot_contacts())
+
+    def _physics_batch(self) -> dict[str, torch.Tensor] | None:
+        """Return the next physics batch: from the rollouts with ``physics_replay_fraction``, else offline data."""
+        if self.physics_batches is None:
+            return None
+        replay = self.physics_replay
+        if replay is not None and replay.ready() and np.random.random() < self.arguments.physics_replay_fraction:
+            return replay.batch(self.arguments.physics_batch_size)
+        return next(self.physics_batches)
 
     def checkpoint(self) -> Path:
         """Write the latest checkpoint, with the encoder also in ``from_pretrained`` form."""
@@ -434,12 +482,14 @@ class FbCprTrainer:
         contexts: list[torch.Tensor | None] = [None] * len(self.rollouts)
         for rollout in self.rollouts:
             rollout.start()
+        self._start_replay()
         batch_frames = sum(rollout.env.num_envs for rollout in self.rollouts)
         last = {"update": self.frames, "log": self.frames, "eval": self.frames, "checkpoint": self.frames}
         totals: dict[str, float] = {}
         updates, last_log_time, last_log_frames = 0, time.time(), self.frames
         episode_lengths: list[list[int]] = [[] for _ in self.rollouts]
         fallen_fraction: list[list[float]] = [[] for _ in self.rollouts]
+        torque_metrics: list[dict[str, list[float]]] = [{} for _ in self.rollouts]
         final: dict[str, float] = {}
         while self.frames < arguments.num_env_steps:
             actions = []
@@ -458,15 +508,25 @@ class FbCprTrainer:
                 next_observation, step = rollout.finish()
                 self.replays[robot].add(observation, actions[robot], next_observation, contexts[robot], step.terminated, step.aux_rewards)
                 fallen_fraction[robot].append(float(rollout.env.fallen(step.state).mean()))
+                for name, value in step.metrics.items():
+                    torque_metrics[robot].setdefault(name, []).append(float(value.float().mean()))
                 done = step.terminated | step.truncated
                 episode_lengths[robot].extend(int(steps) for steps in rollout.env.steps[done.numpy()])
+                if self.physics_replay is not None:
+                    self.physics_replay.step(robot, step, done)
                 rollout.reset_done(done, next_observation)
+                if self.physics_replay is not None and bool(done.any()):
+                    indices = torch.nonzero(done).squeeze(-1)
+                    env = rollout.env
+                    self.physics_replay.restart(robot, indices, env.read_state().select(indices), env.foot_contacts()[indices])
             self.frames += batch_frames
             ready = self.frames >= arguments.num_seed_steps and all(len(replay) > 0 for replay in self.replays)
             if ready and self.frames - last["update"] >= arguments.update_agent_every:
                 last["update"] = self.frames
+                if self.physics_replay is not None:
+                    self.physics_replay.process()
                 for _ in range(arguments.num_agent_updates):
-                    physics = next(self.physics_batches) if self.physics_batches is not None else None
+                    physics = self._physics_batch()
                     metrics = self.agent.update(self.replays, self.motions, physics)
                     updates += 1
                     for key, value in metrics.items():
@@ -486,8 +546,15 @@ class FbCprTrainer:
                         writer.add_scalar(f"{name}/episode_length", final[f"{name}/episode_length"], self.frames)
                     final[f"{name}/fallen_fraction"] = float(np.mean(fallen_fraction[robot]))
                     writer.add_scalar(f"{name}/fallen_fraction", final[f"{name}/fallen_fraction"], self.frames)
+                    for metric, values in torque_metrics[robot].items():
+                        final[f"{name}/{metric}"] = float(np.mean(values))
+                        writer.add_scalar(f"{name}/{metric}", final[f"{name}/{metric}"], self.frames)
                     episode_lengths[robot].clear()
                     fallen_fraction[robot].clear()
+                    torque_metrics[robot].clear()
+                if self.physics_replay is not None:
+                    final["physics_replay/episodes"] = float(self.physics_replay.episodes)
+                    writer.add_scalar("physics_replay/episodes", final["physics_replay/episodes"], self.frames)
                 writer.flush()
                 print(f"frames {self.frames}: " + ", ".join(f"{k}={v:.4g}" for k, v in sorted(final.items()) if "aux_rew" not in k), flush=True)
                 totals, updates, last_log_time, last_log_frames = {}, 0, now, self.frames
@@ -498,6 +565,7 @@ class FbCprTrainer:
                 print(f"frames {self.frames}: " + ", ".join(f"{k}={v:.4g}" for k, v in sorted(results.items())), flush=True)
                 for rollout in self.rollouts:
                     rollout.start()
+                self._start_replay()
             if self.frames - last["checkpoint"] >= arguments.checkpoint_every:
                 last["checkpoint"] = self.frames
                 self.checkpoint()

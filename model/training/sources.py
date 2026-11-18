@@ -59,10 +59,12 @@ from model.urdf import UrdfInertial, UrdfRobot, parse_urdf, rpy_to_matrix
 DEFAULT_RANDOMIZATION = {
     "mass": [0.8, 1.2],
     "length": [0.9, 1.1],
+    "com_offset": 0.1,
     "damping": [0.0, 0.02],
     "friction": [0.0, 0.02],
     "torque": [0.8, 1.2],
     "velocity": [0.8, 1.2],
+    "armature": [0.5, 1.5],
     "gravity_tilt_degrees": 20.0,
 }
 BASE_MODES = ("fixed", "floating", "flight")
@@ -90,6 +92,7 @@ def _graph_kwargs(source: dict[str, Any], robot: UrdfRobot) -> dict[str, Any]:
         "multi_dof_joints": source.get("multi_dof_joints", "skip"),
         "frozen_joints": frozen,
         "floating_base": source.get("floating_base"),
+        "armature": source.get("armature"),
     }
 
 
@@ -112,18 +115,21 @@ def _record(name: str, graph: EmbodimentGraph, specs, source: dict[str, Any]) ->
 
 
 def randomize_robot(robot: UrdfRobot, randomization: dict[str, Any], generator: torch.Generator) -> UrdfRobot:
-    """Return a copy of a robot with perturbed inertia, lengths, and friction.
+    """Return a copy of a robot with perturbed inertia, center of mass, lengths, and friction.
 
     Damping and friction are added relative to each joint's own limits, so the
     same ranges suit a finger, a knee, and a propeller: ``damping`` is a
     fraction of ``effort / velocity`` (the damping that would use the whole
     torque at full speed) and ``friction`` a fraction of ``effort``. Joints
-    without both limits are left unchanged.
+    without both limits are left unchanged. ``com_offset`` moves each link's
+    center of mass by up to that fraction of the link's radius of gyration
+    ``sqrt(trace(I) / 2m)`` along each axis, so the shift is scale-free too.
 
     Args:
         robot (UrdfRobot): Nominal robot.
-        randomization (dict): Ranges ``mass``, ``length`` (scale factors) and
-            ``damping``, ``friction`` (fractions, see above).
+        randomization (dict): Ranges ``mass``, ``length`` (scale factors),
+            ``damping``, ``friction`` (fractions, see above), and ``com_offset``
+            (a fraction, default 0).
         generator (torch.Generator): Random source.
 
     Returns:
@@ -142,6 +148,11 @@ def randomize_robot(robot: UrdfRobot, randomization: dict[str, Any], generator: 
             scale = uniform(randomization.get("mass", [1.0, 1.0]))
             origin = inertial.origin.clone()
             origin[:3, 3] *= length
+            offset = float(randomization.get("com_offset", 0.0))
+            if offset > 0 and inertial.mass > 0:
+                gyration = math.sqrt(max(float(inertial.inertia.diagonal().sum()), 0.0) / (2 * inertial.mass))
+                shift = (torch.rand(3, generator=generator, dtype=torch.float64) * 2 - 1) * offset * gyration
+                origin[:3, 3] += shift * length
             inertial = UrdfInertial(
                 mass=inertial.mass * scale,
                 origin=origin,
@@ -239,6 +250,7 @@ def synthetic_source(
         kwargs["floating_base"] = mode != "fixed"
         graph = EmbodimentGraph.from_urdf(variant_robot, feature_config, **kwargs)
         if variants:
+            graph = _randomize_armature(graph, randomization, generator)
             torque_scale = torch.empty(graph.num_joints, dtype=torch.float64).uniform_(
                 *randomization["torque"], generator=generator
             )
@@ -262,6 +274,15 @@ def synthetic_source(
         simulate = {"fixed": _simulate_fixed, "floating": _simulate_floating, "flight": _simulate_flight}[mode]
         trajectories += simulate(len(records) - 1, record, settings, generator)
     return records, trajectories
+
+
+def _randomize_armature(graph: EmbodimentGraph, randomization: dict[str, Any], generator: torch.Generator) -> EmbodimentGraph:
+    """Scale each joint's rotor inertia by a factor from ``randomization["armature"]``."""
+    if graph.armature is None:
+        return graph
+    low, high = randomization.get("armature", [1.0, 1.0])
+    scale = torch.empty(graph.num_joints, dtype=torch.float64).uniform_(low, high, generator=generator)
+    return graph.with_armature(graph.armature * scale)
 
 
 def _joint_targets(graph: EmbodimentGraph, episodes: int, generator: torch.Generator, spread: float = 0.85):
@@ -378,6 +399,7 @@ def _simulate_fixed(embodiment: int, record: EmbodimentRecord, settings, generat
             gravity=gravity[episode],
             probe_torques=stacked["probe"][episode] if settings["probes"] else None,
             transition_valid=stacked["valid"][episode],
+            exact_dynamics=True,
         )
         for episode in range(episodes)
     ]
@@ -466,6 +488,7 @@ def _floating_trajectories(embodiment, record, settings, stacked, action_type) -
             probe_torques=stacked["probe"][episode] if settings["probes"] else None,
             transition_valid=stacked["valid"][episode],
             base_external_wrench=stacked["ext"][episode],
+            exact_dynamics=True,
         )
         for episode in range(settings["episodes"])
     ]
@@ -914,7 +937,9 @@ def mujoco_source(
         contact_links = analyze_robot(robot).contact_links
     if not contact_links:
         raise ValueError(f"{name}: no contact links given or found; ground simulation needs feet")
-    source = {**source, "contact_links": contact_links, "floating_base": True}
+    # MuJoCo needs some rotor inertia for stiff gains on light links; the same
+    # value enters the graph, so the labels and the simulation agree.
+    source = {**source, "contact_links": contact_links, "floating_base": True, "armature": source.get("armature", 1e-5)}
     generator = torch.Generator().manual_seed(int(source.get("seed", 0)))
     randomization = {**DEFAULT_RANDOMIZATION, **source.get("randomization", {})}
     variants = int(source.get("randomized_embodiments", 4))
@@ -941,6 +966,8 @@ def mujoco_source(
     records, trajectories = [], []
     for variant, variant_robot in enumerate(robots):
         graph = EmbodimentGraph.from_urdf(variant_robot, feature_config, **_graph_kwargs(source, robot))
+        if variants:
+            graph = _randomize_armature(graph, randomization, generator)
         specs = actuator_specs(graph, source.get("actuator_overrides"), _actuator_defaults(source, "position"))
         specs = ground_specs(specs, settings["gain_scale"])
         record = _record(f"{name}/{variant}-ground", graph, specs, source)

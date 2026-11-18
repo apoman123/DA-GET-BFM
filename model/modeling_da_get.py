@@ -799,13 +799,13 @@ class DaGetEncoder(nn.Module):
                 robot only, so precomputing them avoids a Python loop per step.
                 When given, they replace the distances that would be computed
                 from ``parent_indices`` and ``adjacency_matrix``.
-            rigid_body_features (torch.Tensor | None): ``[batch, joints, 25]``
+            rigid_body_features (torch.Tensor | None): ``[batch, joints, 26]``
                 rigid-body features (``model.physics.rigid_body_features``).
                 Required by Physics Cross Attention unless ``physics_memory``
                 is given.
             actuator_features (torch.Tensor | None): ``[batch, joints, 6]``
                 actuator features. Same requirement as rigid_body_features.
-            dynamics_features (torch.Tensor | None): ``[batch, joints, 7]``
+            dynamics_features (torch.Tensor | None): ``[batch, joints, 5]``
                 dynamics features at time t. Required by Physics Cross Attention.
             physics_memory (PhysicsMemory | None): Cached embodiment-only physics
                 keys and values from ``build_physics_memory``. Replaces

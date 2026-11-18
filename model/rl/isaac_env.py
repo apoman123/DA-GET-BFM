@@ -255,6 +255,10 @@ class IsaacEmbodimentEnv(EmbodimentEnv):
     def _foot_contacts(self) -> torch.Tensor:
         return self._net_forces()[:, self.foot_sensors].norm(dim=-1) > 1.0
 
+    def foot_contacts(self) -> torch.Tensor:
+        """Return bool ``[N, C]``: feet with a contact force above 1 N."""
+        return self._foot_contacts().detach().cpu()
+
     def _slippage(self) -> np.ndarray:
         """Return the summed speed of feet in contact (BFM-Zero's ``penalty_slippage``)."""
         if self.foot_bodies.numel() == 0:
@@ -344,6 +348,9 @@ def build_isaac_group(robots: list[tuple[EmbodimentRecord, EnvConfig, IsaacRobot
         joint_gain = {name: float(actuator["kp"][i]) for i, name in enumerate(names)}
         joint_damping = {name: float(actuator["kd"][i]) for i, name in enumerate(names)}
         joint_effort = {name: float(actuator["peak_torque"][i]) for i, name in enumerate(names)}
+        # The graph's rotor inertia when it has one (labels and tokens then match), else the config's.
+        rotor = record.graph.joint_armature if record.graph.armature is not None else None
+        armature = {name: float(rotor[i]) for i, name in enumerate(names)} if rotor is not None else config.armature
         robot_origins = origins[cursor : cursor + config.num_envs]
         cursor += config.num_envs
         for index, origin in enumerate(robot_origins.tolist()):
@@ -366,7 +373,7 @@ def build_isaac_group(robots: list[tuple[EmbodimentRecord, EnvConfig, IsaacRobot
                 spawn=spawn,
                 actuators={
                     "all": ImplicitActuatorCfg(
-                        joint_names_expr=[".*"], stiffness=joint_gain, damping=joint_damping, actuator_effort_limit=joint_effort, armature=config.armature
+                        joint_names_expr=[".*"], stiffness=joint_gain, damping=joint_damping, actuator_effort_limit=joint_effort, armature=armature
                     )
                 },
             )

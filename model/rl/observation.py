@@ -3,8 +3,10 @@
 Each robot state gives two per-DoF views, matching BFM-Zero's asymmetric inputs:
 
 * **Policy view:** ``DaGetEncoder`` inputs (tokens with history and last actions, dynamics
-  features with the last torque, mass matrix), identical to what physics pretraining
-  feeds the encoder. It carries sensor noise and, as in BFM-Zero, no base linear velocity.
+  features, mass matrix), identical to what physics pretraining feeds the encoder. It
+  carries sensor noise and, as in BFM-Zero, no base linear velocity. No input is a torque
+  measurement: the last action enters as the target and the effort the known PD law
+  requests for it, which a real robot computes the same way as the simulator.
 * **State view:** tokens for B, D and the critics' privileged context. Each joint token has
   the normalized position and velocity and the joint-frame position in the base frame,
   and repeats the base state (gravity direction, angular velocity, linear velocity /
@@ -82,7 +84,7 @@ class StateView:
     Attributes:
         local (torch.Tensor): ``[..., J, 5]`` per-joint features.
         global_features (torch.Tensor): ``[..., 10]`` base features.
-        dynamics (torch.Tensor): ``[..., J, 7]`` dynamics features without a last torque.
+        dynamics (torch.Tensor): ``[..., J, 5]`` dynamics features.
     """
 
     local: torch.Tensor
@@ -101,7 +103,7 @@ class Observation:
     Attributes:
         local (torch.Tensor): ``[N, H, J, 5]`` policy joint history.
         global_features (torch.Tensor): ``[N, H, 11]`` policy base history.
-        dynamics (torch.Tensor): ``[N, J, 7]`` policy dynamics features.
+        dynamics (torch.Tensor): ``[N, J, 5]`` policy dynamics features.
         mass (torch.Tensor): ``[N, J, J]`` mass matrix at the sensed configuration.
         state (StateView): True state, for B, D and the critics.
     """
@@ -189,7 +191,7 @@ class EmbodimentObserver:
             dim=-1,
         )
         global_features = torch.cat((state.gravity_direction, state.angular_velocity, linear / self.length, height[:, None] / self.length), dim=-1)
-        return StateView(local.float(), global_features.float(), self._dynamics(state, linear, None, 0.0).float())
+        return StateView(local.float(), global_features.float(), self._dynamics(state, linear).float())
 
     def _terms(self, state: RobotState, linear: torch.Tensor) -> DynamicsTerms:
         """Return the mass matrix and efforts at a state."""
@@ -198,14 +200,12 @@ class EmbodimentObserver:
             linear if self.floating else None, state.angular_velocity if self.floating else None, self.actuator,
         )
 
-    def _dynamics(self, state: RobotState, linear: torch.Tensor, previous_torque: torch.Tensor | None, source: float,
-                  terms: DynamicsTerms | None = None) -> torch.Tensor:
-        """Return dynamics features; ``source`` is the torque-source flag (0 means unknown)."""
+    def _dynamics(self, state: RobotState, linear: torch.Tensor, terms: DynamicsTerms | None = None) -> torch.Tensor:
+        """Return the dynamics features of a state (no torque enters them)."""
         terms = self._terms(state, linear) if terms is None else terms
-        previous = torch.zeros_like(state.q) if previous_torque is None else previous_torque
         return assemble_dynamics_features(
-            terms.mass_matrix.diagonal(dim1=-2, dim2=-1), terms.coriolis, terms.gravity, terms.friction, previous,
-            self.actuator["continuous_torque"], source,
+            terms.mass_matrix.diagonal(dim1=-2, dim2=-1), terms.coriolis, terms.gravity, terms.friction,
+            self.actuator["continuous_torque"],
         )
 
     def policy_step(self, state: RobotState, previous_target: torch.Tensor | None, previous_q: torch.Tensor | None,
@@ -239,7 +239,6 @@ class EmbodimentObserver:
         global_history: torch.Tensor,
         state: RobotState,
         policy_state: RobotState,
-        previous_torque: torch.Tensor | None,
     ) -> Observation:
         """Assemble the stored observation.
 
@@ -248,28 +247,29 @@ class EmbodimentObserver:
             global_history (torch.Tensor): ``[N, H, 11]``, oldest first.
             state (RobotState): True state, for the state view.
             policy_state (RobotState): State the policy senses.
-            previous_torque (torch.Tensor | None): ``[N, J]`` torque applied at t-1.
 
         Returns:
             Observation: Stored tensors.
         """
-        dynamics, mass = self.policy_physics(policy_state, previous_torque)
+        dynamics, mass = self.policy_physics(policy_state)
         return Observation(local_history.float(), global_history.float(), dynamics, mass, self.state_view(state))
 
-    def policy_physics(self, policy_state: RobotState, previous_torque: torch.Tensor | None) -> tuple[torch.Tensor, torch.Tensor]:
+    def policy_physics(self, policy_state: RobotState) -> tuple[torch.Tensor, torch.Tensor]:
         """Return what the policy encoder reads besides its tokens, as at deployment.
+
+        Everything comes from the sensed joint state, IMU and robot model; no torque
+        sensor is needed.
 
         Args:
             policy_state (RobotState): State the policy senses.
-            previous_torque (torch.Tensor | None): ``[N, J]`` torque applied at t-1.
 
         Returns:
-            tuple[torch.Tensor, torch.Tensor]: Float32 dynamics features ``[N, J, 7]``
+            tuple[torch.Tensor, torch.Tensor]: Float32 dynamics features ``[N, J, 5]``
                 and mass matrix ``[N, J, J]``.
         """
         linear = policy_state.linear_velocity if self.observe_base_linear_velocity else torch.zeros_like(policy_state.linear_velocity)
         terms = self._terms(policy_state, linear)
-        return self._dynamics(policy_state, linear, previous_torque, 1.0, terms).float(), terms.mass_matrix.float()
+        return self._dynamics(policy_state, linear, terms).float(), terms.mass_matrix.float()
 
     def _static(self, device: torch.device) -> dict:
         """Return the robot's per-sample encoder inputs on a device, with a batch of one."""

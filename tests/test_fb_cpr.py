@@ -12,6 +12,7 @@ from unittest import mock
 import numpy as np
 import torch
 
+from model.physics_schema import DYNAMICS_FEATURE_SIZE
 from model import BfmConfig, DaGetConfig, EmbodimentGraph, JointFeatureConfig, actuator_specs
 from model.modeling_bfm import project_to_sphere
 from model.pretraining import DaGetForPhysicsPretraining, DaGetPhysicsPretrainingConfig
@@ -51,7 +52,7 @@ def observe(observer: EmbodimentObserver, state: RobotState):
     local, global_features = observer.policy_step(state, None, None, None)
     local = local[:, None].expand(-1, HISTORY, -1, -1)
     global_features = global_features[:, None].expand(-1, HISTORY, -1)
-    return observer.observation(local, global_features, state, state, None)
+    return observer.observation(local, global_features, state, state)
 
 
 def small_encoder(token_size: int) -> DaGetForPhysicsPretraining:
@@ -230,25 +231,28 @@ class ObservationTest(unittest.TestCase):
         tokens = self.observer.state_inputs(view)["input_values"]
         self.assertEqual(tokens.shape, (2, joints, self.observer.state_token_size))
 
-    def test_state_view_has_no_action_or_torque(self) -> None:
-        """B and D cannot see the last torque, which motion data does not have; the policy can."""
+    def test_no_observation_reads_a_torque(self) -> None:
+        """Policy and state views are functions of the sensed state and the model only."""
+        import inspect
+
+        from model.physics import dynamics_features
+
+        self.assertNotIn("previous_torque", inspect.signature(self.observer.observation).parameters)
+        self.assertNotIn("previous_torque", inspect.signature(self.observer.policy_physics).parameters)
         state = random_state(self.record, 2)
         local, global_features = self.observer.policy_step(state, None, None, None)
-        local = local[:, None].expand(-1, HISTORY, -1, -1)
-        global_features = global_features[:, None].expand(-1, HISTORY, -1)
-        torque = torch.ones_like(state.q)
-        first = self.observer.observation(local, global_features, state, state, None)
-        second = self.observer.observation(local, global_features, state, state, torque)
-        self.assertGreater(float((first.dynamics - second.dynamics).abs().max()), 1e-3)
-        torch.testing.assert_close(first.state.dynamics, second.state.dynamics)
-        torch.testing.assert_close(first.state.dynamics[..., -1], torch.zeros_like(first.state.dynamics[..., -1]))
+        observation = self.observer.observation(local[:, None].expand(-1, HISTORY, -1, -1), global_features[:, None].expand(-1, HISTORY, -1), state, state)
+        self.assertEqual(observation.dynamics.shape[-1], 5)
+        expected = dynamics_features(self.record.graph, self.record.specs, state.q, state.qd, 9.80665 * state.gravity_direction)
+        torch.testing.assert_close(observation.dynamics, expected, rtol=1e-5, atol=1e-6)
+        torch.testing.assert_close(observation.state.dynamics, expected, rtol=1e-5, atol=1e-6)
 
     def test_sensor_noise_stays_out_of_the_state_view(self) -> None:
         """Noise reaches the policy's features only: B, D and critics read the true state."""
         state = random_state(self.record, 2)
         noisy = RobotState(state.q + 0.05, state.qd + 0.5, state.gravity_direction, state.angular_velocity, state.linear_velocity, state.height)
         local, global_features = self.observer.policy_step(noisy, None, None, None)
-        observation = self.observer.observation(local[:, None].expand(-1, HISTORY, -1, -1), global_features[:, None].expand(-1, HISTORY, -1), state, noisy, None)
+        observation = self.observer.observation(local[:, None].expand(-1, HISTORY, -1, -1), global_features[:, None].expand(-1, HISTORY, -1), state, noisy)
         clean = self.observer.state_view(state)
         torch.testing.assert_close(observation.state.local, clean.local)
         torch.testing.assert_close(observation.state.dynamics, clean.dynamics)
@@ -591,7 +595,7 @@ class AgentTest(unittest.TestCase):
         agent, _, _ = build_agent(lr_discriminator=3e-3)
         observer = agent.observers[0]
         joints = observer.record.graph.num_joints
-        view = lambda value: StateView(torch.full((16, joints, 5), value), torch.full((16, 10), value), torch.zeros(16, joints, 7))
+        view = lambda value: StateView(torch.full((16, joints, 5), value), torch.full((16, 10), value), torch.zeros(16, joints, DYNAMICS_FEATURE_SIZE))
         expert, train = observer.state_inputs(view(1.0)), observer.state_inputs(view(-1.0))
         z = project_to_sphere(torch.randn(16, Z))
         first = float(agent.update_discriminator([expert], z, [train], z, [16])["disc_loss"])
@@ -683,9 +687,8 @@ class EnvironmentTest(unittest.TestCase):
                 step_local, step_global = observer.policy_step(state.select(torch.tensor([step])), *previous)
                 local.append(step_local)
                 global_features.append(step_global)
-            previous_torque = trajectory.applied_torque[frame - 1:frame].to(torch.float64) if frame > 0 else None
             frame_state = state.select(torch.tensor([frame]))
-            observation = observer.observation(torch.stack(local, dim=1), torch.stack(global_features, dim=1), frame_state, frame_state, previous_torque)
+            observation = observer.observation(torch.stack(local, dim=1), torch.stack(global_features, dim=1), frame_state, frame_state)
             tokens = observer.policy_tokens(observation.local, observation.global_features)
             torch.testing.assert_close(tokens, batch["input_values"], rtol=1e-4, atol=1e-5)
             torch.testing.assert_close(observation.dynamics, batch["dynamics_features"], rtol=1e-4, atol=1e-5)
@@ -758,7 +761,11 @@ class EnvironmentTest(unittest.TestCase):
         env.reset(frames=[None, None])
         for _ in range(100):
             self.assertFalse(bool(env.step(rng.uniform(-1, 1, (2, env.joints))).terminated.any()))
+        # The robot graph carries the same rotor inertia, so labels, tokens and simulation agree.
+        np.testing.assert_allclose(embodiment.record.graph.joint_armature.numpy(), 0.01)
         xml = build_mjcf(embodiment.record, np.ones(env.joints), np.ones(env.joints), embodiment.env_config.geometry)
+        self.assertIn('armature="0.01"', xml)
+        xml = build_mjcf(embodiment.record, np.ones(env.joints), np.ones(env.joints), embodiment.env_config.geometry, armature=1e-5)
         self.assertIn('armature="1e-05"', xml)
 
     def test_diverged_worlds_count_as_fallen_in_evaluations(self) -> None:
@@ -812,6 +819,103 @@ class EnvironmentTest(unittest.TestCase):
         low, high = middle - 0.475 * span, middle + 0.475 * span
         expected = (np.clip(low - q, 0, None) + np.clip(q - high, 0, None)).sum(axis=1)
         np.testing.assert_allclose(result.aux_rewards["limits_dof_pos"].numpy(), expected)
+        for name in ("penalty_torque_limit", "penalty_torque_continuous", "penalty_power"):
+            self.assertEqual(result.aux_rewards[name].shape, (2,))
+            self.assertTrue(bool((result.aux_rewards[name] >= 0).all()), name)
+        # Full actions ask far beyond the envelope of these weak actuators.
+        self.assertGreater(float(result.aux_rewards["penalty_torque_limit"].min()), 0.0)
+        self.assertEqual(set(result.metrics), {"torque_request_over_envelope", "torque_at_envelope", "torque_rms_over_continuous", "torque_load_over_continuous"})
+        self.assertEqual(tuple(result.contacts.shape), (2, len(FEET)))
+
+    def test_targets_stay_inside_the_torque_envelope(self) -> None:
+        """The targets sent request at most tau^max(qd), and the same map serves the robot."""
+        from model.physics import requested_torque, torque_limit
+        from model.rl.actions import ActionMap
+
+        env, embodiment = self.env(num_envs=2)
+        env.reset(frames=[None, None])
+        state = env.read_state()
+        actions = np.stack([np.ones(env.joints), -np.ones(env.joints)])
+        env.prepare(actions)
+        tensors = embodiment.record.actuator
+        request = requested_torque(tensors, torch.from_numpy(env._targets), state.q, state.qd)
+        limit = torque_limit(tensors, state.qd)
+        self.assertTrue(bool((request.abs() <= limit + 1e-6).all()))
+        robot = ActionMap(embodiment.record, env.world_nominal, embodiment.env_config.action_scale)
+        targets, raw = robot(actions, state.q.numpy(), state.qd.numpy())
+        np.testing.assert_allclose(targets, env._targets)
+        self.assertGreater(float(np.abs(raw - targets).max()), 0.0)
+        unclipped = ActionMap(embodiment.record, env.world_nominal, embodiment.env_config.action_scale, clip_to_envelope=False)
+        np.testing.assert_allclose(unclipped(actions, state.q.numpy(), state.qd.numpy())[0], raw)
+
+    def test_torque_monitor_formulas(self) -> None:
+        """The three torque penalties follow their definitions."""
+        from model.physics import torque_limit
+        from model.rl.actions import TorqueMonitor
+
+        _, embodiment = self.env(num_envs=1)
+        record = embodiment.record
+        tensors = record.actuator
+        joints = record.graph.num_joints
+        monitor = TorqueMonitor(record, 1, control_dt=0.02, thermal_time_constant=0.02)
+        q = np.zeros((1, joints))
+        qd = np.full((1, joints), 0.5)
+        peak = tensors["peak_torque"].numpy()
+        kp = tensors["kp"].numpy()
+        raw = q + 3 * peak / kp  # requests three times peak
+        monitor.before_step(raw, q, qd)
+        limit = torque_limit(tensors, torch.from_numpy(qd)).numpy()[0]
+        request = kp * (raw[0] - q[0]) - tensors["kd"].numpy() * qd[0]
+        expected_limit = (np.clip(np.abs(request) - limit, 0, None) / peak).sum()
+        torque = 2 * tensors["continuous_torque"].numpy()[None]
+        rewards, metrics = monitor.after_step(torque, qd)
+        self.assertAlmostEqual(float(rewards["penalty_torque_limit"][0]), float(expected_limit), delta=1e-6 * float(expected_limit))
+        # With the time constant equal to the step, the load is the current (tau/tau_cont)^2 = 4.
+        self.assertAlmostEqual(float(rewards["penalty_torque_continuous"][0]), 3.0 * joints, places=4)
+        power = (np.clip(np.abs(torque[0] * qd[0]) - tensors["max_power"].numpy(), 0, None) / tensors["max_power"].numpy()).sum()
+        self.assertAlmostEqual(float(rewards["penalty_power"][0]), float(power), delta=1e-6 * max(float(power), 1.0))
+        self.assertAlmostEqual(float(metrics["torque_rms_over_continuous"][0]), 2.0, places=4)
+        monitor.reset(np.array([0]))
+        self.assertEqual(float(monitor.load.max()), 0.0)
+
+    def test_physics_replay_labels_rollouts_without_torque(self) -> None:
+        """Rollout chunks become episodes with response, effect, motor and FK labels, and no torque labels."""
+        from model.rl.physics_replay import PhysicsReplay, PhysicsReplaySettings
+        from model.training.episodes import TORQUE_SOURCES
+
+        env, embodiment = self.env(num_envs=2)
+        env.reset(frames=[None, None])
+        replay = PhysicsReplay([embodiment.record], HISTORY, env.config.control_dt,
+                               PhysicsReplaySettings(envs_per_robot=1, chunk_length=6, min_length=4))
+        for _ in range(25):  # settle on all four feet
+            env.step(np.zeros((2, env.joints)))
+        replay.start(0, env.read_state(), env.foot_contacts())
+        rng = np.random.default_rng(0)
+        for _ in range(13):
+            step = env.step(0.02 * rng.uniform(-1, 1, (2, env.joints)))
+            replay.step(0, step, torch.zeros(2, dtype=torch.bool))
+        self.assertEqual(replay.queued, 2)
+        self.assertEqual(replay.process(10), 2)
+        self.assertTrue(replay.ready())
+        episode = replay._episodes[0][0]
+        self.assertEqual(episode["torque_source"].unique().tolist(), [TORQUE_SOURCES.index("none")])
+        self.assertFalse(bool(episode["contacts_detected"].any()))  # contacts come from the simulator
+        self.assertTrue(bool(episode["motor_valid"][:, 0].all()))  # the commanded targets are known
+        torch.manual_seed(0)
+        batch = replay.batch(8)
+        self.assertFalse(bool(batch["fd_mask"].any()))
+        self.assertTrue(bool(batch["response_mask"].any()))
+        self.assertTrue(bool(batch["effect_mask"].any()))
+        output = small_encoder(embodiment.observer.token_size)(**batch)
+        self.assertTrue({"fk", "response", "inverse_response", "motor", "effect"} <= set(output.loss_components))
+        self.assertTrue(torch.isfinite(output.loss))
+        # A reset ends the chunk; recording continues from the new state.
+        done = torch.tensor([True, False])
+        step = env.step(np.zeros((2, env.joints)))
+        replay.step(0, step, done)
+        env.reset(np.array([0]))
+        replay.restart(0, torch.tensor([0]), env.read_state().select(torch.tensor([0])), env.foot_contacts()[:1])
+        self.assertIsNotNone(replay._pending[0][0])
 
     def test_fixed_base_robot_tracks_targets(self) -> None:
         """A robot without a floating base gets no free joint and follows its targets."""
@@ -893,7 +997,8 @@ class EnvironmentTest(unittest.TestCase):
             "--state_hidden_size", "16", "--state_num_layers", "1", "--state_num_heads", "2", "--state_intermediate_size", "32",
             "--log_every", "8", "--eval_every", "24", "--eval_motions", "1", "--buffer_size", "200", "--max_episode_steps", "20",
             "--num_threads", "2", "--z_buffer_size", "64", "--rollout_expert_trajectories_length", "10", "--physics_batch_size", "4",
-            "--physics_cache_dir", str(self.root / "cache"),
+            "--physics_cache_dir", str(self.root / "cache"), "--physics_replay_length", "4", "--physics_replay_envs", "1",
+            "--physics_replay_fraction", "1.0",
         ]
         script.main([*common, "--num_env_steps", "48"])
         checkpoint = output / "checkpoint.pt"
@@ -906,7 +1011,9 @@ class EnvironmentTest(unittest.TestCase):
         events.Reload()
         tags = set(events.Tags()["scalars"])
         for tag in ("train/fb_loss", "train/critic_loss", "train/aux_critic_loss", "train/actor_loss", "train/disc_loss", "train/frames_per_second",
-                    "train/physics/loss_fk", "train/aux_rew/penalty_undesired_contact", "rollout/quad/0-ground/fallen_fraction",
+                    "train/physics/loss_fk", "train/physics/loss_response", "train/aux_rew/penalty_undesired_contact",
+                    "train/aux_rew/penalty_torque_limit", "rollout/quad/0-ground/fallen_fraction",
+                    "rollout/quad/0-ground/torque_request_over_envelope", "physics_replay/episodes",
                     "eval/quad/0-ground/tracking_mpjpe", "eval/quad/0-ground/tracking_emd", "eval/quad/0-ground/getting_up_rate", "eval/biped/0-ground/goal_mpjpe"):
             self.assertIn(tag, tags)
         names = [item["name"] for item in json.loads((output / "embodiments.json").read_text())]

@@ -81,6 +81,8 @@ RIGID_BODY_FEATURES: tuple[PhysicsFeature, ...] = (
         PhysicsFeature(f"type_{name}", f"jointType_i[{name}]", "1 (one-hot)", "joint", None)
         for name in JOINT_TYPE_NAMES
     ),
+    # Reflected rotor inertia of the joint's drive (EmbodimentGraph.armature).
+    PhysicsFeature("armature", "I_i^rotor (reflected)", "kg m^2 | kg", "joint", 1e-5),
 )
 
 ACTUATOR_FEATURES: tuple[PhysicsFeature, ...] = (
@@ -93,20 +95,16 @@ ACTUATOR_FEATURES: tuple[PhysicsFeature, ...] = (
     PhysicsFeature("torque_coefficient", "k_m,i (drag = k_m w^2)", "N m s^2/rad^2", "joint", 1e-8),
 )
 
+# Every dynamics feature is a function of the sensed state (q, qd, gravity
+# direction, base twist) and the robot model only. None of them needs a torque
+# measurement or a torque estimate, so they are exact (up to the model) in
+# pretraining, in simulation, and on a real robot alike.
 DYNAMICS_FEATURES: tuple[PhysicsFeature, ...] = (
-    PhysicsFeature("mass_diagonal", "M_ii(q_t)", "kg m^2 | kg", "joint", 1e-3),
+    PhysicsFeature("mass_diagonal", "M_ii(q_t) (with rotor inertia)", "kg m^2 | kg", "joint", 1e-3),
     PhysicsFeature("coriolis", "c_i(q_t, qd_t, base twist)", "N m | N", "joint", 0.1),
     PhysicsFeature("gravity", "g_i(q_t) with gravity in the base frame", "N m | N", "joint", 0.1),
     PhysicsFeature("friction", "tau_hat_f,i (joint friction + rotor drag)", "N m | N", "joint", 0.1),
-    PhysicsFeature("applied_torque_prev", "tau_i,t-1^applied", "N m | N", "joint", 0.1),
     PhysicsFeature("gravity_load", "|g_i| / (tau_i^cont + eps)", "1", "joint", 1.0),
-    PhysicsFeature(
-        "applied_torque_known",
-        "source of tau_t-1: 1 measured, 0.5 inverse-dynamics estimate, 0 unknown",
-        "1 (flag)",
-        "joint",
-        None,
-    ),
 )
 
 PHYSICS_FEATURE_GROUPS: dict[str, tuple[PhysicsFeature, ...]] = {
@@ -125,8 +123,6 @@ FEATURE_UPDATE_TIERS: dict[str, str] = {
     "gravity_load": "configuration",
     "coriolis": "velocity",  # q, qd, and the base twist
     "friction": "velocity",  # qd
-    "applied_torque_prev": "measurement",  # new every control step
-    "applied_torque_known": "measurement",
 }
 
 

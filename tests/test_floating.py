@@ -11,6 +11,7 @@ from datasets import Dataset
 
 from model import EmbodimentGraph, JointFeatureConfig, actuator_specs
 from model.dynamics import (
+    contact_jacobian,
     BaseMotion,
     contact_maps,
     determinate_torque_projector,
@@ -24,7 +25,7 @@ from model.dynamics import (
 )
 from model.physics import PhysicsFeatureCache, actuator_tensors
 from model.training import build_physics_datasets
-from model.training.episodes import EmbodimentRecord, Trajectory, process_episode
+from model.training.episodes import TORQUE_SOURCES, EmbodimentRecord, Trajectory, estimate_episode_efforts, process_episode
 from model.training.sources import synthetic_source
 from tests.test_embodiment import humanoid, joint, link, quadruped, robot
 
@@ -212,7 +213,10 @@ class FloatingPipelineTest(unittest.TestCase):
     """Recorded floating-base data, contacts, and batches."""
 
     def test_recorded_standing_quadruped(self) -> None:
-        """Kinematics-only data of a still quadruped yield weight-bearing torque estimates."""
+        """Kinematics-only data of a still quadruped give response labels, never torque labels.
+
+        The inverse-dynamics estimate is still available for analysis and bears the weight.
+        """
         graph = EmbodimentGraph.from_urdf(quadruped(), floating_base=True)
         record = EmbodimentRecord.build("quad", graph, actuator_specs(graph), contact_links=FEET)
         steps = 20
@@ -225,11 +229,24 @@ class FloatingPipelineTest(unittest.TestCase):
             base_position=torch.zeros(steps, 3, dtype=torch.float64),
         )
         episode = process_episode(record, trajectory)
-        expected = estimate_joint_efforts(graph, q[:1], q[:1], q[:1], contact_links=FEET).efforts[0]
-        torch.testing.assert_close(episode["applied_torque"][5, 0], expected.float(), atol=1e-3, rtol=1e-3)
-        self.assertLess(float(episode["estimate_residual"].max()), 1e-2)
-        self.assertEqual(float(episode["dynamics_features"][5, 0, 6]), 0.5)  # estimated torque flag
+        self.assertEqual(episode["torque_source"].unique().tolist(), [TORQUE_SOURCES.index("none")])
+        self.assertEqual(float(episode["applied_torque"].abs().max()), 0.0)
+        self.assertEqual(float(episode["action_features"][:, 0].abs().max()), 0.0)  # no estimate in the tokens
+        self.assertTrue(bool(episode["contacts_detected"].all()))
+        self.assertLess(float(episode["contact_residual"].max()), 1e-2)
+        self.assertTrue(bool(episode["response_valid"].all()))
+        # Four feet down: the response leaves every foot still and ignores internal forces.
+        response = episode["response_operator"][5].double()
+        jacobian = contact_jacobian(graph, q[5], FEET, torch.ones(4, dtype=torch.bool), False)
+        self.assertLess(float((jacobian @ response).abs().max()), 1e-5 * float(response.abs().max()))
+        projection = episode["contact_projection"][5].double()
+        eye = torch.eye(graph.num_joints, dtype=torch.float64)
+        self.assertLess(float((response @ (eye - projection)).abs().max()), 1e-4 * float(response.abs().max()))
+        self.assertEqual(episode["dynamics_features"].shape[-1], 5)
         self.assertEqual(float(episode["base_features"][0, 10]), 1.0)  # floating flag
+        analysis = estimate_episode_efforts(record, trajectory)
+        expected = estimate_joint_efforts(graph, q[:1], q[:1], q[:1], contact_links=FEET).efforts[0]
+        torch.testing.assert_close(analysis["efforts"][5], expected, atol=1e-3, rtol=1e-3)
 
     def test_feature_cache_uses_base_twist(self) -> None:
         """Base rotation changes the Coriolis features of a floating robot."""
@@ -298,14 +315,21 @@ class FloatingPipelineTest(unittest.TestCase):
             (root / "data.json").write_text(json.dumps(config))
             datasets = build_physics_datasets(root / "data.json", cache_dir=root / "cache")
         recorded = next(episode for index, episode in datasets.train.episodes if index == 0)
-        self.assertTrue(bool(recorded["base_acceleration_known"].all()))
-        self.assertLess(float(recorded["estimate_residual"].median()), 1.0)
+        self.assertTrue(bool(recorded["base_acceleration_known"][:, 0].all()))
+        self.assertLess(float(recorded["contact_residual"].median()), 1.0)
         collator = datasets.collator()
-        batch = collator([datasets.train[index] for index in range(0, len(datasets.train), 7)][:8])
-        self.assertTrue(bool(batch["fd_base_mask"].any()))
-        self.assertFalse(bool(batch["rbd_mask"].any()))  # floating-base samples never use task F
-        recorded_rows = batch["torque_label_weight"] < 1
+        torch.manual_seed(0)
+        by_source = {0: [], 1: []}
+        for index, (episode, _, _) in enumerate(datasets.train.index):
+            by_source[datasets.train.episodes[episode][0]].append(index)
+        chosen = by_source[0][::9][:4] + by_source[1][::5][:4]
+        batch = collator([datasets.train[index] for index in chosen])
+        self.assertTrue(bool(batch["fd_base_mask"].any()))  # from the simulated episodes
+        recorded_rows = batch["torque_label_weight"] == 0
         self.assertTrue(bool(recorded_rows.any()))
+        self.assertFalse(bool(batch["fd_mask"][recorded_rows].any()))
+        self.assertTrue(bool(batch["response_mask"][recorded_rows].any()))
+        self.assertTrue(bool(batch["response_base_mask"].any()))
         self.assertEqual(batch["input_values"].shape[-1], datasets.token_size)
         for name, value in batch.items():
             self.assertTrue(torch.isfinite(value.float()).all(), name)
@@ -318,17 +342,23 @@ class FloatingPipelineTest(unittest.TestCase):
         output = model(**batch)
         self.assertIn("fd_base_acceleration", output.predictions)
         self.assertTrue(torch.isfinite(output.loss))
-        # The ID loss ignores the part of the target that internal contact forces could change.
-        projection = batch["id_projection"]
+        # The ID and inverse-response losses ignore the part of the target that internal
+        # contact forces could change.
+        projection = batch["contact_projection"]
         ambiguous = torch.eye(projection.shape[-1]) - projection
-        shift = (ambiguous @ torch.randn(projection.shape[:-1])[..., None]).squeeze(-1) / batch["torque_scale"]
-        shifted = dict(batch, id_target=batch["id_target"] + shift)
-        torch.manual_seed(0)
+        self.assertGreater(float(ambiguous.abs().max()), 0.1)  # the recorded frames have four feet down
+        noise = (ambiguous @ torch.randn(projection.shape[:-1])[..., None]).squeeze(-1)
+        shifted = dict(
+            batch,
+            id_target=batch["id_target"] + noise / batch["torque_scale"],
+            inverse_response_target=batch["inverse_response_target"] + noise / batch["response_torque_scale"],
+        )
         model.eval()
         with torch.no_grad():
-            first = model(**batch).loss_components["id"]
-            second = model(**shifted).loss_components["id"]
-        torch.testing.assert_close(first, second, atol=1e-5, rtol=1e-4)
+            first = model(**batch).loss_components
+            second = model(**shifted).loss_components
+        for name in ("id", "inverse_response"):
+            torch.testing.assert_close(first[name], second[name], atol=1e-5, rtol=1e-4)
 
 
 if __name__ == "__main__":

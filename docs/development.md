@@ -8,6 +8,7 @@ The full repository layout, what the tests cover, validation results, and detail
 
 - [Repository layout](#repository-layout)
 - [Testing and validation](#testing-and-validation)
+- [Continuous integration](#continuous-integration)
 - [Limitations](#limitations)
 - [Knowledge graph](#knowledge-graph)
 
@@ -20,25 +21,29 @@ DA-GET-BFM/
 │   ├── urdf.py                # standard-library URDF parser, transmissions, transforms
 │   ├── embodiment.py          # EmbodimentGraph (base body, link frames), JointFeatureConfig,
 │   │                          # EmbodimentBatch, collate_embodiments, FK, mass matrix
-│   ├── dynamics.py            # fixed/floating RNEA, M_full, forward dynamics, contacts,
-│   │                          # rotor thrust, torque estimation
+│   ├── dynamics.py            # fixed/floating RNEA (with rotor inertia), M_full, forward dynamics,
+│   │                          # contacts, contact Jacobian, constrained response, rotor thrust,
+│   │                          # torque estimation (analysis only)
 │   ├── physics_schema.py      # physics feature symbols, units, frames, scales, update tiers
 │   ├── physics.py             # ActuatorSpec, feature extraction, motor labels, PhysicsFeatureCache
 │   ├── tokenization_da_get.py # DaGetTokenizer: GET-Zero token layout
 │   ├── configuration_da_get.py # DaGetConfig and the da_get_zero preset
 │   ├── modeling_da_get.py     # DaGetEncoder, graph attention bias, Physics Cross Attention,
 │   │                          # physics tokenizers, PhysicsMemory
-│   ├── pretraining.py         # DaGetForPhysicsPretraining (HF PreTrainedModel), heads A–F
+│   ├── pretraining.py         # DaGetForPhysicsPretraining (HF PreTrainedModel), heads A, B, C, R, R⁻¹, D, E
 │   ├── configuration_bfm.py   # BfmConfig
 │   ├── modeling_bfm.py        # per-DoF B, D, actor, F and critics; DaGetBfmModel
 │   ├── rl/
 │   │   ├── configuration_fb_cpr.py # FbCprConfig: BFM-Zero's training hyperparameters
-│   │   ├── observation.py     # policy and state views of one robot
+│   │   ├── observation.py     # policy and state views of one robot (no torque input)
+│   │   ├── actions.py         # ActionMap (targets inside the torque envelope), TorqueMonitor
 │   │   ├── envs.py            # simulator-independent environment logic and MuJoCo worlds
 │   │   ├── isaac_env.py       # Isaac Lab worlds; several robots in one simulation
 │   │   ├── buffers.py         # per-robot replay buffer and expert motions
 │   │   ├── agent.py           # DaGetFbCprAgent: D, F, B, critics, encoder and actor updates
 │   │   ├── evaluation.py      # tracking, goal and getting-up tasks, EMD, motion priorities
+│   │   ├── physics_replay.py  # physics-loss episodes from RL rollouts (no torque labels)
+│   │   ├── deployment.py      # DaGetBfmPolicy: 50 Hz runner with CUDA Graphs
 │   │   └── trainer.py         # online training loop, checkpoints, TensorBoard
 │   ├── transformer.py         # attention and cross-attention blocks
 │   ├── robot_analysis.py      # infer floating base, feet, rotors, propellers from a URDF
@@ -50,8 +55,8 @@ DA-GET-BFM/
 │   ├── training/
 │   │   ├── sources.py         # synthetic, MuJoCo ground, and Hugging Face sources
 │   │   ├── ground_sim.py      # MJCF from the graph, standing and pushes on the ground
-│   │   ├── episodes.py        # per-frame features and labels, base reconstruction,
-│   │   │                      # contact detection, embodiment records
+│   │   ├── episodes.py        # per-frame features and labels (torque sources, response
+│   │   │                      # operator), base reconstruction, contact detection, records
 │   │   ├── dataset.py         # data config, caching, dataset, collator
 │   │   └── trainer.py         # Trainer that logs each task loss
 │   └── README.md              # module-level technical notes
@@ -60,12 +65,14 @@ DA-GET-BFM/
 │   ├── train_bfm.py                  # online off-policy FB-CPR across robots
 │   ├── make_data_config.py           # write a data config from a URDF and a dataset
 │   ├── convert_dataset.py            # convert public datasets to the table format
-│   ├── validate_torque_estimation.py # estimated vs measured torques on a real Go1
+│   ├── validate_torque_estimation.py # estimated vs measured torques on a real Go1 (analysis)
+│   ├── benchmark_inference.py        # 50 Hz latency of every network
 │   └── download_urdfs.py             # fetch Unitree and ANYmal D URDFs into assets/urdf
 ├── assets/robots/quadrotor_x.urdf    # X quadrotor for synthetic flight
 ├── configs/data/              # example data configs
 ├── configs/rl/                # example RL training config
 ├── tests/                     # unit tests (see below)
+├── .github/workflows/ci.yml   # continuous integration
 ├── docs/                      # documentation by topic
 ├── raw/                       # source material (the GET-Zero project page)
 ├── graphify-out/              # knowledge graph of the code and paper
@@ -81,7 +88,7 @@ uv sync --all-extras
 uv run pytest
 ```
 
-The suite has 159 tests (the MuJoCo and HDF5 tests are skipped without the
+The suite has 176 tests (the MuJoCo and HDF5 tests are skipped without the
 `sim` and `validation` extras, and the CUDA Graph test without a GPU):
 
 - `test_embodiment.py`: URDF graphs, features, kinematics, mass matrix,
@@ -95,7 +102,14 @@ The suite has 159 tests (the MuJoCo and HDF5 tests are skipped without the
   - actuator specs, the torque-speed envelope, and motor labels;
   - tiered cache refreshes;
   - Physics Cross Attention: cached memory, stale-memory detection, padding
-    invariance.
+    invariance;
+  - rotor inertia in `M`, RNEA and the rigid-body features, and its glob settings;
+  - the constrained response: `M⁻¹` for a fixed base, the slope of floating-base
+    forward dynamics without contacts, `J G = 0` and `G (I − P) = 0` with contacts,
+    and the contact Jacobian against finite-differenced foot velocities;
+  - `envelope_targets` puts requests exactly on the envelope, and
+    `torque_limit_excess`;
+  - the 5-column dynamics schema, and that encoder configs of the old sizes are rejected.
 - `test_floating.py`:
   - floating-base mass matrix structure, FD and RNEA consistency, free fall;
   - standing contact forces and torques;
@@ -104,12 +118,19 @@ The suite has 159 tests (the MuJoCo and HDF5 tests are skipped without the
   - harnessed floating and flight simulations whose torques are recovered
     from kinematics alone;
   - the determinate-torque projector removes exactly the internal-force
-    directions, and the projected ID loss ignores them;
+    directions, and the projected ID and inverse-response losses ignore them;
+  - kinematics-only data of a standing quadruped: no torque labels or inputs,
+    response labels that keep the feet still, and the analysis estimate bearing
+    the weight;
   - a Hub-style floating-base dataset with split state columns, through to a
-    model forward pass.
+    model forward pass, with recorded rows on R but not on FD.
 - `test_ground.py` (MuJoCo):
   - the generated MJCF has our dynamics (mass matrix and bias forces);
-  - a quadruped stands with exact labels and probe accelerations;
+  - a quadruped stands with exact labels and probe accelerations, and trusted
+    simulator contacts;
+  - `G δτ` matches MuJoCo's acceleration change within 5% once its contacts are
+    stiff (about 20% with the default soft contacts), while ignoring the contacts
+    is off by more than 100%;
   - estimated torques differ from MuJoCo's almost only by internal contact
     forces (motion-determined error below 10%);
   - a biped is steadied by a small recorded spotter wrench.
@@ -133,10 +154,18 @@ The suite has 159 tests (the MuJoCo and HDF5 tests are skipped without the
   - each update changes only its own networks, RL and physics losses reach the encoder
     but the actor's does not, and targets move by exactly `tau`;
   - prompts pair only with transitions of the same robot;
-  - tokens, dynamics features, and mass matrix equal the pretraining pipeline's;
+  - tokens, dynamics features, and mass matrix equal the pretraining pipeline's,
+    and no observation reads a torque;
   - environment resets reproduce a motion's state tokens, lying starts and fall
-    behavior, motion priorities, EMD, and auxiliary rewards;
-  - real and synthetic sources sharing a robot, and the training script on two robots.
+    behavior, motion priorities, EMD, and auxiliary rewards, including the three
+    torque penalties and their formulas;
+  - the targets sent stay inside the torque envelope, and `ActionMap` on the
+    robot gives the same targets as the environment;
+  - the physics replay turns rollout chunks into episodes with response, effect,
+    motor and FK labels and no torque labels;
+  - real and synthetic sources sharing a robot, the robot graph carrying the
+    simulators' rotor inertia, and the training script on two robots (with the
+    physics replay and the torque metrics).
 - `test_deployment.py`: `DaGetBfmPolicy` gives the training path's actions and B,
   refreshes after a weight change, checks inputs on the CPU, and records no call that
   waits for the device or copies from the host (the CUDA Graph replay test runs only
@@ -147,11 +176,20 @@ The suite has 159 tests (the MuJoCo and HDF5 tests are skipped without the
 - `test_pretraining.py`:
   - both data sources and caching;
   - collation and masks;
-  - all six losses, with a loss decrease;
+  - all seven losses, with a loss decrease;
+  - data without torque gives no FD/ID rows and no torque in the tokens, but R,
+    R⁻¹ and D rows;
+  - the response target equals `G(q) δτ` for the drawn torque change;
+  - measured torques are off by default and weighted when enabled;
+  - a floating robot without known support gets no response labels;
+  - keys of the estimate-based pipeline are rejected, in configs and in loss weights;
+  - every example config under `configs/` uses current keys;
   - ablations;
   - `save_pretrained`/`from_pretrained`;
   - a Trainer run with per-task logging.
   - the training script recording train and eval curves in TensorBoard.
+- `test_docs.py`: every relative link and `#anchor` in the README, `docs/` and
+  `model/README.md` resolves (GitHub heading slugs).
 
 Checks outside the test suite:
 
@@ -162,7 +200,11 @@ Checks outside the test suite:
   `FD(ID(qdd)) = qdd` to about 1e-13 for fixed and floating bases.
 - **Synthetic floating and flight data:** for the harnessed Go1 and H1 and the
   flying quadrotor, torques estimated from kinematics alone match the applied
-  torques to about 1e-15.
+  torques to about 1e-15 (a check of the estimator; training does not use it).
+- **Constrained response against MuJoCo:** for a standing quadruped with small
+  torque changes, the median error of `G δτ` is 20% with MuJoCo's default soft
+  contacts, 3% with `solimp` 0.99–0.999, and 2.7% with 0.9999; the free-floating
+  response (contacts ignored) is off by about 500%.
 - **Converters on real downloads:** a MIPO trot sequence, a GrandTour mission
   (17 episodes of 20 s), NeuroBEM flights read remotely from the zip, and
   LocoMuJoCo, AMASS-G1, and LAFAN1 motions all convert and load.
@@ -170,10 +212,15 @@ Checks outside the test suite:
   episodes with pushes; the bipeds' spotter carries about 5–10% of the weight.
 - **Real recorded data:**
   - Unitree G1 whole-body teleoperation loads as a 29-DoF floating-base robot.
-    On 99.5% of frames the estimated contact forces explain the base wrench,
-    and the knee torque estimates are about 5–6 N m.
+    On 99.5% of frames the detected contacts explain the base wrench (these
+    frames keep their response labels).
   - Torque estimation on a real Go1 is
-    [compared with measured torques](dynamics.md#estimating-joint-torques-without-torque-sensors).
+    [compared with measured torques](dynamics.md#how-accurate-is-it).
+
+The two runs below used the earlier, estimate-based pipeline (7 dynamics features with
+the previous torque, estimated FD/ID labels, task F). They are kept as a record of the
+pipeline working end to end; they have not been rerun with the torque-free schema,
+whose task set and labels differ.
 
 **Floating-base training run.** The data was 11 embodiments:
 - 12 recorded G1 whole-body teleoperation episodes from the Hub (floating
@@ -216,13 +263,20 @@ a pipeline check, not a conclusive ablation.
   cannot be expressed in URDF and are rejected.
 - **Xacro must be expanded first**, for example with
   `xacro robot.urdf.xacro > robot.urdf`. MJCF models must be converted.
-- **Torque estimates are approximate.**
-  - Contact forces are found by weighted least squares, without friction cones
-    or contact dynamics, and are not unique with few feet down.
-  - Rotor inertia and motor friction are not in URDFs.
-  - On a real Go1 the error is 43–97% of the RMS torque (correlation 0.5–0.8),
-    and 47–72% on ANYmal D.
-  - Prefer measured torques when a dataset has them.
+- **No torque labels for recorded data without sensors.** Torque estimates are
+  43–97% off on a real Go1 and 47–72% on ANYmal D, so training does not use them.
+  Such data supervises dynamics only through the constrained response; full
+  forward and inverse dynamics come from simulated data.
+- **The response is a rigid, holding-contact model.** It assumes contacts that
+  neither slip nor lift under the torque change, and needs to know which feet are
+  down. MuJoCo's soft contacts differ by about 20%. Without contact sensors, the
+  contact set comes from a height-and-speed heuristic checked by the base-wrench
+  residual.
+- **Rotor inertia must be supplied.** URDFs have none; set `armature` from motor
+  data. The RL default (0.01 kg m²) is a stability value, not a measurement.
+- **Torque limits are enforced at the control rate.** `ActionMap` clips the
+  request at each control step; inside a step only the simulator's constant peak
+  clip applies. The torque penalty weights are untuned.
 - **Simulated ground contact covers standing, not walking.** The MuJoCo source
   produces stance, crouching, weight shifting, partial foot lift, and push
   recovery, not gaits. Bipeds need the recorded spotter. Feet are spheres
@@ -244,6 +298,25 @@ a pipeline check, not a conclusive ablation.
   for feasibility labels to be trustworthy.
 - **The URDF must have inertials.** Joints that move massless bodies give a
   zero mass-matrix diagonal.
+
+## Continuous integration
+
+[`.github/workflows/ci.yml`](../.github/workflows/ci.yml) runs on every push to `main`,
+on pull requests, and on demand, on Ubuntu with Python 3.11:
+
+| Step | Command | Checks |
+|---|---|---|
+| Lock | `uv lock --check` | `uv.lock` matches `pyproject.toml` |
+| Install | `uv sync --locked --all-extras` | The locked environment installs, with MuJoCo, the converters and the validation tools |
+| Compile | `uv run python -m compileall -q model scripts tests` | Every module byte-compiles |
+| Test | `uv run pytest -q -ra` | The whole suite, including both training scripts end to end on MuJoCo and the documentation link check |
+
+To run the same steps locally, run those four commands from the repository root. Not
+covered by CI: Isaac Lab (needs an NVIDIA GPU and Isaac Sim), the CUDA Graph replay test
+(skipped without a GPU), the latency benchmark (`scripts/benchmark_inference.py`, which
+needs the downloaded URDFs and should run on the deployment machine), and Python 3.10
+(supported by `pyproject.toml`, but the lock's development environment is 3.11). There is
+no deployment (CD) stage: the project publishes no package or service.
 
 ## Knowledge graph
 

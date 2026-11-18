@@ -7,10 +7,11 @@ A JSON data config lists trajectory sources and the observation layout::
       "joint_features": "da_get_zero",
       "eval_fraction": 0.05,
       "seed": 0,
-      "allow_estimated_torque_for_fd": true,
-      "use_estimated_previous_torque": true,
-      "max_estimate_residual": 0.5,
-      "estimated_torque_weight": 0.3,
+      "measured_torque_weight": 0.0,
+      "max_contact_residual": 0.5,
+      "contact_margin_steps": 2,
+      "proposal_variants": 2,
+      "response_range": [0.02, 1.0],
       "sources": [
         {"type": "synthetic", "urdf": "../assets/urdf/go1.urdf", "name": "go1"},
         {"type": "huggingface", "repo_id": "...", "urdf": "...", "joint_names": [...], "fps": 30}
@@ -24,17 +25,24 @@ evaluation sets. ``PhysicsDataCollator`` pads samples of different robots into
 one batch and builds the GET-Zero observation tokens:
 
 * variable local ``o_vl`` per joint and step (5): normalized position, velocity
-  over the speed limit, and the previous executed action features;
+  over the speed limit, and the previous executed action features (zero when the
+  dataset has no commands and no measured torque);
 * variable global ``o_vg`` per step (11): gravity direction in the base frame,
   base angular velocity, base linear velocity over the robot size, a flag for
   a known base twist, and a floating-base flag;
 * fixed local ``o_fl``: the GET-Zero hardware features of each joint.
+
+Torque labels come only from simulators (weight 1) and, if enabled, from torque
+sensors (``measured_torque_weight``). Nothing is estimated. Every frame, of every
+dataset, also trains the response tasks R and R^-1 on a torque change drawn by the
+collator, whose labels ``G(q) delta_tau`` are exact for the model.
 """
 
 from __future__ import annotations
 
 import hashlib
 import json
+import math
 import random
 from dataclasses import dataclass
 from pathlib import Path
@@ -48,16 +56,39 @@ from model.physics import EPSILON
 from model.tokenization_da_get import DaGetTokenizer
 from model.training.episodes import (
     BASE_FEATURE_SIZE,
+    TORQUE_SOURCES,
     EmbodimentRecord,
     finalize_acceleration_scales,
     process_episode,
 )
 from model.training.sources import SOURCE_TYPES, resolve_path
 
-CACHE_VERSION = 4
+CACHE_VERSION = 5
 VARIABLE_LOCAL_SIZE = 5
 VARIABLE_GLOBAL_SIZE = BASE_FEATURE_SIZE
 FD_TORQUE_CLIP = 5.0
+# Keys of the earlier, estimate-based pipeline, with what replaces them.
+REMOVED_KEYS = {
+    "allow_estimated_torque_for_fd": "torque estimates are no longer used; FD trains on exact and measured torques",
+    "use_estimated_previous_torque": "the dynamics features no longer contain a previous torque",
+    "estimated_torque_weight": "torque estimates are no longer used; see measured_torque_weight",
+    "max_estimate_residual": "renamed to max_contact_residual",
+}
+
+
+def check_data_config(config: dict[str, Any]) -> None:
+    """Reject keys of the estimate-based pipeline, which would otherwise be ignored silently.
+
+    Args:
+        config (dict[str, Any]): Parsed data config.
+
+    Raises:
+        ValueError: The config uses a removed key.
+    """
+    removed = {key: reason for key, reason in REMOVED_KEYS.items() if key in config}
+    if removed:
+        details = "; ".join(f"{key}: {reason}" for key, reason in removed.items())
+        raise ValueError(f"data config uses removed keys ({details})")
 
 
 def joint_feature_config(value: str | dict | None) -> JointFeatureConfig:
@@ -113,9 +144,7 @@ class PhysicsDatasets:
         records (list[EmbodimentRecord]): Embodiments.
         history_size (int): Observation history length.
         feature_config (JointFeatureConfig): Observation hardware features.
-        allow_estimated_torque_for_fd (bool): Train FD on ID-estimated torques.
-        max_estimate_residual (float): See ``PhysicsDataCollator``.
-        estimated_torque_weight (float): See ``PhysicsDataCollator``.
+        settings (CollatorSettings): Label weights and response sampling.
     """
 
     train: PhysicsTrajectoryDataset
@@ -123,19 +152,11 @@ class PhysicsDatasets:
     records: list[EmbodimentRecord]
     history_size: int
     feature_config: JointFeatureConfig
-    allow_estimated_torque_for_fd: bool
-    max_estimate_residual: float = 0.5
-    estimated_torque_weight: float = 0.3
+    settings: CollatorSettings = None
 
     def collator(self) -> PhysicsDataCollator:
         """Return a collator for these datasets."""
-        return PhysicsDataCollator(
-            self.records,
-            self.history_size,
-            self.allow_estimated_torque_for_fd,
-            self.max_estimate_residual,
-            self.estimated_torque_weight,
-        )
+        return PhysicsDataCollator(self.records, self.history_size, self.settings)
 
     @property
     def token_size(self) -> int:
@@ -179,6 +200,7 @@ def build_physics_datasets(
     config, base = load_data_config(config_source)
     if not config.get("sources"):
         raise ValueError("data config needs at least one source")
+    check_data_config(config)
     feature_config = joint_feature_config(config.get("joint_features"))
     history = int(config.get("history_size", 3))
     cache_root = Path(cache_dir or config.get("cache_dir") or ".cache/physics_data")
@@ -203,11 +225,11 @@ def build_physics_datasets(
                         process_episode(
                             records[index],
                             trajectory,
-                            use_estimated_previous_torque=bool(
-                                config.get("use_estimated_previous_torque", True)
-                            ),
                             contact_height_tolerance=float(source.get("contact_height_tolerance", 0.03)),
                             contact_speed_tolerance=float(source.get("contact_speed_tolerance", 0.5)),
+                            proposal_variants=int(config.get("proposal_variants", 2)),
+                            contact_margin_steps=int(config.get("contact_margin_steps", 2)),
+                            seed=int(config.get("seed", 0)) * 1_000_003 + len(episodes),
                         ),
                     )
                 )
@@ -227,27 +249,16 @@ def build_physics_datasets(
         if eval_ids
         else None
     )
-    return PhysicsDatasets(
-        train,
-        evaluation,
-        records,
-        history,
-        feature_config,
-        bool(config.get("allow_estimated_torque_for_fd", True)),
-        float(config.get("max_estimate_residual", 0.5)),
-        float(config.get("estimated_torque_weight", 0.3)),
-    )
+    return PhysicsDatasets(train, evaluation, records, history, feature_config, CollatorSettings.from_config(config))
 
 
 PER_FRAME_KEYS = (
-    "id_projection",
+    "contact_projection",
     "dynamics_features",
     "mass_matrix",
-    "coriolis",
-    "gravity_torque",
-    "friction_torque",
     "fk_position",
     "fk_rotation",
+    "response_operator",
 )
 PER_VARIANT_KEYS = (
     "applied_torque",
@@ -321,11 +332,14 @@ class PhysicsTrajectoryDataset(Dataset):
                 dim=-1,
             ),
             "variable_global": episode["base_features"][frames],
-            "torque_measured": bool(episode["torque_measured"][step]),
-            "estimate_residual": float(episode["estimate_residual"][step]),
+            "torque_source": int(episode["torque_source"][step, variant]),
+            "contact_residual": float(episode["contact_residual"][step]),
+            "contacts_detected": bool(episode["contacts_detected"][step]),
+            "response_valid": bool(episode["response_valid"][step]),
             "base_acceleration_known": bool(episode["base_acceleration_known"][step, variant]),
             "floating_base": bool(episode["floating_base"][step]),
             "effect_valid": bool(episode["effect_valid"][step, variant]),
+            "motor_valid": bool(episode["motor_valid"][step, variant]),
         }
         for key in PER_FRAME_KEYS:
             sample[key] = episode[key][step]
@@ -344,40 +358,72 @@ def _pad(values: Sequence[torch.Tensor], joint_count: int, dims: int = 1, fill: 
     return result
 
 
+@dataclass
+class CollatorSettings:
+    """Label weights and response sampling of ``PhysicsDataCollator``.
+
+    Attributes:
+        measured_torque_weight (float): Loss weight of FD and ID labels from torque
+            sensors. 0 (default) keeps them out of training: real torque sensors
+            (Unitree's motor-current estimate, for example) are themselves
+            approximate. Simulated torques always have weight 1.
+        max_contact_residual (float): Drop response labels of frames whose detected
+            contacts leave more than this fraction of the robot's weight in the base
+            wrench unexplained (a missed or false contact). Contacts from sensors or
+            simulators are trusted.
+        response_range (tuple[float, float]): Torque changes of the response tasks
+            are log-uniform in this range, as fractions of each joint's peak torque,
+            with a random sign per joint.
+    """
+
+    measured_torque_weight: float = 0.0
+    max_contact_residual: float = 0.5
+    response_range: tuple[float, float] = (0.02, 1.0)
+
+    def __post_init__(self) -> None:
+        """Validate values."""
+        low, high = self.response_range
+        if not 0 < low <= high:
+            raise ValueError("response_range must satisfy 0 < low <= high")
+        if self.measured_torque_weight < 0:
+            raise ValueError("measured_torque_weight must be nonnegative")
+
+    @classmethod
+    def from_config(cls, config: dict[str, Any]) -> CollatorSettings:
+        """Read the settings from a data config."""
+        return cls(
+            float(config.get("measured_torque_weight", 0.0)),
+            float(config.get("max_contact_residual", 0.5)),
+            tuple(float(value) for value in config.get("response_range", (0.02, 1.0))),
+        )
+
+
 class PhysicsDataCollator:
     """Pad samples of different robots into one batch for ``DaGetForPhysicsPretraining``.
 
     The output holds encoder inputs (tokens, graph structure, mass matrix,
-    physics features) and, for each task, normalized targets and masks.
+    physics features) and, for each task, normalized targets and masks. The
+    response tasks draw a new torque change for every sample from the global
+    PyTorch generator (seed it for reproducible batches).
     """
 
     def __init__(
         self,
         records: Sequence[EmbodimentRecord],
         history_size: int,
-        allow_estimated_torque_for_fd: bool = True,
-        max_estimate_residual: float = 0.5,
-        estimated_torque_weight: float = 0.3,
+        settings: CollatorSettings | None = None,
     ) -> None:
         """Precompute per-embodiment scales.
 
         Args:
             records (Sequence[EmbodimentRecord]): Embodiments.
             history_size (int): Observation history length.
-            allow_estimated_torque_for_fd (bool): Keep FD labels of samples whose
-                torque is an inverse-dynamics estimate.
-            max_estimate_residual (float): Drop FD and ID labels of estimated
-                frames whose unexplained base wrench exceeds this fraction of
-                the robot's weight.
-            estimated_torque_weight (float): Loss weight of FD and ID labels
-                that rest on estimated torques (measured and simulated
-                torques have weight 1).
+            settings (CollatorSettings | None): Label weights and response
+                sampling; defaults if None.
         """
         self.records = list(records)
         self.history_size = history_size
-        self.allow_estimated_torque_for_fd = allow_estimated_torque_for_fd
-        self.max_estimate_residual = max_estimate_residual
-        self.estimated_torque_weight = estimated_torque_weight
+        self.settings = settings or CollatorSettings()
         feature_size = self.records[0].joint_features.shape[1]
         self.token_builder = DaGetTokenizer(
             fixed_local_size=feature_size,
@@ -390,15 +436,25 @@ class PhysicsDataCollator:
             actuator = record.actuator
             actuated = record.actuated
             ones = torch.ones(record.graph.num_joints, dtype=torch.float64)
+            response = record.response_scale if record.response_scale is not None else torch.ones(6 + len(ones))
             self._scales.append(
                 {
                     "actuated": actuated,
                     "peak": torch.where(actuated, actuator["peak_torque"], ones).float(),
                     "continuous": torch.where(actuated, actuator["continuous_torque"], ones).float(),
                     "acceleration": record.acceleration_scale.float(),
+                    "response": response[6:].float(),
+                    "response_base": response[:6].float(),
                     "effect": record.effect_mask,
                 }
             )
+
+    def _torque_changes(self, actuated: torch.Tensor, peak: torch.Tensor) -> torch.Tensor:
+        """Draw ``[B, J]`` torque changes: random sign, log-uniform fraction of peak, zero on passive joints."""
+        low, high = self.settings.response_range
+        fraction = torch.exp(torch.empty(peak.shape).uniform_(math.log(low), math.log(high)))
+        sign = torch.randint(0, 2, peak.shape).float() * 2 - 1
+        return torch.where(actuated, sign * fraction * peak, torch.zeros_like(peak))
 
     def __call__(self, samples: Sequence[dict[str, Any]]) -> dict[str, torch.Tensor]:
         """Collate samples.
@@ -426,6 +482,9 @@ class PhysicsDataCollator:
         def per_record(key: str, fill: float) -> torch.Tensor:
             return _pad([scale[key] for scale in scales], joints, 1, fill)
 
+        def flags(key: str) -> torch.Tensor:
+            return torch.tensor([sample[key] for sample in samples])
+
         variable_local = _pad(
             [sample["variable_local"].transpose(0, 1) for sample in samples], joints
         ).transpose(1, 2)
@@ -440,24 +499,50 @@ class PhysicsDataCollator:
         peak = per_record("peak", 1.0)
         continuous = per_record("continuous", 1.0)
         acceleration_scale = per_record("acceleration", 1.0)
-        measured = torch.tensor([sample["torque_measured"] for sample in samples])
-        effect_valid = torch.tensor([sample["effect_valid"] for sample in samples])
-        # Inverse-dynamics labels are unreliable where the contacts could not
-        # explain the base wrench (for example a missed contact).
-        weight = torch.tensor([self.records[index].graph.total_mass * 9.80665 for index in embodiments])
-        residual = torch.tensor([sample["estimate_residual"] for sample in samples])
-        reliable = measured | (residual <= self.max_estimate_residual * weight)
-        fd_rows = (measured | self.allow_estimated_torque_for_fd) & reliable
+        source = flags("torque_source")
+        label_weight = torch.where(
+            source == TORQUE_SOURCES.index("exact"),
+            1.0,
+            torch.where(source == TORQUE_SOURCES.index("measured"), self.settings.measured_torque_weight, 0.0),
+        )
+        labeled = label_weight > 0
+        floating = flags("floating_base")
+        effect_valid = flags("effect_valid")
         base_scale = torch.stack([self.records[index].base_acceleration_scale for index in embodiments])
         base_acceleration = torch.stack([sample["base_acceleration"] for sample in samples]).float() / base_scale
-        base_known = torch.tensor([sample["base_acceleration_known"] for sample in samples])
+        base_known = flags("base_acceleration_known")
         base_acceleration = torch.where(base_known[:, None], base_acceleration, torch.zeros_like(base_acceleration))
-        label_weight = torch.where(measured, 1.0, self.estimated_torque_weight)
-        floating = torch.tensor([sample["floating_base"] for sample in samples])
         applied = stack("applied_torque").float()
         acceleration = stack("acceleration").float()
         spatial, ancestors, descendants = structure.graph_distances
         mass_matrix = stack("mass_matrix", dims=2).float()
+
+        # Response tasks: a fresh torque change per sample, and its exact effect G dtau.
+        weight = torch.tensor([self.records[index].graph.total_mass * 9.80665 for index in embodiments])
+        residual = flags("contact_residual")
+        trusted = ~flags("contacts_detected") | (residual <= self.settings.max_contact_residual * weight)
+        response_rows = flags("response_valid") & trusted
+        change = self._torque_changes(actuated, peak)
+        operators = [sample["response_operator"].float() for sample in samples]
+        response_joint = torch.zeros((len(samples), joints))
+        response_base = torch.zeros((len(samples), 6))
+        for row, (operator, sample_change) in enumerate(zip(operators, change)):
+            count = operator.shape[-1]
+            delta = operator @ sample_change[:count]
+            response_base[row] = delta[:6]
+            response_joint[row, :count] = delta[6:]
+        response_scale = per_record("response", 1.0)
+        response_base_scale = torch.stack([scale["response_base"] for scale in scales])
+        response_target = response_joint / response_scale
+        response_base_target = response_base / response_base_scale
+        response_base_rows = response_rows & floating
+        inverse_input = torch.cat(
+            (
+                response_target[..., None],
+                torch.where(response_base_rows[:, None], response_base_target, torch.zeros_like(response_base_target))[:, None, :].expand(-1, joints, -1),
+            ),
+            dim=-1,
+        )
         return {
             "input_values": tokens,
             "parent_indices": structure.parent_indices,
@@ -473,25 +558,38 @@ class PhysicsDataCollator:
             # A. forward kinematics
             "fk_position": stack("fk_position").float(),
             "fk_rotation": stack("fk_rotation", fill=0.0).float(),
-            # B. forward dynamics
+            # B. forward dynamics (exact or measured torques only)
             "fd_torque": (applied / (peak + EPSILON)).clamp(-FD_TORQUE_CLIP, FD_TORQUE_CLIP),
             "fd_target": acceleration / acceleration_scale,
-            "fd_mask": actuated & fd_rows[:, None],
+            "fd_mask": actuated & labeled[:, None],
             "fd_base_target": base_acceleration,
-            "fd_base_mask": base_known & fd_rows,
-            # C. inverse dynamics
+            "fd_base_mask": base_known & labeled,
+            # C. inverse dynamics (same samples), projected onto the motion-determined part
             "id_acceleration": acceleration / acceleration_scale,
             "id_base_acceleration": base_acceleration,
             "id_target": stack("required_torque").float() / (continuous + EPSILON),
-            "id_mask": actuated & reliable[:, None],
-            "id_projection": stack("id_projection", dims=2).float(),
+            # The projection needs the right contact set: rows with doubtful detected contacts are dropped.
+            "id_mask": actuated & (labeled & trusted)[:, None],
+            "contact_projection": stack("contact_projection", dims=2).float(),
             "torque_label_weight": label_weight,
+            "torque_scale": continuous,
+            # R. contact-constrained response to a torque change (every dataset)
+            "response_torque": change / peak,
+            "response_target": response_target,
+            "response_mask": mask & response_rows[:, None],
+            "response_base_target": response_base_target,
+            "response_base_mask": response_base_rows,
+            # R^-1. torque change from its response, projected like ID
+            "inverse_response_input": inverse_input,
+            "inverse_response_target": change / peak,
+            "inverse_response_mask": actuated & response_rows[:, None],
+            "response_torque_scale": peak,
             # D. motor feasibility
             "motor_input": stack("action_features").float(),
             "motor_flags": stack("motor_flags").float(),
             "motor_margins": stack("motor_margins").float(),
             "motor_margin_mask": stack("motor_margin_mask", fill=False),
-            "motor_mask": actuated,
+            "motor_mask": actuated & flags("motor_valid")[:, None],
             # E. action effect
             "effect_input": stack("action_features").float(),
             "effect_delta_position": stack("effect_delta_position").float() / effect_position_scale,
@@ -499,12 +597,4 @@ class PhysicsDataCollator:
             "effect_linear_velocity": stack("effect_linear_velocity").float() / effect_linear_scale,
             "effect_angular_velocity": stack("effect_angular_velocity").float() / effect_angular_scale,
             "effect_mask": per_record("effect", False) & mask & effect_valid[:, None],
-            # F. rigid-body consistency
-            "coriolis": stack("coriolis").float(),
-            "gravity_torque": stack("gravity_torque").float(),
-            "friction_torque": stack("friction_torque").float(),
-            "applied_torque": applied,
-            "acceleration_scale": acceleration_scale,
-            "torque_scale": continuous,
-            "rbd_mask": actuated & fd_rows[:, None] & ~floating[:, None],
         }

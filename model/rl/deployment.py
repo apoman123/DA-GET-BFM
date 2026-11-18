@@ -7,6 +7,11 @@ encoder and actor (and, separately, the encoder and B) once as CUDA Graphs
 replays them each step: at batch 1 the networks are bound by kernel launches, which a
 replay issues as one. Input values are checked on the CPU before the copy, because a
 check on the device would wait for it, which a graph cannot record.
+
+No input is a torque: the dynamics features and mass matrix come from the sensed joint
+state and IMU (``EmbodimentObserver.policy_physics``). Send the returned actions through
+``model.rl.actions.ActionMap``, the code the training simulators use, to get the PD
+targets inside each actuator's torque envelope.
 """
 
 from __future__ import annotations
@@ -186,13 +191,13 @@ class DaGetBfmPolicy:
         Args:
             local (torch.Tensor): ``[N, H, J, 5]`` policy joint history (``Observation.local``).
             global_features (torch.Tensor): ``[N, H, 11]`` policy base history.
-            dynamics (torch.Tensor): ``[N, J, 7]`` dynamics features
+            dynamics (torch.Tensor): ``[N, J, 5]`` dynamics features
                 (``EmbodimentObserver.policy_physics``).
             mass (torch.Tensor): ``[N, J, J]`` mass matrix (same).
             z (torch.Tensor): ``[N, z_dim]`` task latent.
 
         Returns:
-            torch.Tensor: ``[N, J]`` actions in [-1, 1].
+            torch.Tensor: ``[N, J]`` actions in [-1, 1]; ``ActionMap`` turns them into targets.
         """
         self._check_mass(mass)
         self.policy_inputs.fill(local=local, global_features=global_features, dynamics=dynamics, mass=mass, z=z)

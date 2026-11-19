@@ -1,0 +1,21 @@
+{
+  "data_config": "configs/data/zero_shot.json",
+  "output_dir": "runs/zero_shot",
+  "preset": "small",
+  "root_token": true,
+  "dimensionless_physics": true,
+  "topology_bias": "get",
+  "head_type": "linear_residual",
+  "interface_rank": 64,
+  "acceleration_metric": "euclidean",
+  "effect_mode": "head",
+  "contact_head": true,
+  "centroidal_head": true,
+  "sysid_head": true,
+  "physics_mask_ratio": 0.15,
+  "learning_rate": 0.0005,
+  "warmup_steps": 100,
+  "per_device_train_batch_size": 64,
+  "max_steps": 2000,
+  "seed": 0
+}

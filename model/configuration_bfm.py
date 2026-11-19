@@ -85,6 +85,10 @@ class BfmConfig:
         forward_num_attention_heads (int | None): Forward/critic heads; None uses shared heads.
         forward_intermediate_size (int | None): Forward/critic feed-forward width; None uses shared width.
         forward_num_latent_tokens (int | None): Forward/critic latent slots; None uses shared slots.
+        use_interface_bias (bool): Add a per-head bias from the physics interface's
+            predicted operator (``DaGetPhysicsInterface``, normalized to unit
+            diagonal) to the actor's joint self-attention (proposal B2, [H]). Needs
+            a pretrained model with ``head_type`` ``linear`` or ``linear_residual``.
     """
 
     embedding_size: int
@@ -120,6 +124,7 @@ class BfmConfig:
     forward_num_attention_heads: int | None = None
     forward_intermediate_size: int | None = None
     forward_num_latent_tokens: int | None = None
+    use_interface_bias: bool = False
 
     @classmethod
     def from_sizes(

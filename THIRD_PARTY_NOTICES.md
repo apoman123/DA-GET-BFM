@@ -50,3 +50,38 @@ The encoder implements the Graph Embodiment Transformer from Patel and Song,
 *GET-Zero: Graph Embodiment Transformer for Zero-shot Embodiment
 Generalization*, ICRA 2025 (<https://get-zero-paper.github.io/>). Please cite
 the paper when using the encoder.
+
+## GenBot-1K robot generator (BSD-3-Clause)
+
+`model/morphology.py` takes the base dimensions, masses, joint offsets, PD gains and
+the variation schedule (one geometry factor per robot, the discrete sets of Table 6)
+of the procedural robots from the paper and the released generator of Ai et al.,
+*Towards Embodiment Scaling Laws in Robot Locomotion*, CoRL 2025
+(arXiv:2505.05753), commit 62e43ce. No code is copied; the numeric values are used
+under the generator's BSD-3-Clause license. Where the paper and the code disagree
+(humanoid foot scaling, quadruped hip mass, joint-limit scaling) the module docstring
+says which one is followed.
+
+The GenLoco ranges (Feng et al., *GenLoco: Generalized Locomotion Controllers for
+Quadrupedal Robots*, CoRL 2022, PMLR 205:1893-1903; code Apache-2.0) are taken from
+the paper's Table 1 and Appendix A; the code was only read to check the density rule.
+
+## Control-task probing regimen (Apache-2.0)
+
+`train_mlp_probe` in `model/evaluation/probes.py` adapts the probe training regimen of
+[john-hewitt/control-tasks](https://github.com/john-hewitt/control-tasks)
+(`regimen.py`: Adam at 1e-3, learning rate halved on a plateau, early stopping after
+four evaluations without improvement), from Hewitt and Liang, *Designing and
+Interpreting Probes with Control Tasks*, EMNLP 2019. License: Apache License 2.0.
+The bootstrap and IQM statistics in `model/evaluation/statistics.py` re-implement the
+methods of Agarwal et al., NeurIPS 2021 (rliable, Apache-2.0) without copying code.
+
+## LoRA (MIT) and PEFT (Apache-2.0)
+
+`model/adaptation.py` implements LoRA (Hu et al., *LoRA: Low-Rank Adaptation of Large
+Language Models*, ICLR 2022). No code is copied: `LoRALinear.forward` uses the same
+one-line formula as `loralib`'s `Linear.forward`
+([microsoft/LoRA](https://github.com/microsoft/LoRA), MIT), the default initialization
+of A (`kaiming_uniform_` with `a = sqrt(5)`) follows `loralib`, and substituting the
+merged weights in `nn.MultiheadAttention` follows the design of Hugging Face PEFT
+(Apache-2.0).

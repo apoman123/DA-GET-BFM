@@ -1,0 +1,167 @@
+{
+  "_comment": [
+    "RL data for the zero-shot BFM (proposal G2): real robots and procedural robots on MuJoCo ground contact.",
+    "dimensionless_inputs and history_size must match the pretrained encoder (the trainer checks dimensionless_inputs).",
+    "Procedural robots carry their own nominal pose and foot geometry (EmbodimentRecord.metadata['env']).",
+    "action_scale 1.25 is the repo default for every family; a per-family mapping is the G1 ablation."
+  ],
+  "history_size": 25,
+  "joint_features": "da_get_zero",
+  "seed": 0,
+  "control_dt": 0.02,
+  "target_normalization": "physics",
+  "dimensionless_inputs": true,
+  "sources": [
+    {
+      "type": "mujoco",
+      "name": "go1_ground",
+      "urdf": "../../assets/urdf/go1.urdf",
+      "contact_links": [
+        "FR_foot",
+        "FL_foot",
+        "RR_foot",
+        "RL_foot"
+      ],
+      "contact_geometry": {
+        "radius": 0.02
+      },
+      "nominal_pose": {
+        "FR_thigh_joint": 0.9,
+        "FL_thigh_joint": 0.9,
+        "RR_thigh_joint": 0.9,
+        "RL_thigh_joint": 0.9,
+        "FR_calf_joint": -1.8,
+        "FL_calf_joint": -1.8,
+        "RR_calf_joint": -1.8,
+        "RL_calf_joint": -1.8
+      },
+      "randomized_embodiments": 0,
+      "episodes_per_embodiment": 8,
+      "steps": 300,
+      "seed": 21,
+      "family": "quadruped",
+      "probe_torques": 0
+    },
+    {
+      "type": "mujoco",
+      "name": "anymal_ground",
+      "urdf": "../../assets/urdf/anymal_d.urdf",
+      "joint_names": [
+        "LF_HAA",
+        "LF_HFE",
+        "LF_KFE",
+        "RF_HAA",
+        "RF_HFE",
+        "RF_KFE",
+        "LH_HAA",
+        "LH_HFE",
+        "LH_KFE",
+        "RH_HAA",
+        "RH_HFE",
+        "RH_KFE"
+      ],
+      "contact_links": [
+        "LF_FOOT",
+        "RF_FOOT",
+        "LH_FOOT",
+        "RH_FOOT"
+      ],
+      "contact_geometry": {
+        "radius": 0.03
+      },
+      "nominal_pose": {
+        "LF_HFE": 0.6,
+        "RF_HFE": 0.6,
+        "LH_HFE": -0.6,
+        "RH_HFE": -0.6,
+        "LF_KFE": -1.0,
+        "RF_KFE": -1.0,
+        "LH_KFE": 1.0,
+        "RH_KFE": 1.0
+      },
+      "randomized_embodiments": 0,
+      "episodes_per_embodiment": 8,
+      "steps": 300,
+      "seed": 22,
+      "family": "quadruped",
+      "probe_torques": 0
+    },
+    {
+      "type": "mujoco",
+      "name": "g1_ground",
+      "urdf": "../../assets/urdf/g1_29dof.urdf",
+      "contact_links": [
+        "left_ankle_roll_link",
+        "right_ankle_roll_link"
+      ],
+      "contact_geometry": {
+        "radius": 0.01,
+        "sole_offset": [
+          0.03,
+          0.0,
+          -0.03
+        ],
+        "foot_size": [
+          0.18,
+          0.06
+        ]
+      },
+      "nominal_pose": {
+        "left_hip_pitch_joint": -0.2,
+        "right_hip_pitch_joint": -0.2,
+        "left_knee_joint": 0.4,
+        "right_knee_joint": 0.4,
+        "left_ankle_pitch_joint": -0.2,
+        "right_ankle_pitch_joint": -0.2
+      },
+      "randomized_embodiments": 0,
+      "episodes_per_embodiment": 8,
+      "steps": 300,
+      "seed": 23,
+      "family": "humanoid",
+      "probe_torques": 0
+    },
+    {
+      "type": "procedural",
+      "name": "procedural_quadruped",
+      "family": "quadruped",
+      "count": 8,
+      "seed": 100,
+      "simulator": "mujoco",
+      "ranges": {
+        "knee_joints": [
+          1
+        ],
+        "foot_scale": [
+          1.0
+        ]
+      },
+      "randomized_embodiments": 0,
+      "episodes_per_embodiment": 8,
+      "steps": 300,
+      "probe_torques": 0,
+      "expert": true
+    },
+    {
+      "type": "procedural",
+      "name": "procedural_humanoid",
+      "family": "humanoid",
+      "count": 8,
+      "seed": 200,
+      "simulator": "mujoco",
+      "ranges": {
+        "knee_joints": [
+          1
+        ],
+        "foot_scale": [
+          1.0
+        ]
+      },
+      "randomized_embodiments": 0,
+      "episodes_per_embodiment": 8,
+      "steps": 300,
+      "probe_torques": 0,
+      "expert": true
+    }
+  ]
+}

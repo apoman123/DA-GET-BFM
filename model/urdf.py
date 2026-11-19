@@ -374,11 +374,15 @@ def _parse_gear_ratios(
         root (ElementTree.Element): The ``<robot>`` element.
         joints (dict[str, UrdfJoint]): Parsed joints, to ignore unknown names.
 
+    A negative reduction (used by some robots, for example PAL's Talos, for an actuator
+    mounted in reverse) only flips the direction of motion; the gear ratio is its
+    magnitude, which is what the torque and the reflected rotor inertia depend on.
+
     Returns:
         dict[str, float]: Joint name to positive gear ratio.
 
     Raises:
-        ValueError: A reduction is not a positive number.
+        ValueError: A reduction is not a finite nonzero number.
     """
     ratios: dict[str, float] = {}
     for transmission in root.findall("transmission"):
@@ -391,8 +395,9 @@ def _parse_gear_ratios(
             value = float(reduction.text)
         except ValueError as error:
             raise ValueError("mechanicalReduction must be a number") from error
-        if not math.isfinite(value) or value <= 0:
-            raise ValueError("mechanicalReduction must be positive")
+        if not math.isfinite(value) or value == 0:
+            raise ValueError("mechanicalReduction must be a finite nonzero number")
+        value = abs(value)
         for joint in transmission.findall("joint"):
             name = joint.get("name")
             if name in joints:

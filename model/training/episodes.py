@@ -45,6 +45,7 @@ from model.dynamics import (
     frame_velocities,
     rotor_wrenches,
 )
+from model.centroidal import CENTROIDAL_SIZE, centroidal_targets
 from model.embodiment import EmbodimentGraph
 from model.physics import (
     EPSILON,
@@ -56,6 +57,7 @@ from model.physics import (
     motor_labels,
     requested_torque,
     rigid_body_features,
+    root_features,
     torque_limit,
     velocity_terms,
 )
@@ -83,6 +85,14 @@ class EmbodimentRecord:
         contact_links (tuple[str, ...]): Links that can touch the ground.
         surface_contacts (bool | None): Contacts carry moments (flat feet);
             None decides from the number of contact links.
+        family (str): Morphology family (``quadruped``, ``humanoid``, ...), used
+            for family-balanced sampling and split reports; may be empty.
+        metadata (dict): Free-form robot metadata, for example a procedural
+            generator's parameters and per-robot environment settings (``env``).
+        root_features (torch.Tensor): ``[13]`` root-token features
+            (``model.physics.root_features``).
+        privileged (torch.Tensor | None): Unused placeholder for privileged
+            per-joint parameters; spec-noise labels are made by the collator.
         acceleration_scale (torch.Tensor): ``[J]`` sigma^a, set from data.
         base_acceleration_scale (torch.Tensor): ``[6]`` RMS base linear and
             angular acceleration, set from data (floating bases).
@@ -104,6 +114,10 @@ class EmbodimentRecord:
     effect_mask: torch.Tensor
     contact_links: tuple[str, ...] = ()
     surface_contacts: bool | None = None
+    family: str = ""
+    metadata: dict = field(default_factory=dict)
+    root_features: torch.Tensor = field(default=None)
+    privileged: torch.Tensor = field(default=None)
     acceleration_scale: torch.Tensor = field(default=None)
     base_acceleration_scale: torch.Tensor = field(default=None)
     effect_scales: torch.Tensor = field(default=None)
@@ -118,6 +132,8 @@ class EmbodimentRecord:
         end_effectors: list[str] | None = None,
         contact_links: list[str] | None = None,
         surface_contacts: bool | None = None,
+        family: str = "",
+        metadata: dict | None = None,
     ) -> EmbodimentRecord:
         """Compute static features.
 
@@ -131,6 +147,8 @@ class EmbodimentRecord:
                 For a floating base without a list, links whose name contains
                 "foot" are used when there are any.
             surface_contacts (bool | None): See the attribute.
+            family (str): See the attribute.
+            metadata (dict | None): See the attribute.
 
         Returns:
             EmbodimentRecord: Record without data statistics.
@@ -156,7 +174,26 @@ class EmbodimentRecord:
             effect_mask=effect_mask,
             contact_links=tuple(contact_links or ()),
             surface_contacts=surface_contacts,
+            family=family,
+            metadata=dict(metadata or {}),
+            root_features=root_features(graph),
         )
+
+    def __post_init__(self) -> None:
+        """Fill the root features of records built without ``build`` (or loaded from old caches)."""
+        if self.root_features is None:
+            self.root_features = root_features(self.graph)
+
+    @property
+    def contact_joints(self) -> torch.Tensor:
+        """Return the joint token carrying each contact link, -1 for the root body.
+
+        Returns:
+            torch.Tensor: Long ``[C]``.
+        """
+        if not self.contact_links:
+            return torch.zeros(0, dtype=torch.long)
+        return self.graph.link_bodies[self.graph.link_index(list(self.contact_links))].long()
 
     @property
     def actuator(self) -> dict[str, torch.Tensor]:
@@ -1028,6 +1065,31 @@ def process_episode(
         ),
         dim=-1,
     )
+    # Contact labels (task C2): exact from sensors or simulators; inferred contacts only
+    # where the subset selection is confident (docs/dynamics.md).
+    if contacts is None:
+        contact_label_valid = torch.zeros(steps, dtype=torch.bool)
+    elif contacts_given:
+        contact_label_valid = torch.ones(steps, dtype=torch.bool)
+    elif confidence is not None:
+        contact_label_valid = confidence > min_contact_confidence
+    else:
+        contact_label_valid = torch.zeros(steps, dtype=torch.bool)
+    # Centroidal targets (task C3): momenta need the base twist on a floating base.
+    momentum_known = not floating or (base.known and base.linear_known)
+    relative_rotation = None
+    if floating and base.known:
+        relative_rotation = (
+            base.orientation[:-1].transpose(-1, -2) @ base.orientation[1:]
+            if base.pose_known
+            else exp_rotation(base.angular_velocity[:-1] * dt)
+        )
+    centroidal, centroidal_valid = centroidal_targets(
+        graph, q, qd, dt,
+        base.linear_velocity if floating else None,
+        base.angular_velocity if floating else None,
+        relative_rotation, momentum_known, valid,
+    )
     return {
         # Per frame [T, ...]
         "positions_normalized": store(graph.normalize_joint_positions(q)),
@@ -1044,6 +1106,12 @@ def process_episode(
         "contacts_detected": torch.full((steps,), contacts is not None and not contacts_given),
         "contact_slipping": slipping,
         "contact_flags": contacts if contacts is not None else torch.zeros((steps, 0), dtype=torch.bool),
+        "contact_label_valid": contact_label_valid,
+        "centroidal": store(centroidal),
+        "centroidal_valid": centroidal_valid,
+        "positions": store(q),
+        "velocities": store(qd),
+        "dt": torch.tensor(float(dt)),
         "floating_base": torch.full((steps,), floating),
         # Per variant [T, V, ...]
         "torque_source": source,

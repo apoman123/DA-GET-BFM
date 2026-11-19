@@ -41,6 +41,7 @@ from model.physics_schema import (
     DYNAMICS_FEATURE_SIZE,
     JOINT_TYPE_NAMES,
     RIGID_BODY_FEATURE_SIZE,
+    ROOT_FEATURE_SIZE,
 )
 
 EPSILON = 1e-6
@@ -295,6 +296,60 @@ def actuator_features(specs: Sequence[ActuatorSpec]) -> torch.Tensor:
     )
     assert features.shape[1] == ACTUATOR_FEATURE_SIZE
     return features.to(torch.float32)
+
+
+def root_features(graph: EmbodimentGraph) -> torch.Tensor:
+    """Return the root token's features ``[m_0, r_0^CoM, vech(I_0), m, L, floating]``.
+
+    The root body is the base link with every link fixed to it; its inertia is about
+    its own center of mass in the root frame. ``m`` and ``L`` are the robot's total
+    mass and characteristic length (proposal C1 and A3, ``docs/zero_shot.md``).
+
+    Args:
+        graph (EmbodimentGraph): Robot.
+
+    Returns:
+        torch.Tensor: Float32 ``[ROOT_FEATURE_SIZE]``.
+    """
+    inertia = graph.base_inertia if graph.base_inertia is not None else torch.zeros((3, 3), dtype=torch.float64)
+    com = graph.base_com if graph.base_com is not None else torch.zeros(3, dtype=torch.float64)
+    vech = inertia[[0, 0, 0, 1, 1, 2], [0, 1, 2, 1, 2, 2]]
+    features = torch.cat(
+        (
+            torch.tensor([float(graph.base_mass)], dtype=torch.float64),
+            com.to(torch.float64),
+            vech.to(torch.float64),
+            torch.tensor(
+                [graph.total_mass, graph.characteristic_length, 1.0 if graph.floating_base else 0.0],
+                dtype=torch.float64,
+            ),
+        )
+    )
+    assert features.shape[0] == ROOT_FEATURE_SIZE
+    return features.to(torch.float32)
+
+
+def froude_scale_base_features(features: torch.Tensor, length: torch.Tensor | float, columns: slice = slice(3, 9)) -> torch.Tensor:
+    """Make base angular velocity and base linear velocity / L dimensionless.
+
+    The base-feature layout puts the angular velocity (rad/s) and the linear velocity
+    divided by the robot's size (1/s) in ``columns``; both become dimensionless when
+    multiplied by ``sqrt(L / g)``, giving ``omega sqrt(L/g)`` and the Froude-like
+    ``v / sqrt(g L)`` (Alexander & Jayes 1983; proposal A3).
+
+    Args:
+        features (torch.Tensor): ``[..., F]`` base features.
+        length (torch.Tensor | float): Characteristic length, broadcastable to
+            ``features[..., 0]``.
+        columns (slice): Columns with units of 1/s.
+
+    Returns:
+        torch.Tensor: Scaled copy.
+    """
+    scaled = features.clone()
+    period = torch.sqrt(torch.as_tensor(length, dtype=features.dtype, device=features.device) / 9.80665)
+    scaled[..., columns] = scaled[..., columns] * period[..., None]
+    return scaled
 
 
 def configuration_terms(

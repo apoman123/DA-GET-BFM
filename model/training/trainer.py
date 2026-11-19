@@ -6,6 +6,7 @@ from collections import defaultdict
 from typing import Any
 
 import torch
+from torch.utils.data import WeightedRandomSampler
 from transformers import Trainer
 
 
@@ -16,16 +17,34 @@ class PhysicsPretrainingTrainer(Trainer):
     loss as ``loss_fk``, ``loss_fd``, ``loss_id``, ``loss_response``,
     ``loss_inverse_response``, ``loss_motor``, and ``loss_effect`` (and
     ``eval_loss_*`` during evaluation).
+
+    With ``sample_weights`` (``model.training.sampling.temperature_weights``) the
+    training samples are drawn with replacement in proportion to them instead of
+    being shuffled uniformly (proposal D2).
     """
 
-    def __init__(self, *args: Any, **kwargs: Any) -> None:
-        """Create the trainer; arguments are those of ``transformers.Trainer``."""
+    def __init__(self, *args: Any, sample_weights: torch.Tensor | None = None, **kwargs: Any) -> None:
+        """Create the trainer; arguments are those of ``transformers.Trainer``.
+
+        Args:
+            *args (Any): ``transformers.Trainer`` arguments.
+            sample_weights (torch.Tensor | None): Per-sample weights of the training set.
+            **kwargs (Any): ``transformers.Trainer`` keyword arguments.
+        """
         super().__init__(*args, **kwargs)
+        self.sample_weights = sample_weights
         self._component_sums: dict[str, dict[str, float]] = {
             "train": defaultdict(float),
             "eval": defaultdict(float),
         }
         self._component_counts = {"train": 0, "eval": 0}
+
+    def _get_train_sampler(self, *args: Any, **kwargs: Any):
+        """Return a weighted sampler when sample weights are set, else the default."""
+        if self.sample_weights is None:
+            return super()._get_train_sampler(*args, **kwargs)
+        generator = torch.Generator().manual_seed(int(self.args.seed))
+        return WeightedRandomSampler(self.sample_weights, num_samples=len(self.sample_weights), replacement=True, generator=generator)
 
     def compute_loss(
         self,

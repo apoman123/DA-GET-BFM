@@ -157,6 +157,18 @@ class UrdfExtensionsTest(unittest.TestCase):
         self.assertEqual(parse_urdf(urdf).gear_ratios, {"elbow": 6.33})
         torch.testing.assert_close(graph.gear_ratios, torch.tensor([1.0, 6.33], dtype=torch.float64))
 
+    def test_negative_reduction_is_a_reversed_actuator(self) -> None:
+        """A negative mechanicalReduction (Talos) gives the gear ratio's magnitude; zero is rejected."""
+        transmission = (
+            '<transmission name="t"><type>transmission_interface/SimpleTransmission</type>'
+            '<joint name="elbow"/><actuator name="m"><mechanicalReduction>{}</mechanicalReduction>'
+            "</actuator></transmission>"
+        )
+        urdf = double_pendulum().replace("</robot>", transmission.format("-100.0") + "</robot>")
+        self.assertEqual(parse_urdf(urdf).gear_ratios, {"elbow": 100.0})
+        with self.assertRaises(ValueError):
+            parse_urdf(double_pendulum().replace("</robot>", transmission.format("0") + "</robot>"))
+
     def test_frozen_joints_merge_bodies(self) -> None:
         """Freezing the elbow makes one rigid body equal to a single pendulum."""
         l1, l2, m1, m2 = 0.7, 0.4, 2.0, 1.5

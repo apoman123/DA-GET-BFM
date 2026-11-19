@@ -190,7 +190,9 @@ class DaGetFbCprAgent:
         self.robots = len(observers)
         self.pretrained = pretrained.to(self.device).eval().requires_grad_(config.train_encoder)
         self.target_pretrained = copy.deepcopy(self.pretrained).eval().requires_grad_(False)
-        self.model = DaGetBfmModel(model_config, self.pretrained.encoder).to(self.device)
+        self.model = DaGetBfmModel(
+            model_config, self.pretrained.encoder, physics_interface=getattr(self.pretrained, "interface", None)
+        ).to(self.device)
         self.model.init_weights()
         self.target_state_adapter = copy.deepcopy(self.model.state_adapter).requires_grad_(False)
         self.target_forward_map = copy.deepcopy(self.model.forward_map).requires_grad_(False)
@@ -266,8 +268,7 @@ class DaGetFbCprAgent:
         Returns:
             dict: State tokens, graph structure, and physics features on the device.
         """
-        moved = StateView(view.local.to(self.device), view.global_features.to(self.device), view.dynamics.to(self.device))
-        return self.observers[robot].state_inputs(moved)
+        return self.observers[robot].state_inputs(view.to(self.device))
 
     @torch.no_grad()
     def act(self, robot: int, observation: Observation, z: torch.Tensor, mean: bool = False) -> torch.Tensor:
@@ -311,7 +312,7 @@ class DaGetFbCprAgent:
     def _sample_tracking_z(self, robot: int, motions: ExpertMotions, count: int, length: int) -> torch.Tensor:
         """Encode ``count`` expert windows into per-step latents ``[count, length, Z]``."""
         _, following = motions.sample_windows(count, length)
-        flat = StateView(following.local.flatten(0, 1), following.global_features.flatten(0, 1), following.dynamics.flatten(0, 1))
+        flat = following.flatten(0, 1)
         embeddings = self._backward(robot, flat).view(count, length, -1)
         window = self.model_config.seq_length
         averaged = torch.stack([embeddings[:, step : min(step + window, length)].mean(dim=1) for step in range(length)], dim=1)
@@ -401,11 +402,8 @@ class DaGetFbCprAgent:
         for robot, (expert, count) in enumerate(zip(motions, windows)):
             current, following = expert.sample_windows(count, length)
 
-            def flat(view: StateView) -> StateView:
-                return StateView(view.local.flatten(0, 1), view.global_features.flatten(0, 1), view.dynamics.flatten(0, 1))
-
-            states.append(self._state_inputs(robot, flat(current)))
-            next_states.append(self._state_inputs(robot, flat(following)))
+            states.append(self._state_inputs(robot, current.flatten(0, 1)))
+            next_states.append(self._state_inputs(robot, following.flatten(0, 1)))
         return states, next_states
 
     @torch.no_grad()

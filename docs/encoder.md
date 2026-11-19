@@ -403,6 +403,12 @@ feed-forward block.
 | `physics_cross_attention_layers` | `None` (all) | `None` | Layers with Physics Cross Attention |
 | `rigid_body_feature_size`, `actuator_feature_size`, `dynamics_feature_size` | 26, 6, 5 | same | Physics feature widths; must equal `model/physics_schema.py` when Physics Cross Attention is on |
 | `physics_tokenizer_hidden_size` | `None` (= `hidden_size`) | same | Physics tokenizer MLP width |
+| `use_root_token` | `False` | `False` | One root-body token per robot in the Physics Cross Attention memory ([C1](zero_shot.md#c-physics-the-encoder-could-not-see)); needs `root_features` |
+| `root_feature_size` | 13 | same | Root features (`model.physics.root_features`) |
+| `dimensionless_physics` | `False` | `False` | Physics features in units of total mass, size and `sqrt(L / g)` ([A3](zero_shot.md#a-targets-and-inputs-that-depend-on-physics-only)); needs `root_features` |
+| `use_morphology_modulation` | `False` | `False` | ModuMorph-style contextual modulation ([D4](zero_shot.md#d-coverage-of-morphologies)) |
+| `modulation_rank` | `None` (= heads) | same | Rank of the modulation's input-projection correction |
+| `physics_masking` | `False` | `False` | Learned mask embeddings for masked physics modeling ([E3](zero_shot.md#e-robustness-to-wrong-or-missing-specifications)) |
 
 `EmbodimentGraph.from_urdf` options:
 

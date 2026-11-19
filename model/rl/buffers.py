@@ -115,10 +115,7 @@ class ExpertMotions:
             current.append(view.select(indices))
             following.append(view.select(indices + 1))
 
-        def stack(views: list[StateView]) -> StateView:
-            return StateView(*(torch.stack([getattr(view, name) for view in views]) for name in ("local", "global_features", "dynamics")))
-
-        return stack(current), stack(following)
+        return StateView.stack(current), StateView.stack(following)
 
 
 def _pack_mass(mass: torch.Tensor) -> torch.Tensor:
@@ -169,6 +166,11 @@ class ReplayBuffer:
             f"{prefix}state_local": observation.state.local.half(),
             f"{prefix}state_global": observation.state.global_features.half(),
             f"{prefix}state_dynamics": observation.state.dynamics.half(),
+            **(
+                {f"{prefix}state_mass": _pack_mass(observation.state.mass).half()}
+                if observation.state.mass is not None
+                else {}
+            ),
         }
 
     def add(
@@ -205,7 +207,10 @@ class ReplayBuffer:
 
         return Observation(
             read("local"), read("global"), read("dynamics"), _unpack_mass(read("mass"), joints),
-            StateView(read("state_local"), read("state_global"), read("state_dynamics")),
+            StateView(
+                read("state_local"), read("state_global"), read("state_dynamics"),
+                _unpack_mass(read("state_mass"), joints) if f"{prefix}state_mass" in sample else None,
+            ),
         )
 
     def sample(self, count: int, device: torch.device | str = "cpu", generator: torch.Generator | None = None) -> dict:

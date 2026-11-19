@@ -46,7 +46,8 @@ URDF + dynamics ─────────────────► DaGetEnco
 | Contact inference for data without foot sensors (dynamics-consistent subset selection with a confidence) | Done; measured on six real Go1 recordings and four simulated robots ([details](docs/dynamics.md#which-feet-are-down-inferring-contacts)) |
 | 50 Hz deployment (`DaGetBfmPolicy`, CUDA Graphs) | Done; on an RTX 5070 Ti a G1 step takes at most 6.3 ms, 12.6 ms with live tracking, for every encoder size (budget 20 ms; robot communication not included) ([details](docs/bfm.md#inference-latency-at-50-hz)) |
 | Isaac Lab simulation (self-collision, getting up, prioritized motions) | **Written against Isaac Lab 3 and tested with a fake only; never run in Isaac Lab, which needs a GPU** |
-| **Prompting one robot with another's motion** | **B and D are shared, but nothing aligns behaviors across robots yet** ([details](docs/bfm.md#sharing-z-across-robots)) |
+| **Prompting one robot with another's motion** | **B and D are shared, but nothing aligns behaviors across robots yet** ([details](docs/bfm.md#sharing-z-across-robots)); prompts can now be retargeted between robots first ([G3](docs/zero_shot.md#g-zero-shot-at-the-bfm-level)) |
+| Zero-shot proposal v4 ([PDF](docs/proposal/DA-GET-BFM_proposal_v4.pdf)): physics-derived normalization, 50 Hz, dimensionless inputs, structured physics interface, root token, contact and centroidal heads, procedural robots, temperature sampling, mirroring, ModuMorph-style modulation, spec noise, masked physics modeling, test-time adaptation, retargeting, split-level evaluation with bootstrap CIs | **Implemented and unit tested, all off by default; no large training run or ablation yet** ([details](docs/zero_shot.md)) |
 
 ## What comes from where
 
@@ -397,6 +398,7 @@ losses. The encoder checkpoint must use the same `joint_features` and `history_s
 | [Physics pretraining](docs/training.md) | The seven tasks, label sources, training commands, TensorBoard, data config format |
 | [Training data](docs/data.md) | MuJoCo ground contact, automatic configs, dataset converters, recommended datasets |
 | [Behavior foundation model](docs/bfm.md) | Actor, critics, B, and D; RL training; torque limits; physics replay; deployment; open questions |
+| [Zero-shot across tasks and embodiments](docs/zero_shot.md) | The proposal v4 options, their evidence, configs, training and evaluation; the [proposal PDF](docs/proposal/DA-GET-BFM_proposal_v4.pdf) |
 | [Development notes](docs/development.md) | Full repository layout, test coverage, validation results, detailed limitations |
 | [Module notes](model/README.md) | Technical notes on the encoder code |
 
@@ -409,12 +411,19 @@ model/                     library code
   rl/                        FB-CPR agent, Isaac Lab and MuJoCo worlds, action map and torque limits,
                              torque-penalty multipliers, physics replay, replay buffers, evaluation,
                              training loop, deployment
-  pretraining.py             physics pretraining model (heads A, B, C, R, R^-1, D, E)
+  pretraining.py             physics pretraining model (heads A, B, C, R, R^-1, D, E; physics interface,
+                             contact, centroidal, masked-modeling and spec-deviation heads)
   dynamics.py                rigid-body dynamics, constrained response, torque estimation (analysis only)
-  training/, conversion/     data pipeline (including contact inference) and dataset converters
-scripts/                   training, data config generator, converters, validation, latency benchmark
-configs/data/              example data configs
-docs/                      documentation by topic
+  centroidal.py              center of mass, centroidal momentum and its rate
+  morphology.py              procedural quadrupeds, hexapods and humanoids as URDF
+  adaptation.py              LoRA, L2-SP and LwF for test-time adaptation
+  evaluation/                split manifests, probes, physics metrics, counterfactuals, bootstrap statistics
+  training/, conversion/     data pipeline (contact inference, resampling, procedural source, mirroring,
+                             temperature sampling) and dataset converters
+scripts/                   training, data config generator, converters, validation, latency benchmark,
+                           diagnostics, zero-shot evaluation, adaptation, retargeting, robot generation
+configs/data/, rl/, pretraining/, splits/   example configs and the zero-shot split manifest
+docs/                      documentation by topic; docs/proposal/ has the research proposal (PDF)
 tests/                     test suite
 ```
 
@@ -463,6 +472,16 @@ Motion datasets have their own licenses; see
 [Training data](docs/data.md#recommended-training-datasets).
 
 ## References
+
+The zero-shot extensions cite every source they use in their module docstrings, in
+[docs/zero_shot.md](docs/zero_shot.md#references) and in the proposal's reference list
+([PDF](docs/proposal/DA-GET-BFM_proposal_v4.pdf)). The main ones are MetaMorph (Gupta et
+al., ICLR 2022), ModuMorph (Xiong et al., ICML 2023), GenLoco (Feng et al., CoRL 2022),
+URMA (Bohlinger et al., CoRL 2024), embodiment scaling (Ai et al., CoRL 2025), RMA (Kumar
+et al., RSS 2021), DeLaN (Lutter et al., ICLR 2019), LoRA (Hu et al., ICLR 2022), L2-SP
+(Li et al., ICML 2018), LwF (Li and Hoiem, TPAMI 2018), PAD (Hansen et al., ICLR 2021),
+control-task probes (Hewitt and Liang, EMNLP 2019) and rliable (Agarwal et al., NeurIPS
+2021).
 
 - Austin Patel and Shuran Song. *GET-Zero: Graph Embodiment Transformer for
   Zero-shot Embodiment Generalization.* ICRA 2025.

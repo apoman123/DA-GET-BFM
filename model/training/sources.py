@@ -103,7 +103,7 @@ def _actuator_defaults(source: dict[str, Any], mode: str) -> ActuatorDefaults:
 
 
 def _record(name: str, graph: EmbodimentGraph, specs, source: dict[str, Any]) -> EmbodimentRecord:
-    """Build an embodiment record with the source's task-E and contact settings."""
+    """Build an embodiment record with the source's task-E, contact and family settings."""
     return EmbodimentRecord.build(
         name,
         graph,
@@ -111,6 +111,8 @@ def _record(name: str, graph: EmbodimentGraph, specs, source: dict[str, Any]) ->
         source.get("end_effectors"),
         source.get("contact_links"),
         source.get("surface_contacts"),
+        family=str(source.get("family", "")),
+        metadata=dict(source.get("metadata", {})),
     )
 
 
@@ -976,4 +978,18 @@ def mujoco_source(
     return records, trajectories
 
 
-SOURCE_TYPES = {"synthetic": synthetic_source, "huggingface": huggingface_source, "mujoco": mujoco_source}
+def procedural_source(
+    source: dict[str, Any], base: Path | None, feature_config: JointFeatureConfig
+) -> tuple[list[EmbodimentRecord], list[Trajectory]]:
+    """Generate robots procedurally and simulate them (proposal D1); see ``model.training.procedural``."""
+    from model.training.procedural import procedural_source as generate
+
+    return generate(source, base, feature_config)
+
+
+SOURCE_TYPES = {
+    "synthetic": synthetic_source,
+    "huggingface": huggingface_source,
+    "mujoco": mujoco_source,
+    "procedural": procedural_source,
+}

@@ -22,7 +22,7 @@ import torch
 
 from model.dynamics import STANDARD_GRAVITY
 from model.embodiment import collate_embodiments
-from model.physics import EPSILON, DynamicsTerms, assemble_dynamics_features, dynamics_terms
+from model.physics import EPSILON, DynamicsTerms, assemble_dynamics_features, dynamics_terms, froude_scale_base_features
 from model.tokenization_da_get import DaGetTokenizer
 from model.training.episodes import (
     BASE_FEATURE_SIZE,
@@ -85,15 +85,44 @@ class StateView:
         local (torch.Tensor): ``[..., J, 5]`` per-joint features.
         global_features (torch.Tensor): ``[..., 10]`` base features.
         dynamics (torch.Tensor): ``[..., J, 5]`` dynamics features.
+        mass (torch.Tensor | None): ``[..., J, J]`` mass matrix at the state, so the
+            state encoder gets the full mass-matrix attention bias (without it,
+            ``DaGetBfmModel.encode_state`` falls back to the diagonal).
     """
 
     local: torch.Tensor
     global_features: torch.Tensor
     dynamics: torch.Tensor
+    mass: torch.Tensor | None = None
 
     def select(self, indices: torch.Tensor) -> StateView:
         """Return some entries along the first dimension."""
-        return StateView(self.local[indices], self.global_features[indices], self.dynamics[indices])
+        mass = None if self.mass is None else self.mass[indices]
+        return StateView(self.local[indices], self.global_features[indices], self.dynamics[indices], mass)
+
+    def to(self, device: torch.device | str) -> StateView:
+        """Return the view on a device."""
+        mass = None if self.mass is None else self.mass.to(device)
+        return StateView(self.local.to(device), self.global_features.to(device), self.dynamics.to(device), mass)
+
+    def flatten(self, start: int = 0, end: int = 1) -> StateView:
+        """Flatten leading dimensions of every field."""
+        mass = None if self.mass is None else self.mass.flatten(start, end)
+        return StateView(
+            self.local.flatten(start, end), self.global_features.flatten(start, end),
+            self.dynamics.flatten(start, end), mass,
+        )
+
+    @staticmethod
+    def stack(views: list[StateView]) -> StateView:
+        """Stack views along a new first dimension."""
+        mass = None if any(view.mass is None for view in views) else torch.stack([view.mass for view in views])
+        return StateView(
+            torch.stack([view.local for view in views]),
+            torch.stack([view.global_features for view in views]),
+            torch.stack([view.dynamics for view in views]),
+            mass,
+        )
 
 
 @dataclass
@@ -127,6 +156,8 @@ class Observation:
         self.state.local[indices] = other.state.local
         self.state.global_features[indices] = other.state.global_features
         self.state.dynamics[indices] = other.state.dynamics
+        if self.state.mass is not None and other.state.mass is not None:
+            self.state.mass[indices] = other.state.mass
 
 
 class EmbodimentObserver:
@@ -138,6 +169,8 @@ class EmbodimentObserver:
         observe_base_linear_velocity (bool): Show the base linear velocity to the policy.
         use_height (bool): Fill the height in the state view (off if the motions lack it).
         use_linear_velocity (bool): Fill the linear velocity in the state view (same).
+        dimensionless_inputs (bool): Froude-scale the base velocities of both views,
+            as pretraining with ``dimensionless_inputs`` does (proposal A3).
     """
 
     def __init__(
@@ -147,8 +180,10 @@ class EmbodimentObserver:
         observe_base_linear_velocity: bool = False,
         use_height: bool = True,
         use_linear_velocity: bool = True,
+        dimensionless_inputs: bool = False,
     ) -> None:
         self.record = record
+        self.dimensionless_inputs = dimensionless_inputs
         self.graph = record.graph
         self.history_size = history_size
         self.observe_base_linear_velocity = observe_base_linear_velocity
@@ -191,7 +226,12 @@ class EmbodimentObserver:
             dim=-1,
         )
         global_features = torch.cat((state.gravity_direction, state.angular_velocity, linear / self.length, height[:, None] / self.length), dim=-1)
-        return StateView(local.float(), global_features.float(), self._dynamics(state, linear).float())
+        if self.dimensionless_inputs:
+            global_features = froude_scale_base_features(global_features, self.length)
+        terms = self._terms(state, linear)
+        return StateView(
+            local.float(), global_features.float(), self._dynamics(state, linear, terms).float(), terms.mass_matrix.float()
+        )
 
     def _terms(self, state: RobotState, linear: torch.Tensor) -> DynamicsTerms:
         """Return the mass matrix and efforts at a state."""
@@ -231,7 +271,10 @@ class EmbodimentObserver:
         )
         linear = state.linear_velocity if self.observe_base_linear_velocity else torch.zeros_like(state.linear_velocity)
         flag = torch.full((count, 1), 1.0 if self.floating else 0.0, dtype=state.q.dtype)
-        return local, torch.cat((state.gravity_direction, state.angular_velocity, linear / self.length, flag, flag), dim=-1)
+        global_features = torch.cat((state.gravity_direction, state.angular_velocity, linear / self.length, flag, flag), dim=-1)
+        if self.dimensionless_inputs:
+            global_features = froude_scale_base_features(global_features, self.length)
+        return local, global_features
 
     def observation(
         self,
@@ -283,6 +326,7 @@ class EmbodimentObserver:
                 "graph_distances": tuple(item.to(device) for item in structure.graph_distances),
                 "rigid_body_features": self.record.rigid_body_features.float().to(device)[None],
                 "actuator_features": self.record.actuator_features.float().to(device)[None],
+                "root_features": self.record.root_features.float().to(device)[None],
                 "joint_features": self.record.joint_features.float().to(device)[None],
             }
         return self._cached[key]
@@ -301,6 +345,7 @@ class EmbodimentObserver:
             "graph_distances": tuple(expand(item) for item in static["graph_distances"]),
             "rigid_body_features": expand(static["rigid_body_features"]),
             "actuator_features": expand(static["actuator_features"]),
+            "root_features": expand(static["root_features"]),
         }
 
     def _joint_features(self, count: int, device: torch.device) -> torch.Tensor:
@@ -328,7 +373,10 @@ class EmbodimentObserver:
         tokens = self.state_tokenizer(
             self._joint_features(count, device), mask, variable_local=view.local[:, None], variable_global=view.global_features[:, None]
         )
-        return {"input_values": tokens, "dynamics_features": view.dynamics, **self.structure_inputs(count, device)}
+        inputs = {"input_values": tokens, "dynamics_features": view.dynamics, **self.structure_inputs(count, device)}
+        if view.mass is not None:
+            inputs["mass_matrix"] = view.mass
+        return inputs
 
 
 def trajectory_state(record: EmbodimentRecord, trajectory: Trajectory) -> tuple[RobotState, bool, bool]:

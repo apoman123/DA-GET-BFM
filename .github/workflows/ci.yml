@@ -1,12 +1,12 @@
-# Continuous integration: lock check, install, byte-compile, and the full test suite
-# (unit tests, the pretraining and BFM training scripts end to end on MuJoCo, and the
-# documentation link check). Isaac Lab and the CUDA Graph test need a GPU and are
-# skipped here; see docs/development.md.
+# Continuous integration: lock check, install, byte-compile, URDF download, and the full
+# test suite (unit tests, the pretraining and BFM training scripts end to end on MuJoCo,
+# the zero-shot options, and the documentation link check). Isaac Lab and the CUDA Graph
+# test need a GPU and are skipped here; see docs/development.md.
 name: CI
 
 on:
   push:
-    branches: [main]
+    branches: [main, "feature/**"]
   pull_request:
   workflow_dispatch:
 
@@ -42,6 +42,9 @@ jobs:
 
       - name: Byte-compile the library, scripts and tests
         run: uv run python -m compileall -q model scripts tests
+
+      - name: Download the robot URDFs used by the tests and the morphology generator
+        run: uv run python scripts/download_urdfs.py
 
       - name: Run the test suite
         run: uv run pytest -q -ra

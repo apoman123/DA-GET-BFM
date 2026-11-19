@@ -109,6 +109,7 @@ class DaGetBfmPolicy:
             "local": (batch_size, joints, STATE_LOCAL_SIZE),
             "global_features": (batch_size, STATE_GLOBAL_SIZE),
             "dynamics": (batch_size, joints, DYNAMICS_FEATURE_SIZE),
+            "mass": (batch_size, joints, joints),
         }
         self.policy_inputs = StaticInputs(policy, self.device)
         self.state_inputs = StaticInputs(state, self.device)
@@ -120,7 +121,8 @@ class DaGetBfmPolicy:
         with torch.no_grad():
             self.physics_memory = (
                 self.model.encoder.build_physics_memory(
-                    structure["rigid_body_features"], structure["actuator_features"], structure["joint_mask"]
+                    structure["rigid_body_features"], structure["actuator_features"], structure["joint_mask"],
+                    structure.get("root_features")
                 )
                 if self.uses_physics
                 else None
@@ -130,7 +132,7 @@ class DaGetBfmPolicy:
 
     def _encoder_inputs(self) -> dict:
         """Return the static encoder inputs: graph structure and physics memory."""
-        inputs = {key: value for key, value in self.structure.items() if key not in ("rigid_body_features", "actuator_features")}
+        inputs = {key: value for key, value in self.structure.items() if key not in ("rigid_body_features", "actuator_features", "root_features")}
         if self.uses_physics:
             inputs["physics_memory"] = self.physics_memory
         return inputs
@@ -150,7 +152,7 @@ class DaGetBfmPolicy:
     def _run_backward(self) -> torch.Tensor:
         """State encoder and B on the static state inputs; what a graph records."""
         views = self.state_inputs.views
-        inputs = self.observer.state_inputs(StateView(views["local"], views["global_features"], views["dynamics"]))
+        inputs = self.observer.state_inputs(StateView(views["local"], views["global_features"], views["dynamics"], views["mass"]))
         inputs = {**inputs, **self._encoder_inputs()}
         embeddings = self.model.encode_state(inputs, validate_inputs=False)
         return self.model.backward_map(embeddings, inputs["joint_mask"])
@@ -218,7 +220,8 @@ class DaGetBfmPolicy:
         Returns:
             torch.Tensor: Backward embeddings.
         """
-        self.state_inputs.fill(local=view.local, global_features=view.global_features, dynamics=view.dynamics)
+        mass = view.mass if view.mass is not None else torch.diag_embed(view.dynamics[..., 0].clamp_min(1e-8))
+        self.state_inputs.fill(local=view.local, global_features=view.global_features, dynamics=view.dynamics, mass=mass)
         if self._latent is None:
             self._latent = self._prepare(self._run_backward)
         return self._latent().cpu()

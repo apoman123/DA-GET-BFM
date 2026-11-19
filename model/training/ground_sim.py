@@ -445,15 +445,52 @@ def simulate_ground(
     return trajectories
 
 
-def ground_specs(specs: tuple[ActuatorSpec, ...], gain_scale: float = 1.0) -> tuple[ActuatorSpec, ...]:
-    """Return specs in position mode with the simulator's PD gains."""
+GAIN_MODES = ("peak_torque", "mass")
+
+
+def ground_specs(
+    specs: tuple[ActuatorSpec, ...],
+    gain_scale: float = 1.0,
+    gain_mode: str = "peak_torque",
+    total_mass: float | None = None,
+    kp_per_kg: float | None = None,
+) -> tuple[ActuatorSpec, ...]:
+    """Return specs in position mode with the simulator's PD gains.
+
+    ``peak_torque`` (default) sets ``K_p = 2 gain_scale tau^peak`` (peak torque at
+    0.5 rad of error). ``mass`` sets the same ``K_p = gain_scale kp_per_kg m`` on every
+    joint, proportional to the robot's total mass as GenLoco scales its PD gains
+    (Feng et al., CoRL 2022, PMLR 205:1893-1903; proposal G1). ``K_d = 0.03 K_p`` in
+    both modes.
+
+    Args:
+        specs (tuple[ActuatorSpec, ...]): Actuator specs.
+        gain_scale (float): Multiplier of the gains.
+        gain_mode (str): ``peak_torque`` or ``mass``.
+        total_mass (float | None): Robot mass in kg (``mass`` mode).
+        kp_per_kg (float | None): Stiffness per kg of robot (``mass`` mode); no
+            default, take it from a reference robot.
+
+    Returns:
+        tuple[ActuatorSpec, ...]: Updated specs.
+
+    Raises:
+        ValueError: The mode is unknown or ``mass`` mode lacks its inputs.
+    """
     from dataclasses import replace
 
+    if gain_mode not in GAIN_MODES:
+        raise ValueError(f"gain_mode must be one of {GAIN_MODES}")
+    if gain_mode == "mass" and (total_mass is None or kp_per_kg is None):
+        raise ValueError("gain_mode 'mass' needs total_mass and kp_per_kg")
     output = []
     for spec in specs:
         if spec.mode == "passive":
             output.append(spec)
             continue
-        kp = gain_scale * 2.0 * spec.peak_torque
+        if gain_mode == "mass":
+            kp = gain_scale * kp_per_kg * total_mass
+        else:
+            kp = gain_scale * 2.0 * spec.peak_torque
         output.append(replace(spec, mode="position", kp=kp, kd=0.03 * kp))
     return tuple(output)

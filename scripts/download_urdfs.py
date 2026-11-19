@@ -20,6 +20,10 @@ URDFS = {
     "go1.urdf": f"{BASE}/go1_description/urdf/go1.urdf",
     "h1.urdf": f"{BASE}/h1_description/urdf/h1.urdf",
     "g1_29dof.urdf": f"{BASE}/g1_description/g1_29dof.urdf",
+    # Zero-shot evaluation robot (L4, configs/splits/zero_shot.json); never used in training.
+    "go2.urdf": f"{BASE}/go2_description/urdf/go2_description.urdf",
+    # Zero-shot evaluation robot (L4); PAL Talos from Gepetto/example-robot-data (BSD-2-Clause).
+    "talos_reduced.urdf": "https://raw.githubusercontent.com/Gepetto/example-robot-data/master/robots/talos_data/robots/talos_reduced.urdf",
     "anymal_d.urdf": "https://raw.githubusercontent.com/ANYbotics/anymal_d_simple_description/master/urdf/anymal.urdf",
 }
 

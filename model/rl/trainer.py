@@ -158,6 +158,26 @@ class Embodiment:
     base: Path | None = None
 
 
+def action_scale(value: float | dict, family: str) -> float:
+    """Return the action scale of a robot: a number, or a per-family mapping (proposal G1).
+
+    URMA and Ai et al. use residual position targets ``q_nominal + sigma a`` with
+    ``sigma`` set per robot or per class (Bohlinger et al., CoRL 2024; Ai et al.,
+    CoRL 2025). A mapping gives ``sigma`` per family, with ``default`` for the rest
+    and the repo's 1.25 rad if neither matches.
+
+    Args:
+        value (float | dict): ``action_scale`` of the source.
+        family (str): Robot family.
+
+    Returns:
+        float: Target offset in rad at ``|action| = 1``.
+    """
+    if isinstance(value, dict):
+        return float(value.get(family, value.get("default", 1.25)))
+    return float(value)
+
+
 def load_embodiments(data_config: str | Path | dict, arguments: TrainingArguments | None = None) -> tuple[list[Embodiment], dict[str, Any]]:
     """Group a data config's sources by robot; each robot's expert motions come from its sources.
 
@@ -198,10 +218,18 @@ def load_embodiments(data_config: str | Path | dict, arguments: TrainingArgument
             if record.graph.floating_base and not record.contact_links:
                 raise ValueError(f"{record.name}: a floating robot needs contact_links for the RL environment")
             if name not in grouped:
-                specs = ground_specs(record.specs, float(source.get("gain_scale", 1.0)))
-                graph = record.graph.with_armature(source.get("armature", 0.01))
-                robot = EmbodimentRecord.build(name, graph, specs, contact_links=list(record.contact_links), surface_contacts=record.surface_contacts)
-                grouped[name] = (robot, [], source)
+                # Per-robot environment settings of procedural robots override the source's.
+                robot_source = {**source, **record.metadata.get("env", {})}
+                specs = ground_specs(
+                    record.specs, float(robot_source.get("gain_scale", 1.0)), str(robot_source.get("gain_mode", "peak_torque")),
+                    record.graph.total_mass, robot_source.get("kp_per_kg"),
+                )
+                graph = record.graph.with_armature(robot_source.get("armature", 0.01))
+                robot = EmbodimentRecord.build(
+                    name, graph, specs, contact_links=list(record.contact_links), surface_contacts=record.surface_contacts,
+                    family=record.family, metadata=record.metadata,
+                )
+                grouped[name] = (robot, [], robot_source)
             robot = grouped[name][0]
             if list(robot.graph.joint_names) != list(record.graph.joint_names):
                 raise ValueError(f"{name}: sources of one robot must have the same joints in the same order")
@@ -216,10 +244,11 @@ def load_embodiments(data_config: str | Path | dict, arguments: TrainingArgument
         observer = EmbodimentObserver(
             robot, history, settings.observe_base_linear_velocity,
             use_height=all(flag[0] for flag in flags), use_linear_velocity=all(flag[1] for flag in flags),
+            dimensionless_inputs=bool(config.get("dimensionless_inputs", False)),
         )
         env_config = EnvConfig(
             max_episode_steps=settings.max_episode_steps,
-            action_scale=float(source.get("action_scale", 1.25)),
+            action_scale=action_scale(source.get("action_scale", 1.25), robot.family),
             armature=float(source.get("armature", 0.01)) if not isinstance(source.get("armature"), dict) else 0.01,
             clip_to_envelope=settings.clip_to_envelope,
             fall_start_probability=settings.fall_start_probability,
@@ -378,6 +407,12 @@ class FbCprTrainer:
         if len({observer.token_size for observer in observers}) != 1:
             raise ValueError("every robot must use the same joint features and history")
         pretrained = build_encoder(arguments.encoder_checkpoint, observers[0].token_size, arguments.encoder_size)
+        pretrained_dimensionless = bool(pretrained.config.token_layout.get("dimensionless_inputs", False))
+        if pretrained_dimensionless != observers[0].dimensionless_inputs:
+            raise ValueError(
+                "dimensionless_inputs differs between the data config and the pretrained encoder; "
+                "use the setting of pretraining (proposal A3)"
+            )
         model_config = BfmConfig.from_sizes(
             embedding_size=pretrained.encoder.config.hidden_size, state_token_size=observers[0].state_token_size, **(model_overrides or {})
         )

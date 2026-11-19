@@ -49,6 +49,11 @@ DA-GET-BFM/
 │   │   └── trainer.py         # online training loop, checkpoints, TensorBoard
 │   ├── transformer.py         # attention and cross-attention blocks
 │   ├── robot_analysis.py      # infer floating base, feet, rotors, propellers from a URDF
+│   ├── centroidal.py          # center of mass, centroidal momentum, composite inertia, rates
+│   ├── morphology.py          # procedural quadrupeds, hexapods, humanoids (URDF text)
+│   ├── adaptation.py          # LoRA, L2-SP, LwF for test-time adaptation
+│   ├── evaluation/            # split manifests, probes, physics metrics, counterfactuals,
+│   │                          # IQM and stratified bootstrap CIs
 │   ├── conversion/
 │   │   ├── common.py          # table format, resampling, HTTP range reads of remote zips
 │   │   ├── datasets.py        # GrandTour, MIPO, NeuroBEM, LocoMuJoCo, AMASS-G1, LAFAN1
@@ -61,7 +66,11 @@ DA-GET-BFM/
 │   │   │                      # operator, slip check), base reconstruction, height rule, records
 │   │   ├── contacts.py        # contact inference: subset selection with confidence, evaluation
 │   │   ├── dataset.py         # data config, caching, dataset, collator
-│   │   └── trainer.py         # Trainer that logs each task loss
+│   │   ├── resampling.py      # one control period: resample recorded trajectories
+│   │   ├── procedural.py      # procedural-robot source (generator + simulator source)
+│   │   ├── symmetry.py        # left-right mirror map and mirrored trajectories
+│   │   ├── sampling.py        # temperature sampling over robots or families
+│   │   └── trainer.py         # Trainer that logs each task loss (optionally weighted sampling)
 │   └── README.md              # module-level technical notes
 ├── scripts/
 │   ├── train_physics_da_get.py       # HF Trainer entry point
@@ -71,13 +80,21 @@ DA-GET-BFM/
 │   ├── validate_torque_estimation.py # estimated vs measured torques on a real Go1 (analysis)
 │   ├── evaluate_contact_detection.py # inferred vs sensor or simulator contacts
 │   ├── benchmark_inference.py        # 50 Hz latency of every network
+│   ├── diagnose_physics_location.py  # B0: probes, controls, random encoder, head re-init transfer
+│   ├── evaluate_zero_shot.py         # BFM metrics per split level, IQM and bootstrap CIs
+│   ├── adapt_da_get.py               # F1: test-time adaptation of a new robot (LoRA + L2-SP/LwF)
+│   ├── retarget_motion.py            # G3: keypoint retargeting between robots
+│   ├── generate_morphologies.py      # D1: write a suite of procedural robots
+│   ├── build_proposal_pdf.py         # render docs/proposal/*.md to the PDF
 │   └── download_urdfs.py             # fetch Unitree and ANYmal D URDFs into assets/urdf
 ├── assets/robots/quadrotor_x.urdf    # X quadrotor for synthetic flight
 ├── configs/data/              # example data configs
-├── configs/rl/                # example RL training config
+├── configs/rl/                # example RL training configs
+├── configs/pretraining/       # training-argument files (zero-shot)
+├── configs/splits/            # zero-shot split manifest L0-L4
 ├── tests/                     # unit tests (see below)
 ├── .github/workflows/ci.yml   # continuous integration
-├── docs/                      # documentation by topic
+├── docs/                      # documentation by topic (docs/proposal/: the research proposal)
 ├── raw/                       # source material (the GET-Zero project page)
 ├── graphify-out/              # knowledge graph of the code and paper
 ├── THIRD_PARTY_NOTICES.md     # attribution for adapted code
@@ -342,17 +359,19 @@ a pipeline check, not a conclusive ablation.
 
 ## Continuous integration
 
-[`.github/workflows/ci.yml`](../.github/workflows/ci.yml) runs on every push to `main`,
-on pull requests, and on demand, on Ubuntu with Python 3.11:
+[`.github/workflows/ci.yml`](../.github/workflows/ci.yml) runs on every push to `main` and
+to `feature/**` branches, on pull requests, and on demand, on Ubuntu with Python 3.11:
 
 | Step | Command | Checks |
 |---|---|---|
 | Lock | `uv lock --check` | `uv.lock` matches `pyproject.toml` |
 | Install | `uv sync --locked --all-extras` | The locked environment installs, with MuJoCo, the converters and the validation tools |
 | Compile | `uv run python -m compileall -q model scripts tests` | Every module byte-compiles |
-| Test | `uv run pytest -q -ra` | The whole suite, including both training scripts end to end on MuJoCo and the documentation link check |
+| URDFs | `uv run python scripts/download_urdfs.py` | Go1, H1, G1, ANYmal D, Go2 and Talos for the tests and the morphology generator (`assets/urdf/` is not committed) |
+| Test | `uv run pytest -q -ra` | The whole suite, including both training scripts end to end on MuJoCo, the zero-shot options and the documentation link check |
 
-To run the same steps locally, run those four commands from the repository root. Not
+To run the same steps locally, run those five commands from the repository root. Tests
+that need the downloaded URDFs are skipped, with that reason, when they are missing. Not
 covered by CI: Isaac Lab (needs an NVIDIA GPU and Isaac Sim), the CUDA Graph replay test
 (skipped without a GPU), the latency benchmark (`scripts/benchmark_inference.py`, which
 needs the downloaded URDFs and should run on the deployment machine), and Python 3.10

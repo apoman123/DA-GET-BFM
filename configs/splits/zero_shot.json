@@ -1,0 +1,799 @@
+{
+ "version": 1,
+ "notes": [
+  "Training robots are those of configs/data/*.json (go1, anymal_d, g1_29dof, quadrotor_x, G1 arms) WITHOUT h1: proposal v4 names H1 an L4 robot, but configs/data/synthetic_unitree.json, ground_contact.json and configs/rl/go1_h1_ground.json train on it. A zero-shot training config must drop the h1 sources; SplitManifest.check_training_config lists such sources.",
+  "Splits of L1-L3 come from make_heldout_split(entries, fraction=0.2, seed=0) per level (Ai et al., CoRL 2025: 20% held out); test is the held-out part. L0 and L4 are test only: L0 uses held-out episodes, and L4 is the final real-robot check.",
+  "L1 categories are MetaMorph's six (Gupta et al., ICLR 2022, Fig. 6; ranges Table 2) plus size. MetaMorph's density and gear ranges coincide with this repo's training randomization, so they are not out of distribution for synthetic-trained models; see the per-entry notes.",
+  "L1-L3 entries are generator specifications. Procedural entries (L2, L3) are model.morphology.generate_robot(family, seed, ranges) calls; each gives one robot, and more robots per entry come from more seeds (counts are not fixed here). parameter_variation entries (L1) have no generator in the tree yet: a tool must write the modified URDF.",
+  "L2/L3 values are Ai et al. Table 6 (knee joints {0,1,2,3}, foot size {1.0, 2.0}), written as model.morphology range overrides (lists of candidates).",
+  "L4 is missing LocoMuJoCo's other humanoids (proposal v4): they ship MJCF only, and this pipeline needs URDF.",
+  "Procedural training sources (model/training/procedural.py) must not generate hexapods and must restrict ranges so no L2 robot can appear (for example knee_joints [1] and foot_scale [1.0] for quadrupeds and humanoids); SplitManifest.check_training_config flags sources that can.",
+  "No entry has expert-motion sources yet, so scripts/evaluate_zero_shot.py needs per-level data configs with motions (--level-data-config)."
+ ],
+ "levels_described": {
+  "L0": "training robots, held-out episodes",
+  "L1": "parameter changes of training robots (MetaMorph's six categories) and size extrapolation",
+  "L2": "new topology within a training family (knee count, foot size)",
+  "L3": "a whole family held out",
+  "L4": "real robot models"
+ },
+ "training_robots": [
+  {
+   "name": "go1",
+   "family": "quadruped",
+   "split": "test",
+   "urdf": "../../assets/urdf/go1.urdf",
+   "notes": "configs/data/synthetic_unitree.json, ground_contact.json, g1_hub_plus_synthetic.json; configs/rl/*"
+  },
+  {
+   "name": "anymal_d",
+   "family": "quadruped",
+   "split": "test",
+   "urdf": "../../assets/urdf/anymal_d.urdf",
+   "notes": "configs/data/ground_contact.json"
+  },
+  {
+   "name": "g1_29dof",
+   "family": "humanoid",
+   "split": "test",
+   "urdf": "../../assets/urdf/g1_29dof.urdf",
+   "notes": "configs/data/synthetic_unitree.json, ground_contact.json, g1_wbt_floating.json, g1_hub_plus_synthetic.json; configs/rl/g1_go1_real_and_synthetic.json"
+  },
+  {
+   "name": "quadrotor_x",
+   "family": "multirotor",
+   "split": "test",
+   "urdf": "../../assets/robots/quadrotor_x.urdf",
+   "notes": "configs/data/quadrotor_flight.json"
+  },
+  {
+   "name": "g1_arms",
+   "family": "arm",
+   "split": "test",
+   "urdf": "../../assets/urdf/g1_29dof.urdf",
+   "notes": "G1 arm joints of g1_29dof.urdf (configs/data/g1_hub_plus_synthetic.json: sources g1_dex3_toasted_bread and g1_arms)"
+  }
+ ],
+ "levels": {
+  "L0": [
+   {
+    "name": "go1",
+    "family": "quadruped",
+    "split": "test",
+    "urdf": "../../assets/urdf/go1.urdf",
+    "notes": "held-out episodes of the data config's eval split (eval_fraction)"
+   },
+   {
+    "name": "anymal_d",
+    "family": "quadruped",
+    "split": "test",
+    "urdf": "../../assets/urdf/anymal_d.urdf",
+    "notes": "held-out episodes of the data config's eval split (eval_fraction)"
+   },
+   {
+    "name": "g1_29dof",
+    "family": "humanoid",
+    "split": "test",
+    "urdf": "../../assets/urdf/g1_29dof.urdf",
+    "notes": "held-out episodes of the data config's eval split (eval_fraction)"
+   },
+   {
+    "name": "quadrotor_x",
+    "family": "multirotor",
+    "split": "test",
+    "urdf": "../../assets/robots/quadrotor_x.urdf",
+    "notes": "held-out episodes of the data config's eval split (eval_fraction)"
+   },
+   {
+    "name": "g1_arms",
+    "family": "arm",
+    "split": "test",
+    "urdf": "../../assets/urdf/g1_29dof.urdf",
+    "notes": "held-out episodes of the data config's eval split (eval_fraction)"
+   }
+  ],
+  "L1": [
+   {
+    "name": "go1/armature",
+    "family": "quadruped",
+    "split": "test",
+    "generator": {
+     "type": "parameter_variation",
+     "base_robot": "go1",
+     "category": "armature",
+     "metamorph": {
+      "range": [
+       0.1,
+       2.0
+      ],
+      "kind": "absolute",
+      "metamorph_units": "MuJoCo armature of UNIMAL joints"
+     },
+     "source": "Gupta et al., ICLR 2022, Table 2"
+    },
+    "notes": "MetaMorph's absolute range is 10-200x this repo's default armature (0.01 kg m^2); how to map it to real-robot scale is [H]."
+   },
+   {
+    "name": "go1/density",
+    "family": "quadruped",
+    "split": "val",
+    "generator": {
+     "type": "parameter_variation",
+     "base_robot": "go1",
+     "category": "density",
+     "metamorph": {
+      "range": [
+       0.8,
+       1.2
+      ],
+      "kind": "scale of limb density"
+     },
+     "source": "Gupta et al., ICLR 2022, Table 2"
+    },
+    "notes": "MetaMorph's x0.8-1.2 equals this repo's training mass randomization (DEFAULT_RANDOMIZATION mass [0.8, 1.2]), so it is in distribution for robots trained with synthetic sources; extrapolation needs factors outside it ([H] which)."
+   },
+   {
+    "name": "go1/damping",
+    "family": "quadruped",
+    "split": "val",
+    "generator": {
+     "type": "parameter_variation",
+     "base_robot": "go1",
+     "category": "damping",
+     "metamorph": {
+      "range": [
+       0.01,
+       5.0
+      ],
+      "kind": "absolute",
+      "metamorph_units": "MuJoCo joint damping of UNIMAL joints"
+     },
+     "source": "Gupta et al., ICLR 2022, Table 2"
+    },
+    "notes": "MetaMorph's absolute range is for UNIMAL joints; this repo randomizes damping as a fraction [0, 0.02] of effort/velocity. The mapping is [H]."
+   },
+   {
+    "name": "go1/gear",
+    "family": "quadruped",
+    "split": "test",
+    "generator": {
+     "type": "parameter_variation",
+     "base_robot": "go1",
+     "category": "gear",
+     "metamorph": {
+      "range": [
+       0.8,
+       1.2
+      ],
+      "kind": "scale of motor gear"
+     },
+     "source": "Gupta et al., ICLR 2022, Table 2"
+    },
+    "notes": "MetaMorph's x0.8-1.2 equals this repo's training torque randomization (DEFAULT_RANDOMIZATION torque [0.8, 1.2]): in distribution for synthetic sources; extrapolation needs factors outside it ([H] which)."
+   },
+   {
+    "name": "go1/module_shape",
+    "family": "quadruped",
+    "split": "test",
+    "generator": {
+     "type": "parameter_variation",
+     "base_robot": "go1",
+     "category": "module_shape",
+     "metamorph": {
+      "limb_radius": [
+       0.03,
+       0.05
+      ],
+      "limb_height": [
+       0.15,
+       0.45
+      ],
+      "kind": "absolute capsule size of UNIMAL limbs"
+     },
+     "source": "Gupta et al., ICLR 2022, Table 2"
+    },
+    "notes": "UNIMAL capsule limbs; for URDF robots the analog is a per-link length change, which is [H]."
+   },
+   {
+    "name": "go1/joint_angle",
+    "family": "quadruped",
+    "split": "val",
+    "generator": {
+     "type": "parameter_variation",
+     "base_robot": "go1",
+     "category": "joint_angle",
+     "metamorph": {
+      "kind": "joint range chosen from MetaMorph's set, at least 50% overlap with the original range"
+     },
+     "source": "Gupta et al., ICLR 2022, Table 2"
+    },
+    "notes": "Change of the joint range with at least 50% overlap, as MetaMorph."
+   },
+   {
+    "name": "go1/size",
+    "family": "quadruped",
+    "split": "val",
+    "generator": {
+     "type": "parameter_variation",
+     "base_robot": "go1",
+     "category": "size",
+     "values": [
+      0.8,
+      1.2
+     ],
+     "kind": "all-link scale",
+     "source": "Ai et al., CoRL 2025, Table 6"
+    },
+    "notes": "All-link scale {0.8, 1.2} from Ai et al. Table 6; both lie outside the training length randomization [0.9, 1.1] (DEFAULT_RANDOMIZATION), so they extrapolate."
+   },
+   {
+    "name": "anymal_d/armature",
+    "family": "quadruped",
+    "split": "val",
+    "generator": {
+     "type": "parameter_variation",
+     "base_robot": "anymal_d",
+     "category": "armature",
+     "metamorph": {
+      "range": [
+       0.1,
+       2.0
+      ],
+      "kind": "absolute",
+      "metamorph_units": "MuJoCo armature of UNIMAL joints"
+     },
+     "source": "Gupta et al., ICLR 2022, Table 2"
+    },
+    "notes": "MetaMorph's absolute range is 10-200x this repo's default armature (0.01 kg m^2); how to map it to real-robot scale is [H]."
+   },
+   {
+    "name": "anymal_d/density",
+    "family": "quadruped",
+    "split": "val",
+    "generator": {
+     "type": "parameter_variation",
+     "base_robot": "anymal_d",
+     "category": "density",
+     "metamorph": {
+      "range": [
+       0.8,
+       1.2
+      ],
+      "kind": "scale of limb density"
+     },
+     "source": "Gupta et al., ICLR 2022, Table 2"
+    },
+    "notes": "MetaMorph's x0.8-1.2 equals this repo's training mass randomization (DEFAULT_RANDOMIZATION mass [0.8, 1.2]), so it is in distribution for robots trained with synthetic sources; extrapolation needs factors outside it ([H] which)."
+   },
+   {
+    "name": "anymal_d/damping",
+    "family": "quadruped",
+    "split": "val",
+    "generator": {
+     "type": "parameter_variation",
+     "base_robot": "anymal_d",
+     "category": "damping",
+     "metamorph": {
+      "range": [
+       0.01,
+       5.0
+      ],
+      "kind": "absolute",
+      "metamorph_units": "MuJoCo joint damping of UNIMAL joints"
+     },
+     "source": "Gupta et al., ICLR 2022, Table 2"
+    },
+    "notes": "MetaMorph's absolute range is for UNIMAL joints; this repo randomizes damping as a fraction [0, 0.02] of effort/velocity. The mapping is [H]."
+   },
+   {
+    "name": "anymal_d/gear",
+    "family": "quadruped",
+    "split": "val",
+    "generator": {
+     "type": "parameter_variation",
+     "base_robot": "anymal_d",
+     "category": "gear",
+     "metamorph": {
+      "range": [
+       0.8,
+       1.2
+      ],
+      "kind": "scale of motor gear"
+     },
+     "source": "Gupta et al., ICLR 2022, Table 2"
+    },
+    "notes": "MetaMorph's x0.8-1.2 equals this repo's training torque randomization (DEFAULT_RANDOMIZATION torque [0.8, 1.2]): in distribution for synthetic sources; extrapolation needs factors outside it ([H] which)."
+   },
+   {
+    "name": "anymal_d/module_shape",
+    "family": "quadruped",
+    "split": "val",
+    "generator": {
+     "type": "parameter_variation",
+     "base_robot": "anymal_d",
+     "category": "module_shape",
+     "metamorph": {
+      "limb_radius": [
+       0.03,
+       0.05
+      ],
+      "limb_height": [
+       0.15,
+       0.45
+      ],
+      "kind": "absolute capsule size of UNIMAL limbs"
+     },
+     "source": "Gupta et al., ICLR 2022, Table 2"
+    },
+    "notes": "UNIMAL capsule limbs; for URDF robots the analog is a per-link length change, which is [H]."
+   },
+   {
+    "name": "anymal_d/joint_angle",
+    "family": "quadruped",
+    "split": "val",
+    "generator": {
+     "type": "parameter_variation",
+     "base_robot": "anymal_d",
+     "category": "joint_angle",
+     "metamorph": {
+      "kind": "joint range chosen from MetaMorph's set, at least 50% overlap with the original range"
+     },
+     "source": "Gupta et al., ICLR 2022, Table 2"
+    },
+    "notes": "Change of the joint range with at least 50% overlap, as MetaMorph."
+   },
+   {
+    "name": "anymal_d/size",
+    "family": "quadruped",
+    "split": "val",
+    "generator": {
+     "type": "parameter_variation",
+     "base_robot": "anymal_d",
+     "category": "size",
+     "values": [
+      0.8,
+      1.2
+     ],
+     "kind": "all-link scale",
+     "source": "Ai et al., CoRL 2025, Table 6"
+    },
+    "notes": "All-link scale {0.8, 1.2} from Ai et al. Table 6; both lie outside the training length randomization [0.9, 1.1] (DEFAULT_RANDOMIZATION), so they extrapolate."
+   },
+   {
+    "name": "g1_29dof/armature",
+    "family": "humanoid",
+    "split": "val",
+    "generator": {
+     "type": "parameter_variation",
+     "base_robot": "g1_29dof",
+     "category": "armature",
+     "metamorph": {
+      "range": [
+       0.1,
+       2.0
+      ],
+      "kind": "absolute",
+      "metamorph_units": "MuJoCo armature of UNIMAL joints"
+     },
+     "source": "Gupta et al., ICLR 2022, Table 2"
+    },
+    "notes": "MetaMorph's absolute range is 10-200x this repo's default armature (0.01 kg m^2); how to map it to real-robot scale is [H]."
+   },
+   {
+    "name": "g1_29dof/density",
+    "family": "humanoid",
+    "split": "val",
+    "generator": {
+     "type": "parameter_variation",
+     "base_robot": "g1_29dof",
+     "category": "density",
+     "metamorph": {
+      "range": [
+       0.8,
+       1.2
+      ],
+      "kind": "scale of limb density"
+     },
+     "source": "Gupta et al., ICLR 2022, Table 2"
+    },
+    "notes": "MetaMorph's x0.8-1.2 equals this repo's training mass randomization (DEFAULT_RANDOMIZATION mass [0.8, 1.2]), so it is in distribution for robots trained with synthetic sources; extrapolation needs factors outside it ([H] which)."
+   },
+   {
+    "name": "g1_29dof/damping",
+    "family": "humanoid",
+    "split": "val",
+    "generator": {
+     "type": "parameter_variation",
+     "base_robot": "g1_29dof",
+     "category": "damping",
+     "metamorph": {
+      "range": [
+       0.01,
+       5.0
+      ],
+      "kind": "absolute",
+      "metamorph_units": "MuJoCo joint damping of UNIMAL joints"
+     },
+     "source": "Gupta et al., ICLR 2022, Table 2"
+    },
+    "notes": "MetaMorph's absolute range is for UNIMAL joints; this repo randomizes damping as a fraction [0, 0.02] of effort/velocity. The mapping is [H]."
+   },
+   {
+    "name": "g1_29dof/gear",
+    "family": "humanoid",
+    "split": "test",
+    "generator": {
+     "type": "parameter_variation",
+     "base_robot": "g1_29dof",
+     "category": "gear",
+     "metamorph": {
+      "range": [
+       0.8,
+       1.2
+      ],
+      "kind": "scale of motor gear"
+     },
+     "source": "Gupta et al., ICLR 2022, Table 2"
+    },
+    "notes": "MetaMorph's x0.8-1.2 equals this repo's training torque randomization (DEFAULT_RANDOMIZATION torque [0.8, 1.2]): in distribution for synthetic sources; extrapolation needs factors outside it ([H] which)."
+   },
+   {
+    "name": "g1_29dof/module_shape",
+    "family": "humanoid",
+    "split": "val",
+    "generator": {
+     "type": "parameter_variation",
+     "base_robot": "g1_29dof",
+     "category": "module_shape",
+     "metamorph": {
+      "limb_radius": [
+       0.03,
+       0.05
+      ],
+      "limb_height": [
+       0.15,
+       0.45
+      ],
+      "kind": "absolute capsule size of UNIMAL limbs"
+     },
+     "source": "Gupta et al., ICLR 2022, Table 2"
+    },
+    "notes": "UNIMAL capsule limbs; for URDF robots the analog is a per-link length change, which is [H]."
+   },
+   {
+    "name": "g1_29dof/joint_angle",
+    "family": "humanoid",
+    "split": "val",
+    "generator": {
+     "type": "parameter_variation",
+     "base_robot": "g1_29dof",
+     "category": "joint_angle",
+     "metamorph": {
+      "kind": "joint range chosen from MetaMorph's set, at least 50% overlap with the original range"
+     },
+     "source": "Gupta et al., ICLR 2022, Table 2"
+    },
+    "notes": "Change of the joint range with at least 50% overlap, as MetaMorph."
+   },
+   {
+    "name": "g1_29dof/size",
+    "family": "humanoid",
+    "split": "val",
+    "generator": {
+     "type": "parameter_variation",
+     "base_robot": "g1_29dof",
+     "category": "size",
+     "values": [
+      0.8,
+      1.2
+     ],
+     "kind": "all-link scale",
+     "source": "Ai et al., CoRL 2025, Table 6"
+    },
+    "notes": "All-link scale {0.8, 1.2} from Ai et al. Table 6; both lie outside the training length randomization [0.9, 1.1] (DEFAULT_RANDOMIZATION), so they extrapolate."
+   }
+  ],
+  "L2": [
+   {
+    "name": "quadruped/knee_joints_0",
+    "family": "quadruped",
+    "split": "val",
+    "generator": {
+     "type": "procedural",
+     "module": "model.morphology",
+     "function": "generate_robot",
+     "family": "quadruped",
+     "seed": 0,
+     "ranges": {
+      "knee_joints": [
+       0
+      ]
+     },
+     "source": "Ai et al., CoRL 2025, Table 6"
+    },
+    "notes": "Training robots have one knee joint per leg; Ai et al. Table 6 knee joints {0, 1, 2, 3}. Other factors are drawn by generate_robot from its defaults."
+   },
+   {
+    "name": "quadruped/knee_joints_2",
+    "family": "quadruped",
+    "split": "val",
+    "generator": {
+     "type": "procedural",
+     "module": "model.morphology",
+     "function": "generate_robot",
+     "family": "quadruped",
+     "seed": 0,
+     "ranges": {
+      "knee_joints": [
+       2
+      ]
+     },
+     "source": "Ai et al., CoRL 2025, Table 6"
+    },
+    "notes": "Training robots have one knee joint per leg; Ai et al. Table 6 knee joints {0, 1, 2, 3}. Other factors are drawn by generate_robot from its defaults."
+   },
+   {
+    "name": "quadruped/knee_joints_3",
+    "family": "quadruped",
+    "split": "val",
+    "generator": {
+     "type": "procedural",
+     "module": "model.morphology",
+     "function": "generate_robot",
+     "family": "quadruped",
+     "seed": 0,
+     "ranges": {
+      "knee_joints": [
+       3
+      ]
+     },
+     "source": "Ai et al., CoRL 2025, Table 6"
+    },
+    "notes": "Training robots have one knee joint per leg; Ai et al. Table 6 knee joints {0, 1, 2, 3}. Other factors are drawn by generate_robot from its defaults."
+   },
+   {
+    "name": "quadruped/foot_scale_2.0",
+    "family": "quadruped",
+    "split": "test",
+    "generator": {
+     "type": "procedural",
+     "module": "model.morphology",
+     "function": "generate_robot",
+     "family": "quadruped",
+     "seed": 0,
+     "ranges": {
+      "knee_joints": [
+       1
+      ],
+      "foot_scale": [
+       2.0
+      ],
+      "link_scale": [
+       1.0
+      ],
+      "thigh_scale": [
+       1.0
+      ],
+      "calf_scale": [
+       1.0
+      ],
+      "geometry_sampling": "independent"
+     },
+     "source": "Ai et al., CoRL 2025, Table 6"
+    },
+    "notes": "Ai et al. Table 6 foot size {1.0, 2.0}; 1.0 is the nominal size. One knee and nominal link lengths, so the foot is the only Table 6 factor changed."
+   },
+   {
+    "name": "humanoid/knee_joints_0",
+    "family": "humanoid",
+    "split": "test",
+    "generator": {
+     "type": "procedural",
+     "module": "model.morphology",
+     "function": "generate_robot",
+     "family": "humanoid",
+     "seed": 0,
+     "ranges": {
+      "knee_joints": [
+       0
+      ]
+     },
+     "source": "Ai et al., CoRL 2025, Table 6"
+    },
+    "notes": "Training robots have one knee joint per leg; Ai et al. Table 6 knee joints {0, 1, 2, 3}. Other factors are drawn by generate_robot from its defaults."
+   },
+   {
+    "name": "humanoid/knee_joints_2",
+    "family": "humanoid",
+    "split": "val",
+    "generator": {
+     "type": "procedural",
+     "module": "model.morphology",
+     "function": "generate_robot",
+     "family": "humanoid",
+     "seed": 0,
+     "ranges": {
+      "knee_joints": [
+       2
+      ]
+     },
+     "source": "Ai et al., CoRL 2025, Table 6"
+    },
+    "notes": "Training robots have one knee joint per leg; Ai et al. Table 6 knee joints {0, 1, 2, 3}. Other factors are drawn by generate_robot from its defaults."
+   },
+   {
+    "name": "humanoid/knee_joints_3",
+    "family": "humanoid",
+    "split": "val",
+    "generator": {
+     "type": "procedural",
+     "module": "model.morphology",
+     "function": "generate_robot",
+     "family": "humanoid",
+     "seed": 0,
+     "ranges": {
+      "knee_joints": [
+       3
+      ]
+     },
+     "source": "Ai et al., CoRL 2025, Table 6"
+    },
+    "notes": "Training robots have one knee joint per leg; Ai et al. Table 6 knee joints {0, 1, 2, 3}. Other factors are drawn by generate_robot from its defaults."
+   },
+   {
+    "name": "humanoid/foot_scale_2.0",
+    "family": "humanoid",
+    "split": "val",
+    "generator": {
+     "type": "procedural",
+     "module": "model.morphology",
+     "function": "generate_robot",
+     "family": "humanoid",
+     "seed": 0,
+     "ranges": {
+      "knee_joints": [
+       1
+      ],
+      "foot_scale": [
+       2.0
+      ],
+      "link_scale": [
+       1.0
+      ],
+      "thigh_scale": [
+       1.0
+      ],
+      "calf_scale": [
+       1.0
+      ],
+      "geometry_sampling": "independent",
+      "torso_scale": [
+       1.0
+      ]
+     },
+     "source": "Ai et al., CoRL 2025, Table 6"
+    },
+    "notes": "Ai et al. Table 6 foot size {1.0, 2.0}; 1.0 is the nominal size. One knee and nominal link lengths, so the foot is the only Table 6 factor changed."
+   }
+  ],
+  "L3": [
+   {
+    "name": "hexapod/knee_joints_0",
+    "family": "hexapod",
+    "split": "val",
+    "generator": {
+     "type": "procedural",
+     "module": "model.morphology",
+     "function": "generate_robot",
+     "family": "hexapod",
+     "seed": 0,
+     "ranges": {
+      "knee_joints": [
+       0
+      ]
+     },
+     "source": "Ai et al., CoRL 2025, Table 6"
+    },
+    "notes": "Hexapods are one of Ai et al.'s three families (332 of 1,012 robots); no training robot is a hexapod."
+   },
+   {
+    "name": "hexapod/knee_joints_1",
+    "family": "hexapod",
+    "split": "val",
+    "generator": {
+     "type": "procedural",
+     "module": "model.morphology",
+     "function": "generate_robot",
+     "family": "hexapod",
+     "seed": 0,
+     "ranges": {
+      "knee_joints": [
+       1
+      ]
+     },
+     "source": "Ai et al., CoRL 2025, Table 6"
+    },
+    "notes": "Hexapods are one of Ai et al.'s three families (332 of 1,012 robots); no training robot is a hexapod."
+   },
+   {
+    "name": "hexapod/knee_joints_2",
+    "family": "hexapod",
+    "split": "test",
+    "generator": {
+     "type": "procedural",
+     "module": "model.morphology",
+     "function": "generate_robot",
+     "family": "hexapod",
+     "seed": 0,
+     "ranges": {
+      "knee_joints": [
+       2
+      ]
+     },
+     "source": "Ai et al., CoRL 2025, Table 6"
+    },
+    "notes": "Hexapods are one of Ai et al.'s three families (332 of 1,012 robots); no training robot is a hexapod."
+   },
+   {
+    "name": "hexapod/knee_joints_3",
+    "family": "hexapod",
+    "split": "val",
+    "generator": {
+     "type": "procedural",
+     "module": "model.morphology",
+     "function": "generate_robot",
+     "family": "hexapod",
+     "seed": 0,
+     "ranges": {
+      "knee_joints": [
+       3
+      ]
+     },
+     "source": "Ai et al., CoRL 2025, Table 6"
+    },
+    "notes": "Hexapods are one of Ai et al.'s three families (332 of 1,012 robots); no training robot is a hexapod."
+   }
+  ],
+  "L4": [
+   {
+    "name": "go2",
+    "family": "quadruped",
+    "split": "test",
+    "urdf": "../../assets/urdf/go2.urdf",
+    "download": {
+     "url": "https://raw.githubusercontent.com/unitreerobotics/unitree_ros/master/robots/go2_description/urdf/go2_description.urdf",
+     "repository": "unitreerobotics/unitree_ros",
+     "license": "BSD-3-Clause",
+     "in_download_script": true
+    },
+    "notes": "Real robot of Ai et al. Parsed with model.embodiment on 2026-11-19: 12 joints, 16.09 kg, characteristic length 0.321 m. Fetched by scripts/download_urdfs.py."
+   },
+   {
+    "name": "h1",
+    "family": "humanoid",
+    "split": "test",
+    "urdf": "../../assets/urdf/h1.urdf",
+    "download": {
+     "url": "https://raw.githubusercontent.com/unitreerobotics/unitree_ros/master/robots/h1_description/urdf/h1.urdf",
+     "repository": "unitreerobotics/unitree_ros",
+     "license": "BSD-3-Clause",
+     "in_download_script": true
+    },
+    "notes": "CONFLICT: H1 is a training robot of configs/data/synthetic_unitree.json, ground_contact.json and configs/rl/go1_h1_ground.json. It is zero-shot only if the training config excludes it (check with SplitManifest.check_training_config)."
+   },
+   {
+    "name": "talos",
+    "family": "humanoid",
+    "split": "test",
+    "urdf": "../../assets/urdf/talos_reduced.urdf",
+    "download": {
+     "url": "https://raw.githubusercontent.com/Gepetto/example-robot-data/master/robots/talos_data/robots/talos_reduced.urdf",
+     "repository": "Gepetto/example-robot-data",
+     "license": "BSD-2-Clause",
+     "in_download_script": true
+    },
+    "notes": "The robot URMA did not transfer to. Its transmissions have negative mechanicalReduction (a reversed actuator); model.urdf.parse_urdf takes the magnitude since 2026-11-19. Parsed with a floating base: 32 joints, 90.27 kg, characteristic length 0.98 m. Fetched by scripts/download_urdfs.py."
+   }
+  ]
+ }
+}

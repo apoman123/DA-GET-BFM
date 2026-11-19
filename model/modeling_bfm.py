@@ -360,11 +360,27 @@ class LatentConditionedBlock(nn.Module):
         )
 
     def forward(
-        self, hidden_states: torch.Tensor, joint_mask: torch.Tensor, memory: torch.Tensor, memory_mask: torch.Tensor
+        self,
+        hidden_states: torch.Tensor,
+        joint_mask: torch.Tensor,
+        memory: torch.Tensor,
+        memory_mask: torch.Tensor,
+        attention_bias: torch.Tensor | None = None,
     ) -> torch.Tensor:
-        """Update joint tokens ``[batch, joints, hidden]``; padded joints stay zero."""
+        """Update joint tokens ``[batch, joints, hidden]``; padded joints stay zero.
+
+        ``attention_bias`` (``[batch * heads, joints, joints]``) is added to the joint
+        self-attention logits (the physics-interface bias of proposal B2).
+        """
         hidden_states = self.cross_attention(hidden_states, memory, context_padding_mask=~memory_mask)
-        hidden_states = self.self_attention(hidden_states, key_padding_mask=~joint_mask)
+        if attention_bias is None:
+            hidden_states = self.self_attention(hidden_states, key_padding_mask=~joint_mask)
+        else:
+            bias = attention_bias.masked_fill(
+                ~joint_mask.repeat_interleave(attention_bias.shape[0] // joint_mask.shape[0], dim=0)[:, None, :],
+                float("-inf"),
+            )
+            hidden_states = self.self_attention(hidden_states, attention_mask=bias.to(hidden_states.dtype))
         hidden_states = hidden_states + self.feed_forward(hidden_states)
         return hidden_states.masked_fill(~joint_mask[..., None], 0)
 
@@ -406,6 +422,17 @@ class DaGetBfmActor(nn.Module):
         self.action_head = nn.Sequential(
             nn.LayerNorm(width), nn.Linear(width, width), nn.Mish(), nn.Linear(width, config.action_size_per_joint)
         )
+        _, heads, _, _ = config.network_dimensions("actor")
+        self.num_heads = heads
+        self.interface_projections = (
+            nn.ModuleList(nn.Linear(1, heads, bias=False) for _ in range(config.actor_layers))
+            if config.use_interface_bias
+            else None
+        )
+        # Set by DaGetBfmModel: a function of (joint embeddings, mask) returning the
+        # normalized operator, or None. A plain attribute, not a submodule: the
+        # interface belongs to (and is trained with) the physics heads.
+        self.operator_source = None
 
     def forward(
         self,
@@ -434,8 +461,16 @@ class DaGetBfmActor(nn.Module):
         joint_mask = _joint_mask(joint_embeddings, joint_mask)
         memory, memory_mask = self.memory(z, latent_mask, context_states, context_mask)
         hidden_states = self.embedding_projection(joint_embeddings).masked_fill(~joint_mask[..., None], 0)
-        for layer in self.layers:
-            hidden_states = layer(hidden_states, joint_mask, memory, memory_mask)
+        operator = None
+        if self.interface_projections is not None and self.operator_source is not None:
+            operator = self.operator_source(joint_embeddings, joint_mask)
+        for index, layer in enumerate(self.layers):
+            bias = None
+            if operator is not None:
+                batch, joints = joint_mask.shape
+                bias = self.interface_projections[index](operator[..., None]).permute(0, 3, 1, 2)
+                bias = bias.reshape(batch * self.num_heads, joints, joints)
+            hidden_states = layer(hidden_states, joint_mask, memory, memory_mask, bias)
         mean = torch.tanh(self.action_head(hidden_states))
         if self.config.action_size_per_joint == 1:
             mean = mean.squeeze(-1)
@@ -565,13 +600,17 @@ class DaGetBfmModel(nn.Module):
         aux_critic (DaGetForwardMap | None): Auxiliary-reward critic.
     """
 
-    def __init__(self, config: BfmConfig, encoder: DaGetEncoder, use_aux_critic: bool = True) -> None:
+    def __init__(
+        self, config: BfmConfig, encoder: DaGetEncoder, use_aux_critic: bool = True, physics_interface: nn.Module | None = None
+    ) -> None:
         """Build independent heads around a single shared DA-GET encoder.
 
         Args:
             config (BfmConfig): Validated BFM dimensions and head settings.
             encoder (DaGetEncoder): Policy encoder, optionally loaded from pretraining.
             use_aux_critic (bool): Whether to construct the auxiliary reward critic.
+            physics_interface (nn.Module | None): ``DaGetPhysicsInterface`` of the
+                pretrained model; required by ``use_interface_bias``.
 
         Returns:
             None: Registers the encoder, state adapter, and all BFM heads.
@@ -604,6 +643,32 @@ class DaGetBfmModel(nn.Module):
         self.critic = DaGetForwardMap(config, 1)
         self.discriminator = DaGetDiscriminator(config)
         self.aux_critic = DaGetForwardMap(config, 1) if use_aux_critic else None
+        if config.use_interface_bias and physics_interface is None:
+            raise ValueError("use_interface_bias needs the pretrained physics interface (head_type linear or linear_residual)")
+        # Not a submodule: the interface is saved and trained with the physics heads.
+        object.__setattr__(self, "physics_interface", physics_interface)
+        if config.use_interface_bias:
+            self.actor.operator_source = self.interface_operator
+
+    def interface_operator(self, joint_embeddings: torch.Tensor, joint_mask: torch.Tensor) -> torch.Tensor | None:
+        """Return the interface's joint operator normalized to unit diagonal (detached), or None.
+
+        Args:
+            joint_embeddings (torch.Tensor): ``[B, J, E]`` policy-encoder embeddings.
+            joint_mask (torch.Tensor): Bool ``[B, J]``.
+
+        Returns:
+            torch.Tensor | None: ``[B, J, J]`` ``G_ij / sqrt(G_ii G_jj)``.
+        """
+        if self.physics_interface is None:
+            return None
+        from model.modeling_da_get import normalize_mass_matrix
+
+        with torch.no_grad():
+            weights = joint_mask.to(joint_embeddings.dtype)[..., None]
+            pooled = (joint_embeddings * weights).sum(1) / weights.sum(1).clamp_min(1)
+            operator = self.physics_interface(joint_embeddings, pooled, joint_mask)["operator"][:, 6:, :]
+            return normalize_mass_matrix(operator, joint_mask, 1e-8, validate=False)
 
     def encode_state(
         self,
@@ -616,8 +681,11 @@ class DaGetBfmModel(nn.Module):
     ) -> torch.Tensor:
         """Encode privileged state tokens with the shared encoder core.
 
-        A diagonal inertia matrix is formed from each state's measured mass
-        diagonal because recorded expert states do not contain a full matrix.
+        The state's full mass matrix (``StateView.mass``, passed as
+        ``mass_matrix``) feeds the mass-matrix attention bias; without one, a
+        diagonal matrix from the dynamics features' mass diagonal is used, which
+        the normalization turns into the identity (evidence R6,
+        ``docs/zero_shot.md``).
 
         Args:
             state (StateInputs): State-token and graph inputs from ``state_inputs``.
@@ -641,11 +709,16 @@ class DaGetBfmModel(nn.Module):
         inputs = dict(state, validate_inputs=validate_inputs)
         inputs["input_values"] = projection(inputs["input_values"])
         if source.config.use_mass_encoding:
-            diagonal = inputs["dynamics_features"][..., 0].clamp_min(1e-8)
-            inputs["mass_matrix"] = torch.diag_embed(diagonal)
+            if inputs.get("mass_matrix") is None:
+                diagonal = inputs["dynamics_features"][..., 0].clamp_min(1e-8)
+                inputs["mass_matrix"] = torch.diag_embed(diagonal)
+        else:
+            inputs.pop("mass_matrix", None)
         if source.physics_tokenizers is None:
-            for name in ("rigid_body_features", "actuator_features", "dynamics_features"):
+            for name in ("rigid_body_features", "actuator_features", "dynamics_features", "root_features"):
                 inputs.pop(name, None)
+        elif not source.config.needs_root_features:
+            inputs.pop("root_features", None)
         if train_encoder:
             return source(**inputs)
         frozen_parameters = {name: parameter.detach() for name, parameter in source.named_parameters()}

@@ -8,6 +8,17 @@ Each encoder layer runs, in order:
    rigid-body, actuator, and dynamics tokens of all joints;
 3. context cross-attention (optional) to external tokens;
 4. a feed-forward block.
+
+Options added by the zero-shot proposal (``docs/zero_shot.md``):
+
+* a root token per robot in the Physics Cross Attention memory (C1);
+* dimensionless physics features, divided by units built from the robot's total
+  mass, size and ``sqrt(L / g)`` (A3);
+* ModuMorph-style contextual modulation (Xiong, Beck & Whiteson, "Universal
+  Morphology Control via Contextual Modulation", ICML 2023, PMLR 202:38286-38300):
+  a morphology-only attention bias per layer and a hypernetwork correction of the
+  input projection, both from each joint's static physics tokens (D4);
+* learned mask embeddings for masked physics modeling (E3).
 """
 
 from __future__ import annotations
@@ -19,10 +30,47 @@ from torch import nn
 from torch.nn import functional
 
 from model.configuration_da_get import DaGetConfig
-from model.physics_schema import feature_scales
+from model.physics_schema import (
+    STANDARD_GRAVITY,
+    dimension_exponents,
+    dimensionless_scales,
+    feature_names,
+    feature_scales,
+)
 from model.transformer import AttentionBlock, CrossAttentionBlock
 
 PHYSICS_GROUPS = ("rigid_body", "actuator", "dynamics")
+MASKABLE_GROUPS = ("rigid_body", "actuator")
+TOTAL_MASS_INDEX = feature_names("root").index("total_mass")
+LENGTH_INDEX = feature_names("root").index("characteristic_length")
+PRISMATIC_INDEX = feature_names("rigid_body").index("type_prismatic")
+
+
+def physics_units(
+    group: str, total_mass: torch.Tensor, length: torch.Tensor, prismatic: torch.Tensor
+) -> torch.Tensor:
+    """Return each feature's unit ``m^a L^b T^c`` with ``T = sqrt(L / g)``.
+
+    Args:
+        group (str): ``rigid_body``, ``actuator``, or ``dynamics``.
+        total_mass (torch.Tensor): ``[B]`` total mass in kg.
+        length (torch.Tensor): ``[B]`` characteristic length in m.
+        prismatic (torch.Tensor): Bool ``[B, J]`` prismatic joints.
+
+    Returns:
+        torch.Tensor: ``[B, J, F]`` positive units.
+    """
+    revolute, prismatic_exponents = dimension_exponents(group)
+    dtype, device = total_mass.dtype, total_mass.device
+    revolute = torch.tensor(revolute, dtype=dtype, device=device)
+    prismatic_exponents = torch.tensor(prismatic_exponents, dtype=dtype, device=device)
+    length = length.clamp_min(1e-6)
+    logs = torch.stack(
+        (total_mass.clamp_min(1e-9).log(), length.log(), 0.5 * (length / STANDARD_GRAVITY).log()), dim=-1
+    )
+    log_revolute = logs @ revolute.T
+    log_prismatic = logs @ prismatic_exponents.T
+    return torch.where(prismatic[..., None], log_prismatic[:, None], log_revolute[:, None]).exp()
 
 
 def graph_distances(
@@ -163,21 +211,25 @@ class PhysicsFeatureTokenizer(nn.Module):
         group_embedding (nn.Parameter): ``[hidden_size]`` group marker.
     """
 
-    def __init__(self, group: str, input_size: int, hidden_size: int, mlp_size: int) -> None:
+    def __init__(
+        self, group: str, input_size: int, hidden_size: int, mlp_size: int, dimensionless: bool = False
+    ) -> None:
         """Create the tokenizer for one feature group.
 
         Args:
-            group (str): ``rigid_body``, ``actuator``, or ``dynamics``. Scales are
-                read from the schema when its size matches ``input_size``.
+            group (str): ``rigid_body``, ``actuator``, ``dynamics``, or ``root``.
+                Scales are read from the schema when its size matches ``input_size``.
             input_size (int): Features per joint.
             hidden_size (int): Output token width.
             mlp_size (int): MLP hidden width.
+            dimensionless (bool): Features arrive divided by their units, so use
+                the schema's dimensionless scales.
 
         Returns:
             None: Registers parameters.
         """
         super().__init__()
-        scales = feature_scales(group)
+        scales = dimensionless_scales(group) if dimensionless else feature_scales(group)
         if len(scales) != input_size:
             scales = (0.0,) * input_size
         self.scales = tuple(float(scale) for scale in scales)
@@ -190,15 +242,36 @@ class PhysicsFeatureTokenizer(nn.Module):
         )
         self.group_embedding = nn.Parameter(torch.zeros(hidden_size))
 
-    def forward(self, features: torch.Tensor) -> torch.Tensor:
+    def scaled(self, features: torch.Tensor, units: torch.Tensor | None = None) -> torch.Tensor:
+        """Return the asinh-scaled features the MLP reads (also the masked-modeling target).
+
+        Args:
+            features (torch.Tensor): ``[batch, joints, input_size]`` raw features.
+            units (torch.Tensor | None): Units to divide by first (dimensionless mode).
+
+        Returns:
+            torch.Tensor: Same shape.
+        """
+        if units is not None:
+            features = features / units
+        key = (features.device, features.dtype)
+        if key not in self._scale_tensors:
+            self._scale_tensors[key] = torch.tensor(self.scales, dtype=features.dtype, device=features.device)
+        scales = self._scale_tensors[key]
+        return torch.where(scales > 0, torch.asinh(features / torch.where(scales > 0, scales, 1)), features)
+
+    def forward(self, features: torch.Tensor, units: torch.Tensor | None = None) -> torch.Tensor:
         """Embed features.
 
         Args:
             features (torch.Tensor): ``[batch, joints, input_size]`` raw features.
+            units (torch.Tensor | None): Units to divide by first (dimensionless mode).
 
         Returns:
             torch.Tensor: ``[batch, joints, hidden_size]`` tokens.
         """
+        if units is not None:
+            return self.mlp(self.scaled(features, units)) + self.group_embedding
         key = (features.device, features.dtype)
         if key not in self._scale_tensors:
             self._scale_tensors[key] = torch.tensor(self.scales, dtype=features.dtype, device=features.device)
@@ -254,6 +327,7 @@ class PhysicsCrossAttention(nn.Module):
         self.output = nn.Linear(hidden, hidden)
         self.spatial_embedding = nn.Embedding(config.max_graph_distance + 2, self.num_heads)
         self.group_bias = nn.Parameter(torch.zeros(len(PHYSICS_GROUPS), self.num_heads))
+        self.root_bias = nn.Parameter(torch.zeros(self.num_heads)) if config.use_root_token else None
         self.dropout = nn.Dropout(config.hidden_dropout_prob)
 
     def memory_parameters(self) -> list[nn.Parameter]:
@@ -297,16 +371,21 @@ class PhysicsCrossAttention(nn.Module):
             dtype (torch.dtype): Logit dtype.
 
         Returns:
-            torch.Tensor: ``[batch, heads, joints, 3 * joints]``; padded physics
-                tokens are -infinity.
+            torch.Tensor: ``[batch, heads, joints, 3 * joints]`` (``3 * joints + 1``
+                with a root token, which sits after the actuator tokens); padded
+                physics tokens are -infinity.
         """
         buckets = _spatial_buckets(spatial_distances, self.max_graph_distance)
         spatial = self.spatial_embedding(buckets).permute(0, 3, 1, 2).to(dtype)
-        bias = torch.cat(
-            [spatial + self.group_bias[group].to(dtype)[None, :, None, None] for group in range(3)],
-            dim=-1,
-        )
-        key_mask = joint_mask.repeat(1, len(PHYSICS_GROUPS))
+        groups = [spatial + self.group_bias[group].to(dtype)[None, :, None, None] for group in range(3)]
+        masks = [joint_mask] * 3
+        if self.root_bias is not None:
+            batch, joints = joint_mask.shape
+            root = self.root_bias.to(dtype)[None, :, None, None].expand(batch, -1, joints, 1)
+            groups.insert(2, root)
+            masks.insert(2, torch.ones((batch, 1), dtype=torch.bool, device=joint_mask.device))
+        bias = torch.cat(groups, dim=-1)
+        key_mask = torch.cat(masks, dim=1)
         return bias.masked_fill(~key_mask[:, None, None, :], float("-inf"))
 
     def forward(
@@ -353,16 +432,23 @@ class PhysicsMemory:
     mistake.
 
     Attributes:
-        keys (tuple[torch.Tensor, ...]): Per physics layer, ``[B, heads, 2J, d]``.
+        keys (tuple[torch.Tensor, ...]): Per physics layer, ``[B, heads, 2J, d]``
+            (``2J + 1`` with a root token).
         values (tuple[torch.Tensor, ...]): Per physics layer, same shape.
         joint_mask (torch.Tensor): Bool ``[B, J]`` the memory was built for.
         parameter_versions (tuple[int, ...]): Versions of the source parameters.
+        dynamics_units (torch.Tensor | None): ``[B, J, F_dyn]`` units of the
+            dynamics features (dimensionless mode).
+        context (torch.Tensor | None): ``[B, J, hidden]`` static morphology context
+            of every joint (contextual modulation).
     """
 
     keys: tuple[torch.Tensor, ...]
     values: tuple[torch.Tensor, ...]
     joint_mask: torch.Tensor
     parameter_versions: tuple[int, ...]
+    dynamics_units: torch.Tensor | None = None
+    context: torch.Tensor | None = None
 
 
 def normalize_mass_matrix(
@@ -512,6 +598,81 @@ class DaGetGraphAttentionBias(nn.Module):
         )
 
 
+class DaGetMorphologyModulation(nn.Module):
+    """ModuMorph-style contextual modulation from each joint's static physics tokens.
+
+    Xiong, Beck & Whiteson (ICML 2023, PMLR 202:38286-38300) condition a universal
+    morphology controller on per-limb morphology context in two ways: a hypernetwork
+    that generates the limb's input embedding, and "fixed attention" whose weights
+    depend on the morphology context only. Here both are additive to the GET encoder,
+    so the option can be ablated against the GET structural bias (proposal D4):
+
+    * ``attention_bias``: per layer and head, ``(W_q c_i) . (W_k c_j) / sqrt(d)``
+      added to the self-attention logits;
+    * ``input_correction``: ``x_i A(c_i) B`` added to the input projection, a
+      rank-``r`` hypernetwork correction (the paper generates the full matrix;
+      the low-rank factorization is [H]).
+
+    Both corrections start at zero (zero-initialized output weights), so a new
+    model starts as the unmodulated encoder.
+    """
+
+    def __init__(self, config: DaGetConfig) -> None:
+        """Create the modulation parameters.
+
+        Args:
+            config (DaGetConfig): Encoder configuration.
+        """
+        super().__init__()
+        hidden, heads = config.hidden_size, config.num_attention_heads
+        self.num_heads = heads
+        self.head_size = hidden // heads
+        self.rank = config.modulation_rank or heads
+        self.input_size = config.input_size
+        self.context_norm = nn.LayerNorm(hidden)
+        self.queries = nn.ModuleList(nn.Linear(hidden, hidden) for _ in range(config.num_hidden_layers))
+        self.keys = nn.ModuleList(nn.Linear(hidden, hidden) for _ in range(config.num_hidden_layers))
+        for key in self.keys:
+            nn.init.zeros_(key.weight)
+            nn.init.zeros_(key.bias)
+        self.hyper_input = nn.Linear(hidden, config.input_size * self.rank)
+        self.hyper_output = nn.Linear(self.rank, hidden, bias=False)
+        nn.init.zeros_(self.hyper_output.weight)
+
+    def attention_bias(self, context: torch.Tensor, layer: int, joint_mask: torch.Tensor) -> torch.Tensor:
+        """Return the morphology-only logit bias of one layer.
+
+        Args:
+            context (torch.Tensor): ``[B, J, hidden]`` morphology context.
+            layer (int): Layer index.
+            joint_mask (torch.Tensor): Bool ``[B, J]``.
+
+        Returns:
+            torch.Tensor: ``[B * heads, J, J]``.
+        """
+        batch, joints, _ = context.shape
+        normalized = self.context_norm(context)
+        query = self.queries[layer](normalized).view(batch, joints, self.num_heads, self.head_size).transpose(1, 2)
+        key = self.keys[layer](normalized).view(batch, joints, self.num_heads, self.head_size).transpose(1, 2)
+        logits = query @ key.transpose(-1, -2) / self.head_size**0.5
+        logits = logits.masked_fill(~joint_mask[:, None, None, :], 0.0)
+        return logits.reshape(batch * self.num_heads, joints, joints)
+
+    def input_correction(self, context: torch.Tensor, inputs: torch.Tensor) -> torch.Tensor:
+        """Return the hypernetwork correction of the input projection.
+
+        Args:
+            context (torch.Tensor): ``[B, J, hidden]``.
+            inputs (torch.Tensor): ``[B, J, F]`` (normalized) joint tokens.
+
+        Returns:
+            torch.Tensor: ``[B, J, hidden]``.
+        """
+        batch, joints, _ = context.shape
+        weights = self.hyper_input(self.context_norm(context)).view(batch, joints, self.input_size, self.rank)
+        return self.hyper_output((inputs[..., None, :] @ weights).squeeze(-2))
+
+
 class DaGetEncoderLayer(nn.Module):
     """Apply graph self-attention, optional context attention, and an MLP.
 
@@ -575,6 +736,7 @@ class DaGetEncoderLayer(nn.Module):
         context_mask: torch.Tensor | None,
         physics: tuple[torch.Tensor, torch.Tensor, torch.Tensor] | None = None,
         mass_normalized: bool = False,
+        extra_bias: torch.Tensor | None = None,
     ) -> torch.Tensor:
         """Update joint states while keeping padded positions zero.
 
@@ -590,6 +752,8 @@ class DaGetEncoderLayer(nn.Module):
                 values, and dynamics tokens ``[B, J, hidden]``, required when
                 the layer has Physics Cross Attention.
             mass_normalized (bool): ``mass_matrix`` comes from ``normalize_mass_matrix``.
+            extra_bias (torch.Tensor | None): ``[batch * heads, joints, joints]``
+                logits added to the graph bias (contextual modulation).
 
         Returns:
             torch.Tensor: Updated joint states of the same shape, zero on padding.
@@ -598,6 +762,8 @@ class DaGetEncoderLayer(nn.Module):
             ValueError: A cross-attention layer has no context or physics tokens.
         """
         bias = self.graph_bias(*distances, mass_matrix, joint_mask, hidden_states.dtype, mass_normalized)
+        if extra_bias is not None:
+            bias = bias + extra_bias.to(bias.dtype)
         hidden_states = self.self_attention(hidden_states, attention_mask=bias)
         if self.physics_attention is not None:
             if physics is None:
@@ -638,6 +804,11 @@ class DaGetEncoder(nn.Module):
         input_projection (nn.Linear): Joint feature to hidden-state projection.
         layers (nn.ModuleList): Independently parameterized transformer layers.
         final_norm (nn.LayerNorm): Output normalization.
+        physics_tokenizers (nn.ModuleDict | None): Physics feature tokenizers,
+            including ``root`` with a root token.
+        physics_mask_embeddings (nn.ParameterDict | None): Mask tokens of masked
+            physics modeling.
+        modulation (DaGetMorphologyModulation | None): Contextual modulation.
     """
 
     def __init__(self, config: DaGetConfig) -> None:
@@ -666,6 +837,8 @@ class DaGetEncoder(nn.Module):
         )
         self.final_norm = nn.LayerNorm(config.hidden_size)
         self.physics_tokenizers = None
+        self.physics_mask_embeddings = None
+        self.modulation = None
         if physics_layers:
             mlp_size = config.physics_tokenizer_hidden_size or config.hidden_size
             sizes = {
@@ -673,12 +846,23 @@ class DaGetEncoder(nn.Module):
                 "actuator": config.actuator_feature_size,
                 "dynamics": config.dynamics_feature_size,
             }
-            self.physics_tokenizers = nn.ModuleDict(
-                {
-                    group: PhysicsFeatureTokenizer(group, sizes[group], config.hidden_size, mlp_size)
-                    for group in PHYSICS_GROUPS
-                }
-            )
+            tokenizers = {
+                group: PhysicsFeatureTokenizer(
+                    group, sizes[group], config.hidden_size, mlp_size, config.dimensionless_physics
+                )
+                for group in PHYSICS_GROUPS
+            }
+            if config.use_root_token:
+                tokenizers["root"] = PhysicsFeatureTokenizer(
+                    "root", config.root_feature_size, config.hidden_size, mlp_size
+                )
+            self.physics_tokenizers = nn.ModuleDict(tokenizers)
+            if config.physics_masking:
+                self.physics_mask_embeddings = nn.ParameterDict(
+                    {group: nn.Parameter(torch.zeros(config.hidden_size)) for group in MASKABLE_GROUPS}
+                )
+            if config.use_morphology_modulation:
+                self.modulation = DaGetMorphologyModulation(config)
 
     def _physics_attention_layers(self) -> list[PhysicsCrossAttention]:
         """Return the Physics Cross Attention blocks in layer order."""
@@ -694,6 +878,10 @@ class DaGetEncoder(nn.Module):
             *self.physics_tokenizers["rigid_body"].parameters(),
             *self.physics_tokenizers["actuator"].parameters(),
         ]
+        if "root" in self.physics_tokenizers:
+            parameters += list(self.physics_tokenizers["root"].parameters())
+        if self.physics_mask_embeddings is not None:
+            parameters += list(self.physics_mask_embeddings.parameters())
         for attention in self._physics_attention_layers():
             parameters += attention.memory_parameters()
         return tuple(parameter._version for parameter in parameters)
@@ -706,11 +894,20 @@ class DaGetEncoder(nn.Module):
             raise ValueError(f"{name} must be floating [batch, joints, {size}]")
         return features
 
+    def _check_root_features(self, root_features: torch.Tensor | None, batch: int) -> torch.Tensor:
+        """Validate root features ``[batch, F_root]``."""
+        size = self.config.root_feature_size
+        if root_features is None or root_features.shape != (batch, size) or not root_features.is_floating_point():
+            raise ValueError(f"root_features must be floating [batch, {size}] (model.physics.root_features)")
+        return root_features
+
     def build_physics_memory(
         self,
         rigid_body_features: torch.Tensor,
         actuator_features: torch.Tensor,
         joint_mask: torch.Tensor | None = None,
+        root_features: torch.Tensor | None = None,
+        physics_token_mask: dict[str, torch.Tensor] | None = None,
     ) -> PhysicsMemory:
         """Precompute the embodiment-only part of Physics Cross Attention.
 
@@ -723,6 +920,11 @@ class DaGetEncoder(nn.Module):
             rigid_body_features (torch.Tensor): ``[B, J, F_rb]``.
             actuator_features (torch.Tensor): ``[B, J, F_act]``.
             joint_mask (torch.Tensor | None): Bool ``[B, J]``; defaults to all.
+            root_features (torch.Tensor | None): ``[B, F_root]``; required with a
+                root token or dimensionless physics.
+            physics_token_mask (dict | None): Bool ``[B, J]`` per maskable group
+                (``rigid_body``, ``actuator``): tokens replaced by the learned
+                mask embedding (masked physics modeling).
 
         Returns:
             PhysicsMemory: Cached keys and values for every physics layer.
@@ -743,20 +945,42 @@ class DaGetEncoder(nn.Module):
         self._check_physics_features(
             "actuator_features", actuator_features, self.config.actuator_feature_size, batch, joints
         )
-        tokens = torch.cat(
-            (
-                self.physics_tokenizers["rigid_body"](rigid_body_features),
-                self.physics_tokenizers["actuator"](actuator_features),
-            ),
-            dim=1,
-        )
-        tokens = tokens.masked_fill(~joint_mask.repeat(1, 2)[..., None], 0)
+        units = {group: None for group in PHYSICS_GROUPS}
+        if self.config.needs_root_features:
+            root_features = self._check_root_features(root_features, batch)
+        if self.config.dimensionless_physics:
+            prismatic = rigid_body_features[..., PRISMATIC_INDEX] > 0.5
+            mass, length = root_features[:, TOTAL_MASS_INDEX], root_features[:, LENGTH_INDEX]
+            units = {group: physics_units(group, mass, length, prismatic) for group in PHYSICS_GROUPS}
+        group_tokens = {
+            "rigid_body": self.physics_tokenizers["rigid_body"](rigid_body_features, units["rigid_body"]),
+            "actuator": self.physics_tokenizers["actuator"](actuator_features, units["actuator"]),
+        }
+        if physics_token_mask:
+            if self.physics_mask_embeddings is None:
+                raise ValueError("physics_token_mask needs DaGetConfig.physics_masking")
+            for group, mask in physics_token_mask.items():
+                embedding = self.physics_mask_embeddings[group].to(group_tokens[group].dtype)
+                group_tokens[group] = torch.where(mask[..., None], embedding, group_tokens[group])
+        pieces = [group_tokens["rigid_body"], group_tokens["actuator"]]
+        if "root" in self.physics_tokenizers:
+            pieces.append(self.physics_tokenizers["root"](root_features[:, None, :]))
+        tokens = torch.cat(pieces, dim=1)
+        token_mask = joint_mask.repeat(1, 2)
+        if len(pieces) == 3:
+            token_mask = torch.cat((token_mask, torch.ones((batch, 1), dtype=torch.bool, device=joint_mask.device)), dim=1)
+        tokens = tokens.masked_fill(~token_mask[..., None], 0)
         keys, values = [], []
         for attention in self._physics_attention_layers():
             key, value = attention.project_memory(tokens)
             keys.append(key)
             values.append(value)
-        return PhysicsMemory(tuple(keys), tuple(values), joint_mask, self._static_physics_versions())
+        context = None
+        if self.modulation is not None:
+            context = (group_tokens["rigid_body"] + group_tokens["actuator"]).masked_fill(~joint_mask[..., None], 0)
+        return PhysicsMemory(
+            tuple(keys), tuple(values), joint_mask, self._static_physics_versions(), units["dynamics"], context
+        )
 
     def forward(
         self,
@@ -774,6 +998,8 @@ class DaGetEncoder(nn.Module):
         dynamics_features: torch.Tensor | None = None,
         physics_memory: PhysicsMemory | None = None,
         validate_inputs: bool = True,
+        root_features: torch.Tensor | None = None,
+        physics_token_mask: dict[str, torch.Tensor] | None = None,
     ) -> torch.Tensor:
         """Encode joint features at the current configuration q.
 
@@ -809,12 +1035,17 @@ class DaGetEncoder(nn.Module):
                 dynamics features at time t. Required by Physics Cross Attention.
             physics_memory (PhysicsMemory | None): Cached embodiment-only physics
                 keys and values from ``build_physics_memory``. Replaces
-                rigid_body_features and actuator_features.
+                rigid_body_features, actuator_features and root_features.
             validate_inputs (bool): Check input values: masks with a valid
                 token, a well-formed mass matrix, and the memory's mask. Shapes
                 are always checked. Turn it off only for inputs checked before,
                 as ``DaGetBfmPolicy`` does: each value check waits for the
                 device, which a CUDA Graph cannot capture.
+            root_features (torch.Tensor | None): ``[batch, 13]`` root features
+                (``model.physics.root_features``); required with a root token or
+                dimensionless physics unless ``physics_memory`` is given.
+            physics_token_mask (dict | None): Masked physics tokens, see
+                ``build_physics_memory``.
 
         Returns:
             torch.Tensor: Joint representations of shape
@@ -888,7 +1119,7 @@ class DaGetEncoder(nn.Module):
             )
             if physics_memory is None:
                 physics_memory = self.build_physics_memory(
-                    rigid_body_features, actuator_features, joint_mask
+                    rigid_body_features, actuator_features, joint_mask, root_features, physics_token_mask
                 )
             elif physics_memory.parameter_versions != self._static_physics_versions():
                 raise ValueError(
@@ -898,7 +1129,7 @@ class DaGetEncoder(nn.Module):
                 validate_inputs and not torch.equal(physics_memory.joint_mask, joint_mask)
             ):
                 raise ValueError("physics_memory was built for a different joint_mask")
-            dynamics_tokens = self.physics_tokenizers["dynamics"](dynamics_features)
+            dynamics_tokens = self.physics_tokenizers["dynamics"](dynamics_features, physics_memory.dynamics_units)
             dynamics_tokens = dynamics_tokens.masked_fill(~joint_mask[..., None], 0)
         elif physics_memory is not None or dynamics_features is not None:
             raise ValueError("physics inputs given but Physics Cross Attention is disabled")
@@ -908,9 +1139,13 @@ class DaGetEncoder(nn.Module):
         if self.input_norm is not None:
             input_values = self.input_norm(input_values)
         hidden_states = self.input_projection(input_values)
+        context = None
+        if self.modulation is not None:
+            context = physics_memory.context
+            hidden_states = hidden_states + self.modulation.input_correction(context, input_values)
         hidden_states = hidden_states.masked_fill(~joint_mask.unsqueeze(-1), 0)
         physics_index = 0
-        for layer in self.layers:
+        for index, layer in enumerate(self.layers):
             if layer.physics_attention is not None:
                 physics = (
                     physics_memory.keys[physics_index],
@@ -927,5 +1162,6 @@ class DaGetEncoder(nn.Module):
                 context_mask,
                 physics if layer.physics_attention is not None else None,
                 mass_normalized=True,
+                extra_bias=None if context is None else self.modulation.attention_bias(context, index, joint_mask),
             )
         return self.final_norm(hidden_states).masked_fill(~joint_mask.unsqueeze(-1), 0)

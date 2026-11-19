@@ -65,8 +65,11 @@ its feet. Mixing ground data with recorded data and harness or flight data
 covers stance, contact switching, and free motion.
 
 What it does not do: walk. The motions are standing, crouching, weight
-shifting, partial foot lift, and recovering from pushes, not gaits; recorded
-datasets provide locomotion.
+shifting, partial foot lift, and recovering from pushes, not gaits. Gaits would
+need a locomotion controller for every robot, which is what the behavior
+foundation model learns. Recorded datasets provide locomotion kinematics, and
+during RL the [physics replay](bfm.md#physics-losses-during-rl) records exact
+torque and acceleration labels on the policy's own gaits.
 
 ## Writing data configs automatically
 

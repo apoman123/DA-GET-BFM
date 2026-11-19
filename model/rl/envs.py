@@ -6,8 +6,15 @@ termination, starts from prioritized motion frames with 30% lying-down starts, d
 randomization (nominal pose, pushes; simulators add friction, mass, center of mass), and
 the auxiliary rewards. On top of BFM-Zero, targets pass through ``model.rl.actions.ActionMap``
 (the same code the robot runs), which keeps the requested effort inside each actuator's
-torque-speed envelope, and three torque penalties are added (``model.rl.actions``). ``MujocoEmbodimentEnv`` runs on CPU from an embodiment graph, for
-tests and small checks. Training at scale uses ``model.rl.isaac_env``.
+torque-speed envelope, and three torque penalties are added (``model.rl.actions``).
+
+The first ``EnvConfig.label_worlds`` worlds of a robot also record exact dynamics labels
+for the physics replay (``model.rl.physics_replay``): at the start of every control step,
+after pushes, the state, the simulator's applied joint torque and the joint and base
+accelerations it produces at that same instant (``StepStart``). These worlds keep the
+nominal link masses and base center of mass, so the labels belong to the robot their
+tokens describe. ``MujocoEmbodimentEnv`` runs on CPU from an embodiment graph, for tests
+and small checks. Training at scale uses ``model.rl.isaac_env``.
 """
 
 from __future__ import annotations
@@ -65,6 +72,9 @@ class EnvConfig:
             at 200 Hz).
         clip_to_envelope (bool): Move targets so the requested effort stays inside the
             torque-speed envelope (``ActionMap``); the robot must do the same.
+        label_worlds (int): The first worlds that record exact start-of-step dynamics
+            labels (``EnvStep.start``) and skip link mass and base center-of-mass
+            randomization (friction and the rest stay randomized). 0 turns it off.
         thermal_time_constant (float): Time constant in s of the load average behind
             ``penalty_torque_continuous``.
         nominal_pose (dict[str, float]): Joint name to nominal position; others are 0.
@@ -84,11 +94,40 @@ class EnvConfig:
     max_tilt_degrees: float = 70.0
     armature: float = 0.01
     clip_to_envelope: bool = True
+    label_worlds: int = 0
     thermal_time_constant: float = 1.0
     nominal_pose: dict[str, float] = field(default_factory=dict)
     geometry: ContactGeometry = field(default_factory=ContactGeometry)
     randomization: DomainRandomization = field(default_factory=DomainRandomization)
     seed: int = 0
+
+
+@dataclass
+class StepStart:
+    """Exact dynamics at the start of a control step, for the first ``K`` worlds.
+
+    Everything belongs to one instant: the state after this step's push, with this
+    step's targets applied. The torque is what the simulator applies over the first
+    physics step, and the accelerations are what it produces there (contacts, joint
+    damping, friction and limits included), so they are exact labels for that state.
+
+    Attributes:
+        state (RobotState): ``K`` states (after pushes).
+        torque (torch.Tensor): ``[K, J]`` applied joint torque.
+        acceleration (torch.Tensor): ``[K, J]`` joint accelerations.
+        base_acceleration (torch.Tensor): ``[K, 6]`` classical base linear acceleration,
+            then base angular acceleration, both in the base frame (zeros for a fixed base).
+        contacts (torch.Tensor | None): Bool ``[K, C]`` foot contacts.
+        pushed (torch.Tensor): Bool ``[K]``: the velocity was changed by a push at this
+            step, so the previous step's end state is not this state.
+    """
+
+    state: RobotState
+    torque: torch.Tensor
+    acceleration: torch.Tensor
+    base_acceleration: torch.Tensor
+    contacts: torch.Tensor | None
+    pushed: torch.Tensor
 
 
 @dataclass
@@ -106,6 +145,10 @@ class EnvStep:
         contacts (torch.Tensor | None): Bool ``[N, C]`` contact of each of the robot's
             ``contact_links`` with anything, in the new state.
         metrics (dict[str, torch.Tensor]): ``[N]`` values to log (torque-limit use).
+        start (StepStart | None): Exact labels at the start of this step for the first
+            ``label_worlds`` worlds; None when off or when the simulator cannot give them.
+        pushed (torch.Tensor | None): Bool ``[N]``: a push changed the velocity at the start
+            of this step, so the state before the step is not where the physics started.
     """
 
     state: RobotState
@@ -116,6 +159,8 @@ class EnvStep:
     aux_rewards: dict[str, torch.Tensor]
     contacts: torch.Tensor | None = None
     metrics: dict[str, torch.Tensor] = field(default_factory=dict)
+    start: StepStart | None = None
+    pushed: torch.Tensor | None = None
 
 
 class EmbodimentEnv:
@@ -123,7 +168,8 @@ class EmbodimentEnv:
 
     Simulators implement ``_write_state``, ``_apply_targets``, ``_push``, ``read_state``,
     ``_torque``, ``_diverged``, ``_slippage``, ``_undesired_contact``, ``_feet_orientation``
-    and ``foot_contacts``.
+    and ``foot_contacts``. Simulators that can give exact start-of-step labels set
+    ``exact_labels`` and fill ``self._start`` during the physics advance.
     Stepping has three phases so that several robots can share one simulation:
     ``prepare`` (all robots), one physics advance, ``collect`` (all robots).
 
@@ -160,6 +206,19 @@ class EmbodimentEnv:
         self._actions = np.zeros((self.num_envs, self.joints))
         self.action_map = ActionMap(record, self.world_nominal, config.action_scale, config.clip_to_envelope)
         self.torque_monitor = TorqueMonitor(record, self.num_envs, config.control_dt, config.thermal_time_constant)
+        self.label_worlds = min(max(int(config.label_worlds), 0), self.num_envs)
+        self._pushed = np.zeros(self.num_envs, dtype=bool)
+        self._start: StepStart | None = None
+
+    @property
+    def exact_labels(self) -> bool:
+        """Return whether this simulator gives exact start-of-step labels."""
+        return False
+
+    @property
+    def capturing(self) -> bool:
+        """Return whether this step records start-of-step labels."""
+        return self.exact_labels and self.label_worlds > 0
 
     @property
     def joint_armature(self) -> np.ndarray:
@@ -235,6 +294,8 @@ class EmbodimentEnv:
         self.torque_monitor.before_step(raw, q, qd)
         self._actions = actions
         self._apply_targets(self._targets)
+        self._pushed[:] = False
+        self._start = None
         settings = self.config.randomization
         if self.floating and settings.enabled and not self.evaluating:
             elapsed = self.steps * self.config.control_dt
@@ -242,6 +303,7 @@ class EmbodimentEnv:
                 linear = self.rng.uniform(-settings.push_linear_velocity, settings.push_linear_velocity, 2)
                 angular = self.rng.uniform(-settings.push_angular_velocity, settings.push_angular_velocity, 3)
                 self._push(int(index), linear, angular)
+                self._pushed[index] = True
                 self.next_push[index] = elapsed[index] + self.rng.uniform(*settings.push_interval)
 
     def fallen(self, state: RobotState) -> np.ndarray:
@@ -282,7 +344,7 @@ class EmbodimentEnv:
         self.previous_action = self._actions.copy()
         return EnvStep(
             state, torque, torch.from_numpy(self._targets.copy()), torch.from_numpy(terminated), torch.from_numpy(truncated),
-            aux_rewards, self.foot_contacts(), metrics,
+            aux_rewards, self.foot_contacts(), metrics, self._start, torch.from_numpy(self._pushed.copy()),
         )
 
     def _write_state(self, index: int, frame: dict[str, np.ndarray] | None) -> None:
@@ -348,7 +410,7 @@ class MujocoEmbodimentEnv(EmbodimentEnv):
         )
         self.base_model = mujoco.MjModel.from_xml_string(xml)
         self._resolve_indices()
-        self.models = [self._randomized_model() for _ in range(self.num_envs)]
+        self.models = [self._randomized_model(index) for index in range(self.num_envs)]
         self.datas = [mujoco.MjData(model) for model in self.models]
         for model, data in zip(self.models, self.datas):
             mujoco.mj_setConst(model, data)
@@ -376,13 +438,18 @@ class MujocoEmbodimentEnv(EmbodimentEnv):
         surface = self.record.surface_contacts if self.record.surface_contacts is not None else len(self.record.contact_links) <= 2
         self.flat_feet = bool(surface and self.record.contact_links)
 
-    def _randomized_model(self):
-        """Return a copy of the model with randomized friction, link masses and base center of mass."""
+    def _randomized_model(self, index: int):
+        """Return a copy of the model with randomized friction, link masses and base center of mass.
+
+        Label worlds keep the nominal masses and center of mass (``EnvConfig.label_worlds``).
+        """
         model = copy.copy(self.base_model)
         settings = self.config.randomization
         if not settings.enabled:
             return model
         model.geom_friction[:, 0] = self.rng.uniform(*settings.friction)
+        if index < self.label_worlds:
+            return model
         scale = self.rng.uniform(*settings.link_mass_scale, size=model.nbody)
         scale[0] = 1.0
         model.body_mass[:] = model.body_mass * scale
@@ -437,17 +504,48 @@ class MujocoEmbodimentEnv(EmbodimentEnv):
         data.qvel[:2] += linear
         data.qvel[3:6] += angular
 
-    def _physics(self, index: int) -> None:
+    @property
+    def exact_labels(self) -> bool:
+        """MuJoCo gives the applied torque and the accelerations of one instant (``mj_forward``)."""
+        return True
+
+    def _physics(self, index: int) -> tuple | None:
+        """Step one world through a control step; return its start-of-step labels if it records them."""
+        model, data = self.models[index], self.datas[index]
+        labels = None
+        if index < self.label_worlds and self.capturing:
+            # The first physics step starts from this state with these targets: its forces
+            # and accelerations, computed here, are the labels of the state.
+            self.mujoco.mj_forward(model, data)
+            base = np.zeros(6)
+            if self.floating:
+                rotation = data.xmat[1].reshape(3, 3)
+                base = np.concatenate((rotation.T @ data.qacc[0:3], data.qacc[3:6]))
+            labels = (
+                self._read_world(index), data.qfrc_actuator[self.dof_index].copy(), data.qacc[self.dof_index].copy(),
+                base, self._world_contacts(data),
+            )
         for _ in range(self.substeps):
-            self.mujoco.mj_step(self.models[index], self.datas[index])
+            self.mujoco.mj_step(model, data)
+        return labels
 
     def advance(self) -> None:
         """Run the physics of one control step."""
         if self.pool is None:
-            for index in range(self.num_envs):
-                self._physics(index)
+            labels = [self._physics(index) for index in range(self.num_envs)]
         else:
-            list(self.pool.map(self._physics, range(self.num_envs)))
+            labels = list(self.pool.map(self._physics, range(self.num_envs)))
+        if self.capturing:
+            rows = labels[: self.label_worlds]
+            state = RobotState(*(torch.from_numpy(np.stack([row[0][k] for row in rows])) for k in range(6)))
+            self._start = StepStart(
+                state,
+                torch.from_numpy(np.stack([row[1] for row in rows])),
+                torch.from_numpy(np.stack([row[2] for row in rows])),
+                torch.from_numpy(np.stack([row[3] for row in rows])),
+                torch.from_numpy(np.stack([row[4] for row in rows])) if self.record.contact_links else None,
+                torch.from_numpy(self._pushed[: self.label_worlds].copy()),
+            )
 
     def step(self, actions: np.ndarray) -> EnvStep:
         """Apply actions and advance one control step."""
@@ -489,14 +587,17 @@ class MujocoEmbodimentEnv(EmbodimentEnv):
                 totals[index] += float(np.linalg.norm(velocity[3:]))
         return totals
 
+    def _world_contacts(self, data) -> np.ndarray:
+        """Return bool ``[C]``: which contact links' feet of one world touch the floor."""
+        contacts = np.zeros(len(self.record.contact_links), dtype=bool)
+        for geom in self._contact_geoms(data):
+            if geom in self.foot_index:
+                contacts[self.foot_index[geom]] = True
+        return contacts
+
     def foot_contacts(self) -> torch.Tensor:
         """Return bool ``[N, C]``: which contact links' feet touch the floor."""
-        contacts = np.zeros((self.num_envs, len(self.record.contact_links)), dtype=bool)
-        for index, data in enumerate(self.datas):
-            for geom in self._contact_geoms(data):
-                if geom in self.foot_index:
-                    contacts[index, self.foot_index[geom]] = True
-        return torch.from_numpy(contacts)
+        return torch.from_numpy(np.stack([self._world_contacts(data) for data in self.datas]))
 
     def _undesired_contact(self) -> np.ndarray:
         """Return which worlds have a non-foot link on the floor."""

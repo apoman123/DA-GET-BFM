@@ -42,7 +42,7 @@ DA-GET-BFM/
 │   │   ├── buffers.py         # per-robot replay buffer and expert motions
 │   │   ├── agent.py           # DaGetFbCprAgent: D, F, B, critics, encoder and actor updates
 │   │   ├── evaluation.py      # tracking, goal and getting-up tasks, EMD, motion priorities
-│   │   ├── physics_replay.py  # physics-loss episodes from RL rollouts (no torque labels)
+│   │   ├── physics_replay.py  # physics-loss episodes from RL rollouts (exact labels from label worlds)
 │   │   ├── deployment.py      # DaGetBfmPolicy: 50 Hz runner with CUDA Graphs
 │   │   └── trainer.py         # online training loop, checkpoints, TensorBoard
 │   ├── transformer.py         # attention and cross-attention blocks
@@ -88,7 +88,7 @@ uv sync --all-extras
 uv run pytest
 ```
 
-The suite has 176 tests (the MuJoCo and HDF5 tests are skipped without the
+The suite has 182 tests (the MuJoCo and HDF5 tests are skipped without the
 `sim` and `validation` extras, and the CUDA Graph test without a GPU):
 
 - `test_embodiment.py`: URDF graphs, features, kinematics, mass matrix,
@@ -162,7 +162,13 @@ The suite has 176 tests (the MuJoCo and HDF5 tests are skipped without the
   - the targets sent stay inside the torque envelope, and `ActionMap` on the
     robot gives the same targets as the environment;
   - the physics replay turns rollout chunks into episodes with response, effect,
-    motor and FK labels and no torque labels;
+    motor and FK labels and no torque labels when the simulator gives no
+    start-of-step labels;
+  - label worlds: in flight, MuJoCo's start-of-step torque and accelerations
+    satisfy the graph's floating-base dynamics to 1e-6, and the start state is the
+    previous end state; label worlds keep nominal masses; the replay builds exact
+    episodes (B and C labels) from them and kinematic ones from the other worlds,
+    and a push ends the right transition in each;
   - real and synthetic sources sharing a robot, the robot graph carrying the
     simulators' rotor inertia, and the training script on two robots (with the
     physics replay and the torque metrics).
@@ -172,7 +178,9 @@ The suite has 176 tests (the MuJoCo and HDF5 tests are skipped without the
   with a GPU).
 - `test_isaac_env.py`: the Isaac Lab adapter against a fake of its API: joint and
   body orders, quaternions and frames, contact penalties, randomization, batched writes,
-  and stepping several robots. It does not run Isaac Lab.
+  stepping several robots, start-of-step labels from the first physics step with
+  explicit actuators (and none with implicit ones), and nominal masses in label
+  worlds. It does not run Isaac Lab.
 - `test_pretraining.py`:
   - both data sources and caching;
   - collation and masks;
@@ -277,11 +285,14 @@ a pipeline check, not a conclusive ablation.
 - **Torque limits are enforced at the control rate.** `ActionMap` clips the
   request at each control step; inside a step only the simulator's constant peak
   clip applies. The torque penalty weights are untuned.
-- **Simulated ground contact covers standing, not walking.** The MuJoCo source
+- **The offline ground simulation stands, it does not walk.** The MuJoCo source
   produces stance, crouching, weight shifting, partial foot lift, and push
-  recovery, not gaits. Bipeds need the recorded spotter. Feet are spheres
-  from `contact_geometry`, and only feet collide, so falls end the episode.
-  Locomotion comes from recorded datasets.
+  recovery, not gaits; gaits would need a locomotion controller per robot.
+  Bipeds need the recorded spotter. Feet are spheres from `contact_geometry`,
+  and only feet collide, so falls end the episode. Locomotion kinematics come
+  from recorded datasets; exact dynamics labels on gaits come from the RL
+  physics replay's label worlds, which in Isaac Lab need
+  `"explicit_actuators": true` (unverified on a real Isaac Lab).
 - **Automatic configs are guesses.** The URDF analysis and column matching
   print their reasoning; check them, especially for unusual robots, and
   replace rule-of-thumb gains and propeller coefficients with measured ones.

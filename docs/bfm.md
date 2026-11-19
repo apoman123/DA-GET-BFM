@@ -252,6 +252,7 @@ These keys of a robot's first expert source configure its worlds:
 | `ros_package_paths` | none | Isaac Lab: `[{"name": ..., "path": ...}]` for `package://` meshes |
 | `undesired_contact_links` | every link but the feet | Isaac Lab: regexes of penalized links (BFM-Zero's G1: pelvis, shoulders, hips) |
 | `self_collisions` | true | Isaac Lab: enable self-collisions |
+| `explicit_actuators` | false | Isaac Lab: compute the PD torque in the adapter (`IdealPDActuatorCfg`) so the physics replay gets exact torque labels ([details](#physics-losses-during-rl)); check stability at your physics step first |
 | `contact_geometry` | sphere of 2 cm | MuJoCo only: foot radius, `sole_offset`, `foot_size` |
 
 If any motion of a robot lacks base height or linear velocity, the state tokens hide
@@ -384,25 +385,64 @@ in `encoder/`, loadable with `from_pretrained`.
 
 ### Physics losses during RL
 
-Offline physics batches cover the states their sources visit. The **physics replay**
-([`model/rl/physics_replay.py`](../model/rl/physics_replay.py)) adds the states the
-policy visits. For `physics_replay_envs` environments per robot it records contiguous
-chunks of `physics_replay_length` control steps: joint state, base twist, gravity, the
-targets sent, and the simulator's foot contacts. Each chunk becomes a processed episode
-(`process_episode`):
+Offline physics batches cover the states their sources visit. The simulated ground
+source only stands, crouches, shifts its weight and recovers from pushes, because
+generating gaits would need a locomotion controller for every robot, and that
+controller is what this model is meant to learn. The **physics replay**
+([`model/rl/physics_replay.py`](../model/rl/physics_replay.py)) closes the gap with the
+states the policy itself visits (walking, running, getting up), with exact labels.
 
-| Task | Label from the rollout |
-|---|---|
-| A. FK | Exact kinematics |
-| R, R⁻¹ | `G(q) δτ` with the **simulator's contact set** (no detection needed) |
-| D | The sent targets (PD request computed) and random proposals |
-| E | Next frame, conditioned on the sent target |
-| B, C | **Not used**: a control step spans four physics steps whose PD torque changes with the state, so the step's torque and the recorded state change are not one instant's pair. Exact B and C labels come from the offline simulated sources, which record both together |
+**What is recorded.** The first `physics_replay_envs` environments of each robot are its
+**label worlds** (`EnvConfig.label_worlds`). For them, the environment reports at the
+start of every control step, after that step's push and with that step's targets applied
+(`model.rl.envs.StepStart`):
 
-Labels use the RL robot's graph (nominal inertia plus rotor inertia). With mass
-randomization on, the simulated robot differs from it by a few percent, the same
-mismatch a real robot has against its URDF, and the same convention as the policy's
-tokens (nominal parameters).
+- the state: joint positions and velocities, gravity in the base frame, base twist;
+- the joint torque the simulator applies over the **first physics step**;
+- the joint accelerations and base accelerations (classical linear, then angular, base
+  frame) it produces at that same instant, contacts, joint damping, friction and limits
+  included;
+- the foot contacts, and whether a push changed the velocity at this step.
+
+Torque and acceleration therefore belong to one instant. The earlier design recorded the
+state at the end of each control step and the control-rate torque; over the four
+physics steps of a control step the PD torque changes with the state, so that pair was
+not one instant's, and B and C were left out. Taking both from the start of the step
+removes the mismatch without recording every physics step.
+
+| Simulator | How the labels are taken | Exact |
+|---|---|---|
+| MuJoCo (`MujocoEmbodimentEnv`) | `mj_forward` before the first `mj_step`: `qfrc_actuator` and `qacc` of the state | yes; checked against the graph's floating-base dynamics to 1e-6 in flight (`test_label_worlds_have_exact_start_labels_in_flight`) |
+| Isaac Lab, `"explicit_actuators": true` | `IdealPDActuatorCfg`: the adapter computes the PD torque, PhysX applies it for the first physics step; acceleration is `(v₁ − v₀)/physics_dt` of that step, base terms rotated into the start base frame | the torque is exact; the acceleration is PhysX's velocity change with that torque, equal to the instantaneous acceleration up to PhysX's integrator and solver tolerance. Unverified on a real Isaac Lab (no GPU here) |
+| Isaac Lab, default implicit actuators | none: PhysX solves the PD law internally, and Isaac Lab's reported `applied_torque` is the explicit formula kept as telemetry, not the torque PhysX applied | — (kinematic episodes; the trainer prints a note) |
+
+Label worlds keep the **nominal link masses and base center of mass** (friction, pushes
+and the nominal-pose offset stay randomized), so their labels belong to the robot their
+physics tokens describe. The other worlds keep full randomization.
+
+**Labels of a replay episode.** Each chunk of `physics_replay_length` control steps
+becomes a processed episode (`process_episode`):
+
+| Task | Label world (exact episode) | Other worlds or implicit Isaac Lab (kinematic episode) |
+|---|---|---|
+| A. FK | exact kinematics | exact kinematics |
+| B. Forward dynamics | **simulator's `q̈` (and base acceleration) for the applied torque**, torque source `exact`, weight 1 | — |
+| C. Inverse dynamics | **simulator's applied torque**, projected onto the motion-determined part when feet are down | — |
+| R, R⁻¹ | `G(q) δτ` with the simulator's contact set | same |
+| D | sent targets (PD request computed) and random proposals | same |
+| E | next frame, conditioned on the sent target | same |
+
+A frame of an exact episode is the start of a step, so a push at step `t+1` ends the
+transition of frame `t`. A frame of a kinematic episode is the end of the previous step,
+so a push at step `t` ends frame `t`'s transition. Either way the interrupted transition
+gets no effect label (`transition_valid`), since the push is not part of the dynamics.
+An exact chunk has no final end-of-chunk frame, because that state has no labels yet.
+
+What remains approximate: MuJoCo's contacts are slightly soft, which does not affect B
+and C (they are MuJoCo's own forces and accelerations) but makes MuJoCo differ from the
+rigid-contact response of R by about 20% with default contacts
+([details](dynamics.md#assumptions-and-checks)). Joint-limit forces enter the
+accelerations without a feature that describes them, as in the offline simulated data.
 
 A share `physics_replay_fraction` (default 0.5) of the physics batches comes from the
 replay once it has an episode; up to two queued chunks are processed before each update
@@ -412,7 +452,7 @@ round, and `physics_replay_episodes` (default 32) episodes per robot are kept.
 |---|---|---|
 | `--physics_replay` | true | Record rollouts for the physics losses |
 | `--physics_replay_fraction` | 0.5 | Share of physics batches from the replay |
-| `--physics_replay_envs` | 4 | Environments recorded per robot |
+| `--physics_replay_envs` | 4 | Environments recorded per robot; they become the label worlds |
 | `--physics_replay_length` | 200 | Control steps per recorded episode |
 | `--physics_replay_episodes` | 32 | Episodes kept per robot |
 | `--clip_to_envelope` | true | `ActionMap` keeps the request inside the torque envelope |
@@ -467,6 +507,7 @@ python scripts/train_bfm.py --data_config configs/rl/go1_h1_ground.json \
 | `train/aux_rew/*` | Each unscaled auxiliary reward, including `penalty_torque_limit`, `penalty_torque_continuous`, `penalty_power` |
 | `rollout/<robot>/torque_request_over_envelope`, `torque_at_envelope`, `torque_rms_over_continuous`, `torque_load_over_continuous` | Torque-limit use ([details](#actuator-torque-limits)) |
 | `physics_replay/episodes` | Rollout episodes available to the physics losses |
+| `physics_replay/exact_episodes` | Those with exact torque labels (label worlds of MuJoCo, or Isaac Lab with explicit actuators) |
 | `train/frames_per_second`, `gradient_steps` | Throughput |
 | `rollout/<robot>/fallen_fraction`, `episode_length` | How much of the time each robot is down |
 | `eval/<robot>/tracking_mpjpe`, `tracking_emd`, `tracking_fallen` | Tracking: the paper's `mean_t ‖q_t − q_ref‖`, the EMD behind priorities, and worlds fallen at the end |

@@ -55,7 +55,8 @@ or `none`.
 | Recorded data with a torque sensor (`torque_key`) | ✓ | weight `measured_torque_weight` (default 0) | ✓ | ✓ | ✓ |
 | Recorded data with commands (`action_key`) | ✓ | — | ✓ | ✓ commands (PD request computed) and proposals | ✓ conditioned on the command |
 | Recorded motion only (mocap, retargeted) | ✓ | — | ✓ | ✓ proposals | ✓ unconditioned (next frame from the state) |
-| RL rollouts ([physics replay](bfm.md#physics-losses-during-rl)) | ✓ | — | ✓ (simulator contacts) | ✓ targets and proposals | ✓ conditioned on the target |
+| RL rollouts, label worlds ([physics replay](bfm.md#physics-losses-during-rl)) | ✓ | ✓ start-of-step torque and acceleration, weight 1 (MuJoCo; Isaac Lab with explicit actuators) | ✓ (simulator contacts) | ✓ targets and proposals | ✓ conditioned on the target |
+| RL rollouts, other worlds or implicit Isaac Lab | ✓ | — | ✓ (simulator contacts) | ✓ targets and proposals | ✓ conditioned on the target |
 
 R and R⁻¹ need to know which feet are down and what holds the base: frames within
 `contact_margin_steps` of a contact change, frames whose detected contacts leave

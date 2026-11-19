@@ -1,26 +1,33 @@
-"""Physics-loss data from the policy's own rollouts, labelled without any torque.
+"""Physics-loss data from the policy's own rollouts, with exact simulator labels.
 
 During RL the encoder keeps training on the physics auxiliary losses. Offline data covers
-the states its sources visit; ``PhysicsReplay`` adds the states the policy itself visits.
-It records contiguous chunks of a few environments per robot (joint state, base twist,
-gravity, the commanded targets, and the simulator's foot contacts) and turns each chunk
-into a processed episode with ``model.training.episodes.process_episode``:
+the states its sources visit; ``PhysicsReplay`` adds the states the policy itself visits,
+such as walking, running and getting up, which the offline simulated sources (standing
+and push recovery) do not reach. It records contiguous chunks of a few environments per
+robot and turns each chunk into a processed episode with
+``model.training.episodes.process_episode``.
 
-* contacts come from the simulator, so the contact-constrained response ``G(q)`` (tasks R
-  and R^-1) is labelled with the true contact set;
-* the commanded targets give exact action features, so the action-effect task E is
-  conditioned on what was sent and the motor task D sees the real requests;
-* FK and proposal variants of D come for free.
+Two kinds of chunks, chosen per step by what the environment reports:
 
-The simulator's applied torque is not used as an FD/ID label here. A control step spans
-several physics steps whose PD torque changes with the state, while the recorded state is
-the one at the end of the step, so torque and acceleration of one record do not belong to
-one instant. Exact torque labels come from the offline simulated sources, which record
-both at the same instant by construction.
+* **Exact** (``EnvStep.start`` present; MuJoCo, or Isaac Lab with explicit actuators). The
+  environment's label worlds (``EnvConfig.label_worlds``) report, at the start of every
+  control step and after its push, the state, the torque the simulator applies over the
+  first physics step and the joint and base accelerations it produces there
+  (``model.rl.envs.StepStart``). Torque and acceleration belong to one instant, so the
+  episode has torque source ``exact`` and gets every label: FK, forward dynamics (B),
+  inverse dynamics (C, projected onto the motion-determined part when feet are down), the
+  response tasks (R, R^-1), the motor task (D) and the action effect (E). Label worlds keep
+  the nominal link masses and base center of mass, so the labels belong to the robot the
+  tokens describe.
+* **Kinematic** (no ``EnvStep.start``; Isaac Lab with implicit actuators, or worlds beyond
+  ``label_worlds``). Each frame is the state at the end of the previous control step. The
+  simulator's reported torque is not used: within a control step the PD torque changes at
+  every physics step, so a control-rate torque and the end-of-step state are not one
+  instant (and an implicit actuator's reported torque is not what PhysX applied). These
+  episodes get FK, R, R^-1, D and E.
 
-The response labels use the robot graph of the RL record (nominal inertia plus rotor
-inertia). With mass randomization on, the simulated robot differs from it by a few
-percent, the same mismatch a real robot has against its URDF.
+In both kinds the contacts come from the simulator (no detection), the commanded targets
+give exact action features, and a transition that a push interrupts gets no effect label.
 """
 
 from __future__ import annotations
@@ -35,7 +42,7 @@ from model.dynamics import STANDARD_GRAVITY
 from model.rl.envs import EnvStep
 from model.rl.observation import RobotState
 from model.training.dataset import CollatorSettings, PhysicsDataCollator, PhysicsTrajectoryDataset
-from model.training.episodes import EmbodimentRecord, Trajectory, finalize_acceleration_scales, process_episode
+from model.training.episodes import TORQUE_SOURCES, EmbodimentRecord, Trajectory, finalize_acceleration_scales, process_episode
 
 
 @dataclass
@@ -43,7 +50,8 @@ class PhysicsReplaySettings:
     """How much rollout data the physics replay keeps.
 
     Attributes:
-        envs_per_robot (int): Environments recorded per robot.
+        envs_per_robot (int): Environments recorded per robot (the first ones; set the
+            environment's ``label_worlds`` to at least this for exact labels).
         chunk_length (int): Control steps per recorded episode.
         min_length (int): Shorter chunks (cut by a reset) are dropped (at most ``chunk_length``).
         episodes_per_robot (int): Processed episodes kept per robot (oldest dropped).
@@ -63,7 +71,7 @@ class PhysicsReplaySettings:
 
 @dataclass
 class _Frame:
-    """One recorded state of one environment."""
+    """One recorded state of one environment, with exact labels when the simulator gave them."""
 
     q: torch.Tensor
     qd: torch.Tensor
@@ -71,6 +79,18 @@ class _Frame:
     angular_velocity: torch.Tensor
     linear_velocity: torch.Tensor
     contacts: torch.Tensor
+    torque: torch.Tensor | None = None
+    acceleration: torch.Tensor | None = None
+    base_acceleration: torch.Tensor | None = None
+
+
+@dataclass
+class _Entry:
+    """A recorded frame, the targets commanded from it, and whether its transition is clean."""
+
+    frame: _Frame
+    target: torch.Tensor
+    continues: bool = True
 
 
 def _frame(state: RobotState, contacts: torch.Tensor | None, index: int, contact_count: int) -> _Frame:
@@ -115,7 +135,7 @@ class PhysicsReplay:
         self.seed = seed
         robots = len(records)
         self._pending: list[dict[int, _Frame | None]] = [{} for _ in range(robots)]
-        self._chunks: list[dict[int, list[tuple[_Frame, torch.Tensor]]]] = [{} for _ in range(robots)]
+        self._chunks: list[dict[int, list[_Entry]]] = [{} for _ in range(robots)]
         self._queue: deque[tuple[int, Trajectory]] = deque()
         self._episodes: list[deque] = [deque(maxlen=self.settings.episodes_per_robot) for _ in range(robots)]
         self._dataset: PhysicsTrajectoryDataset | None = None
@@ -137,17 +157,35 @@ class PhysicsReplay:
             done (torch.Tensor): Bool ``[N]`` terminated or truncated.
         """
         contact_count = len(self.records[robot].contact_links)
-        for index, previous in self._pending[robot].items():
-            if previous is None:
-                continue
+        start = step.start
+        labelled = 0 if start is None else start.state.q.shape[0]
+        for index in list(self._chunks[robot]):
             chunk = self._chunks[robot][index]
-            chunk.append((previous, step.target[index].clone()))
             current = _frame(step.state, step.contacts, index, contact_count)
-            ended = bool(done[index])
-            if ended or len(chunk) >= self.settings.chunk_length:
+            if index < labelled:
+                # Exact: the frame is the start of this step, with its labels. A push at this
+                # step means the previous frame's transition did not end here.
+                frame = _frame(start.state, start.contacts, index, contact_count)
+                frame.torque = start.torque[index].clone()
+                frame.acceleration = start.acceleration[index].clone()
+                frame.base_acceleration = start.base_acceleration[index].clone()
+                if chunk and bool(start.pushed[index]):
+                    chunk[-1].continues = False
+                chunk.append(_Entry(frame, step.target[index].clone()))
+                final = None
+            else:
+                # Kinematic: the frame is the end of the previous step. A push at this step
+                # changed the velocity after it was recorded.
+                previous = self._pending[robot].get(index)
+                if previous is None:
+                    continue
+                pushed = step.pushed is not None and bool(step.pushed[index])
+                chunk.append(_Entry(previous, step.target[index].clone(), not pushed))
                 # A terminated world was rewritten (divergence) or fell: keep its last
                 # state out, so the last recorded transition is simply unlabelled.
                 final = current if not bool(step.terminated[index]) else None
+            ended = bool(done[index])
+            if ended or len(chunk) >= self.settings.chunk_length:
                 self._close(robot, chunk, final)
                 self._chunks[robot][index] = []
             self._pending[robot][index] = None if ended else current
@@ -163,34 +201,43 @@ class PhysicsReplay:
         """
         contact_count = len(self.records[robot].contact_links)
         for position, index in enumerate(indices.tolist()):
-            if index in self._pending[robot]:
+            if index in self._chunks[robot]:
                 self._pending[robot][index] = _frame(state, contacts, position, contact_count)
                 self._chunks[robot][index] = []
 
-    def _close(self, robot: int, chunk: list[tuple[_Frame, torch.Tensor]], final: _Frame | None) -> None:
+    def _close(self, robot: int, chunk: list[_Entry], final: _Frame | None) -> None:
         """Queue a finished chunk as a trajectory."""
-        frames = [frame for frame, _ in chunk] + ([final] if final is not None else [])
+        frames = [entry.frame for entry in chunk] + ([final] if final is not None else [])
         if len(frames) < max(min(self.settings.min_length, self.settings.chunk_length), 2):
             return
-        targets = [target for _, target in chunk]
+        targets = [entry.target for entry in chunk]
         targets += [targets[-1]] * (len(frames) - len(targets))
+        continues = [entry.continues for entry in chunk] + [True] * (len(frames) - len(chunk))
         record = self.records[robot]
         floating = record.graph.floating_base
+        exact = all(frame.torque is not None for frame in frames)
 
         def stack(name: str) -> torch.Tensor:
             return torch.stack([getattr(frame, name) for frame in frames]).to(torch.float64)
 
+        base_acceleration = stack("base_acceleration") if exact else None
         trajectory = Trajectory(
             embodiment=robot,
             dt=self.control_dt,
             positions=stack("q"),
             velocities=stack("qd"),
+            accelerations=stack("acceleration") if exact else None,
+            applied_torque=stack("torque") if exact else None,
             actions=torch.stack(targets).to(torch.float64),
             action_type="position",
             gravity=STANDARD_GRAVITY * stack("gravity_direction"),
             base_angular_velocity=stack("angular_velocity") if floating else None,
             base_linear_velocity=stack("linear_velocity") if floating else None,
+            base_linear_acceleration=base_acceleration[:, :3] if exact and floating else None,
+            base_angular_acceleration=base_acceleration[:, 3:] if exact and floating else None,
             contacts=torch.stack([frame.contacts for frame in frames]) if record.contact_links else None,
+            transition_valid=torch.tensor(continues, dtype=torch.bool),
+            exact_dynamics=exact,
         )
         self._queue.append((robot, trajectory))
 
@@ -225,6 +272,12 @@ class PhysicsReplay:
     def episodes(self) -> int:
         """Return the number of stored episodes over all robots."""
         return sum(len(stored) for stored in self._episodes)
+
+    @property
+    def exact_episodes(self) -> int:
+        """Return the number of stored episodes with exact torque labels."""
+        source = TORQUE_SOURCES.index("exact")
+        return sum(int(bool((episode["torque_source"][:, 0] == source).any())) for stored in self._episodes for episode in stored)
 
     def ready(self) -> bool:
         """Return whether a batch can be drawn."""

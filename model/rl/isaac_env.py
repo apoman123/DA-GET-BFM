@@ -5,6 +5,16 @@ through a fake of its API (``tests/test_isaac_env.py``), because Isaac Lab needs
 
 One simulation holds every robot. Each robot's worlds live under ``/World/robot<r>_<i>`` on
 a shared grid, one ``Articulation`` per robot, as in Isaac Lab's articulation tutorial.
+
+Exact start-of-step labels (``model.rl.envs.StepStart``) need explicit actuators
+(``IsaacRobotConfig.explicit_actuators``). With Isaac Lab's default implicit actuators the PD
+law is solved inside PhysX, and the reported ``applied_torque`` is the explicit PD formula,
+which Isaac Lab keeps only as telemetry: it is not the torque PhysX applied. With
+``IdealPDActuatorCfg`` the adapter computes the torque, PhysX applies exactly that over the
+next physics step, and the labels are that torque with the accelerations of the first
+physics step, ``(v_1 - v_0) / physics_dt`` (joint, base linear in the world rotated into
+the start base frame, base angular likewise). Explicit PD with stiff gains needs a small
+physics step; check stability before training with it.
 """
 
 from __future__ import annotations
@@ -16,7 +26,7 @@ from typing import Any
 import numpy as np
 import torch
 
-from model.rl.envs import EmbodimentEnv, EnvConfig
+from model.rl.envs import EmbodimentEnv, EnvConfig, StepStart
 from model.rl.observation import RobotState
 from model.training.episodes import EmbodimentRecord
 
@@ -64,12 +74,16 @@ class IsaacRobotConfig:
         undesired_contact_links (list[str]): Regexes of links whose contact is penalized; by
             default every link but the feet (BFM-Zero's G1: pelvis, shoulders, hips).
         self_collisions (bool): Enable self-collisions.
+        explicit_actuators (bool): Compute the PD torque in the adapter
+            (``IdealPDActuatorCfg``) instead of inside PhysX (``ImplicitActuatorCfg``). Needed
+            for exact start-of-step labels (see the module docstring).
     """
 
     urdf: str
     ros_package_paths: list[dict[str, str]] = field(default_factory=list)
     undesired_contact_links: list[str] | None = None
     self_collisions: bool = True
+    explicit_actuators: bool = False
 
 
 class IsaacEmbodimentEnv(EmbodimentEnv):
@@ -83,11 +97,15 @@ class IsaacEmbodimentEnv(EmbodimentEnv):
         origins (torch.Tensor): ``[N, 3]`` world origins.
         undesired_contact_links (list[str] | None): See ``IsaacRobotConfig``.
         refresh (Any): Callback that recomputes simulator state after writes.
+        explicit_actuators (bool): The articulation uses explicit actuators, so the applied
+            torque is exact and start-of-step labels are recorded.
     """
 
     def __init__(self, record: EmbodimentRecord, config: EnvConfig, articulation: Any, contact_sensor: Any, origins: torch.Tensor,
-                 undesired_contact_links: list[str] | None = None, refresh: Any = None) -> None:
+                 undesired_contact_links: list[str] | None = None, refresh: Any = None, explicit_actuators: bool = False) -> None:
         super().__init__(record, config)
+        self.explicit_actuators = explicit_actuators
+        self._capture: dict[str, Any] | None = None
         self.articulation, self.contact_sensor = articulation, contact_sensor
         self.origins = origins
         self.device = origins.device
@@ -136,7 +154,10 @@ class IsaacEmbodimentEnv(EmbodimentEnv):
         return np.where(lying, lying_height, standing)
 
     def _randomize(self) -> None:
-        """Apply friction, link mass and base center-of-mass randomization to each world."""
+        """Apply friction, link mass and base center-of-mass randomization to each world.
+
+        Label worlds keep the nominal masses and center of mass (``EnvConfig.label_worlds``).
+        """
         settings = self.config.randomization
         if not settings.enabled:
             return
@@ -144,12 +165,14 @@ class IsaacEmbodimentEnv(EmbodimentEnv):
         ids = torch.arange(count, device=self.device)
         masses = articulation.data.body_mass.torch.clone()
         scale = torch.as_tensor(self.rng.uniform(*settings.link_mass_scale, size=masses.shape), dtype=masses.dtype, device=masses.device)
+        scale[: self.label_worlds] = 1.0
         inertias = articulation.data.body_inertia.torch.clone()
         articulation.set_masses_index(masses=masses * scale, env_ids=ids)
         articulation.set_inertias_index(inertias=inertias * scale[..., None], env_ids=ids)
         if self.floating:
             coms = articulation.data.body_com_pose_b.torch.clone()
             offsets = self.rng.uniform(-settings.base_com_offset, settings.base_com_offset, (count, 3))
+            offsets[: self.label_worlds] = 0.0
             coms[:, 0, :3] += torch.as_tensor(offsets, dtype=coms.dtype, device=coms.device)
             articulation.set_coms_index(coms=coms, env_ids=ids)
         view = articulation.root_view
@@ -243,6 +266,60 @@ class IsaacEmbodimentEnv(EmbodimentEnv):
     def _torque(self) -> torch.Tensor:
         return self.articulation.data.applied_torque.torch[:, self.joint_map].detach().cpu().double()
 
+    @property
+    def exact_labels(self) -> bool:
+        """Only explicit actuators report the torque PhysX applies."""
+        return self.explicit_actuators
+
+    def begin_capture(self) -> None:
+        """Read the label worlds' state before the first physics step of a control step."""
+        if not self.capturing:
+            self._capture = None
+            return
+        count, data = self.label_worlds, self.articulation.data
+
+        def read(values: torch.Tensor) -> torch.Tensor:
+            return values[:count].detach().cpu().double()
+
+        q, qd = read(data.joint_pos.torch[:, self.joint_map]), read(data.joint_vel.torch[:, self.joint_map])
+        if self.floating:
+            # World velocities are current after the push writes; the base-frame ones may not be.
+            quaternion = read(data.root_link_quat_w.torch)
+            linear_w, angular_w = read(data.root_link_lin_vel_w.torch), read(data.root_link_ang_vel_w.torch)
+            state = RobotState(
+                q, qd, read(data.projected_gravity_b.torch), rotate_inverse_xyzw(quaternion, angular_w),
+                rotate_inverse_xyzw(quaternion, linear_w), read(data.root_link_pos_w.torch[:, 2]),
+            )
+        else:
+            quaternion = linear_w = angular_w = None
+            zeros = torch.zeros((count, 3), dtype=torch.float64)
+            direction = torch.tensor([[0.0, 0.0, -1.0]], dtype=torch.float64).expand(count, 3)
+            state = RobotState(q, qd, direction, zeros, zeros, torch.zeros(count, dtype=torch.float64))
+        contacts = self._foot_contacts()[:count].detach().cpu() if self.record.contact_links else None
+        self._capture = {"state": state, "quaternion": quaternion, "linear": linear_w, "angular": angular_w, "contacts": contacts}
+
+    def end_capture(self, physics_dt: float) -> None:
+        """Turn the first physics step into the label worlds' start-of-step labels."""
+        if self._capture is None:
+            return
+        capture, count, data = self._capture, self.label_worlds, self.articulation.data
+        self._capture = None
+
+        def read(values: torch.Tensor) -> torch.Tensor:
+            return values[:count].detach().cpu().double()
+
+        state = capture["state"]
+        torque = read(data.applied_torque.torch[:, self.joint_map])
+        acceleration = (read(data.joint_vel.torch[:, self.joint_map]) - state.qd) / physics_dt
+        base = torch.zeros((count, 6), dtype=torch.float64)
+        if self.floating:
+            quaternion = capture["quaternion"]
+            linear = (read(data.root_link_lin_vel_w.torch) - capture["linear"]) / physics_dt
+            angular = (read(data.root_link_ang_vel_w.torch) - capture["angular"]) / physics_dt
+            # d/dt (R^T w_world) = R^T dw_world/dt, since omega_b x omega_b = 0.
+            base = torch.cat((rotate_inverse_xyzw(quaternion, linear), rotate_inverse_xyzw(quaternion, angular)), dim=-1)
+        self._start = StepStart(state, torque, acceleration, base, capture["contacts"], torch.from_numpy(self._pushed[:count].copy()))
+
     def _diverged(self) -> np.ndarray:
         data = self.articulation.data
         position, velocity = data.joint_pos.torch, data.joint_vel.torch
@@ -307,12 +384,17 @@ class IsaacGroup:
         self._update(0.0)
 
     def advance(self) -> None:
-        """Run the physics of one control step for every robot."""
-        for _ in range(self.substeps):
+        """Run the physics of one control step for every robot (recording label worlds' first step)."""
+        for env in self.envs:
+            env.begin_capture()
+        for substep in range(self.substeps):
             for env in self.envs:
                 env.articulation.write_data_to_sim()
             self.simulation.step(render=False)
             self._update(self.physics_dt)
+            if substep == 0:
+                for env in self.envs:
+                    env.end_capture(self.physics_dt)
 
 
 def build_isaac_group(robots: list[tuple[EmbodimentRecord, EnvConfig, IsaacRobotConfig]], simulation: Any, spacing: float = 5.0) -> IsaacGroup:
@@ -329,7 +411,7 @@ def build_isaac_group(robots: list[tuple[EmbodimentRecord, EnvConfig, IsaacRobot
         IsaacGroup: The environments.
     """
     import isaaclab.sim as sim_utils
-    from isaaclab.actuators import ImplicitActuatorCfg
+    from isaaclab.actuators import IdealPDActuatorCfg, ImplicitActuatorCfg
     from isaaclab.assets import Articulation, ArticulationCfg
     from isaaclab.sensors import ContactSensor, ContactSensorCfg
     from isaaclab_physx.sim.schemas import PhysxArticulationCfg
@@ -372,7 +454,7 @@ def build_isaac_group(robots: list[tuple[EmbodimentRecord, EnvConfig, IsaacRobot
                 prim_path=f"/World/robot{robot_index}_.*/Robot",
                 spawn=spawn,
                 actuators={
-                    "all": ImplicitActuatorCfg(
+                    "all": (IdealPDActuatorCfg if settings.explicit_actuators else ImplicitActuatorCfg)(
                         joint_names_expr=[".*"], stiffness=joint_gain, damping=joint_damping, actuator_effort_limit=joint_effort, armature=armature
                     )
                 },
@@ -386,6 +468,9 @@ def build_isaac_group(robots: list[tuple[EmbodimentRecord, EnvConfig, IsaacRobot
     group = IsaacGroup(simulation, envs, max(1, int(round(robots[0][1].control_dt / robots[0][1].physics_dt))))
     for record, config, settings, articulation, sensor, robot_origins in created:
         envs.append(
-            IsaacEmbodimentEnv(record, config, articulation, sensor, robot_origins.to(device), settings.undesired_contact_links, group.refresh)
+            IsaacEmbodimentEnv(
+                record, config, articulation, sensor, robot_origins.to(device), settings.undesired_contact_links, group.refresh,
+                settings.explicit_actuators,
+            )
         )
     return group

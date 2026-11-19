@@ -265,7 +265,10 @@ encoder still learns each robot's own dynamics from three sources
 
 Kinematic tasks (forward kinematics, action effect, motor feasibility) run on
 every dataset as before. During RL, the policy's own rollouts add response,
-effect and feasibility labels with the simulator's exact contacts
+effect and feasibility labels with the simulator's exact contacts, and a few
+label worlds per robot add exact forward and inverse dynamics labels on the
+states the policy visits, walking included: torque and acceleration are read at
+the start of each control step, so they belong to one instant
 ([physics replay](docs/bfm.md#physics-losses-during-rl)).
 
 ## Quick start
@@ -424,8 +427,11 @@ tests/                     test suite
   contact change are dropped.
 - **Torque penalty weights are untuned** starting points, and the simulators
   enforce only the constant peak torque within a control step.
-- **Simulated ground contact covers standing, not walking.** Locomotion comes
-  from recorded datasets.
+- **The offline ground simulation stands, it does not walk.** Gaits would need a
+  locomotion controller per robot. Recorded datasets give locomotion kinematics,
+  and the RL physics replay gives exact torque and acceleration labels on the
+  policy's own walking (MuJoCo, or Isaac Lab with explicit actuators;
+  [details](docs/bfm.md#physics-losses-during-rl)).
 - **The Isaac Lab adapter is unverified on a real simulator** and rotor robots are not
   supported in RL ([first run](docs/bfm.md#first-run-on-a-gpu-machine),
   [differences from BFM-Zero](docs/bfm.md#what-differs-from-bfm-zero)).

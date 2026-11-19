@@ -917,6 +917,91 @@ class EnvironmentTest(unittest.TestCase):
         replay.restart(0, torch.tensor([0]), env.read_state().select(torch.tensor([0])), env.foot_contacts()[:1])
         self.assertIsNotNone(replay._pending[0][0])
 
+    def test_label_worlds_have_exact_start_labels_in_flight(self) -> None:
+        """In flight, the start-of-step torque and accelerations satisfy the graph's floating-base dynamics."""
+        from model.dynamics import STANDARD_GRAVITY, floating_forward_dynamics
+
+        env, embodiment = self.env(num_envs=2, label_worlds=1)
+        env.reset(frames=[None, None])
+        rng = np.random.default_rng(1)
+        for data in env.datas:
+            data.qpos[2] += 2.0  # well above the floor: no contact
+            data.qvel[:] = 0.5 * rng.uniform(-1, 1, data.qvel.shape)
+            env.mujoco.mj_forward(env.models[0], data)
+        step = env.step(0.3 * rng.uniform(-1, 1, (2, env.joints)))
+        start = step.start
+        self.assertIsNotNone(start)
+        self.assertEqual(start.torque.shape, (1, env.joints))
+        self.assertEqual(start.base_acceleration.shape, (1, 6))
+        self.assertFalse(bool(start.contacts.any()))
+        self.assertGreater(float(start.torque.abs().max()), 1.0)  # the PD law is active
+        graph = embodiment.record.graph
+        state = start.state
+        linear, angular, joints = floating_forward_dynamics(
+            graph, state.q, state.qd, start.torque, STANDARD_GRAVITY * state.gravity_direction,
+            state.linear_velocity, state.angular_velocity,
+        )
+        scale = float(start.acceleration.abs().max())
+        torch.testing.assert_close(joints, start.acceleration, atol=1e-6 * scale, rtol=1e-6)
+        torch.testing.assert_close(torch.cat((linear, angular), dim=-1), start.base_acceleration, atol=1e-6 * scale, rtol=1e-6)
+        # The start state is the end state of the previous step (no push) and precedes this one.
+        following = env.step(np.zeros((2, env.joints)))
+        torch.testing.assert_close(following.start.state.q, step.state.q[:1])
+        torch.testing.assert_close(following.start.state.qd, step.state.qd[:1])
+
+    def test_label_worlds_keep_nominal_masses(self) -> None:
+        """Label worlds skip mass and center-of-mass randomization; the other worlds keep it."""
+        env, _ = self.env(randomize=True, num_envs=3, label_worlds=1)
+        np.testing.assert_array_equal(env.models[0].body_mass, env.base_model.body_mass)
+        np.testing.assert_array_equal(env.models[0].body_ipos, env.base_model.body_ipos)
+        self.assertFalse(np.allclose(env.models[1].body_mass, env.base_model.body_mass))
+        self.assertNotEqual(float(env.models[0].geom_friction[0, 0]), float(env.base_model.geom_friction[0, 0]))
+        plain, _ = self.env(num_envs=1)
+        env_step = plain.step(np.zeros((1, plain.joints)))
+        self.assertIsNone(env_step.start)  # off by default
+
+    def test_physics_replay_has_exact_labels_from_label_worlds(self) -> None:
+        """Label worlds give exact episodes with dynamics labels; other worlds give kinematic ones; pushes cut transitions."""
+        from model.rl.physics_replay import PhysicsReplay, PhysicsReplaySettings
+        from model.training.episodes import TORQUE_SOURCES
+
+        env, embodiment = self.env(randomize=True, num_envs=2, label_worlds=1)
+        env.reset(frames=[None, None])
+        env.next_push[:] = 1e9
+        for _ in range(25):
+            env.step(np.zeros((2, env.joints)))
+        replay = PhysicsReplay([embodiment.record], HISTORY, env.config.control_dt,
+                               PhysicsReplaySettings(envs_per_robot=2, chunk_length=12, min_length=4))
+        replay.start(0, env.read_state(), env.foot_contacts())
+        rng = np.random.default_rng(0)
+        for index in range(12):
+            if index == 5:
+                env.next_push[:] = 0.0  # both worlds are pushed at the start of step 5
+            step = env.step(0.05 * rng.uniform(-1, 1, (2, env.joints)))
+            if index == 5:
+                env.next_push[:] = 1e9
+                self.assertTrue(bool(step.pushed.all()) and bool(step.start.pushed.all()))
+            replay.step(0, step, torch.zeros(2, dtype=torch.bool))
+        self.assertEqual(replay.process(10), 2)
+        exact, kinematic = replay._episodes[0]
+        self.assertEqual(replay.exact_episodes, 1)
+        self.assertTrue(bool((exact["torque_source"][:, 0] == TORQUE_SOURCES.index("exact")).all()))
+        self.assertTrue(bool((kinematic["torque_source"][:, 0] == TORQUE_SOURCES.index("none")).all()))
+        self.assertEqual(exact["applied_torque"].shape[0], 12)  # start frames only
+        self.assertEqual(kinematic["applied_torque"].shape[0], 13)  # with the final end state
+        # Exact frames are start states: the push at step 5 ends frame 4's transition.
+        # Kinematic frames are end states: it ends frame 5's.
+        self.assertEqual(torch.nonzero(~exact["effect_valid"][:, 0]).squeeze(-1).tolist(), [4, 11])
+        self.assertEqual(torch.nonzero(~kinematic["effect_valid"][:, 0]).squeeze(-1).tolist(), [5, 12])
+        self.assertGreater(float(exact["acceleration"][:, 0].abs().max()), 0.0)
+        torch.manual_seed(0)
+        batch = replay.batch(16)
+        self.assertTrue(bool(batch["fd_mask"].any()))
+        self.assertTrue(bool(batch["id_mask"].any()))
+        output = small_encoder(embodiment.observer.token_size)(**batch)
+        self.assertTrue({"fd", "id", "response", "effect"} <= set(output.loss_components))
+        self.assertTrue(torch.isfinite(output.loss))
+
     def test_fixed_base_robot_tracks_targets(self) -> None:
         """A robot without a floating base gets no free joint and follows its targets."""
         from model.rl.envs import DomainRandomization, EnvConfig, MujocoEmbodimentEnv
@@ -1013,7 +1098,8 @@ class EnvironmentTest(unittest.TestCase):
         for tag in ("train/fb_loss", "train/critic_loss", "train/aux_critic_loss", "train/actor_loss", "train/disc_loss", "train/frames_per_second",
                     "train/physics/loss_fk", "train/physics/loss_response", "train/aux_rew/penalty_undesired_contact",
                     "train/aux_rew/penalty_torque_limit", "rollout/quad/0-ground/fallen_fraction",
-                    "rollout/quad/0-ground/torque_request_over_envelope", "physics_replay/episodes",
+                    "rollout/quad/0-ground/torque_request_over_envelope", "physics_replay/episodes", "physics_replay/exact_episodes",
+                    "train/physics/loss_fd", "train/physics/loss_id",
                     "eval/quad/0-ground/tracking_mpjpe", "eval/quad/0-ground/tracking_emd", "eval/quad/0-ground/getting_up_rate", "eval/biped/0-ground/goal_mpjpe"):
             self.assertIn(tag, tags)
         names = [item["name"] for item in json.loads((output / "embodiments.json").read_text())]

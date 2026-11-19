@@ -42,6 +42,7 @@ class FakeArticulation:
             applied_torque=torch.zeros(count, joints), projected_gravity_b=torch.tensor([0.0, 0.0, -1.0]).expand(count, 3).clone(),
             root_link_ang_vel_b=torch.zeros(count, 3), root_link_lin_vel_b=torch.zeros(count, 3), root_link_pos_w=torch.zeros(count, 3),
             root_link_lin_vel_w=torch.zeros(count, 3), root_link_ang_vel_w=torch.zeros(count, 3), body_link_lin_vel_w=torch.zeros(count, bodies, 3),
+            root_link_quat_w=torch.tensor([0.0, 0.0, 0.0, 1.0]).expand(count, 4).clone(),
             body_link_quat_w=identity, body_mass=torch.ones(count, bodies), body_inertia=torch.ones(count, bodies, 9),
             body_com_pose_b=torch.zeros(count, bodies, 7),
         )
@@ -117,7 +118,7 @@ def record() -> EmbodimentRecord:
     return EmbodimentRecord.build("quad", graph, ground_specs(actuator_specs(graph)), contact_links=FEET, surface_contacts=True)
 
 
-def build(count: int = 2, randomize: bool = False, **overrides):
+def build(count: int = 2, randomize: bool = False, explicit: bool = False, **overrides):
     """Return the adapter on fakes, with its robot."""
     robot = record()
     articulation = FakeArticulation(count, robot)
@@ -125,7 +126,7 @@ def build(count: int = 2, randomize: bool = False, **overrides):
     config = EnvConfig(num_envs=count, randomization=DomainRandomization(enabled=randomize), **overrides)
     origins = torch.tensor([[float(index) * 5, 1.0, 0.0] for index in range(count)])
     refreshes = []
-    env = IsaacEmbodimentEnv(robot, config, articulation, sensor, origins, refresh=lambda: refreshes.append(1))
+    env = IsaacEmbodimentEnv(robot, config, articulation, sensor, origins, refresh=lambda: refreshes.append(1), explicit_actuators=explicit)
     return env, articulation, sensor, refreshes, robot
 
 
@@ -332,6 +333,59 @@ class GroupTest(unittest.TestCase):
         group.refresh()
         self.assertEqual(steps[-1], "forward")
         self.assertEqual(first_articulation.calls[-1], "update:0.0")
+
+    def test_explicit_actuators_record_the_first_physics_step(self) -> None:
+        """Label worlds get the first physics step's torque and velocity change, in the start base frame."""
+        env, articulation, sensor, _, robot = build(count=3, explicit=True, label_worlds=2)
+        state = articulation.state
+        names = list(articulation.joint_names)
+        order = [names.index(name) for name in robot.graph.joint_names]
+        half = np.sqrt(0.5)
+        state.root_link_quat_w[:] = torch.tensor([0.0, 0.0, half, half])  # 90 degrees about z
+        state.joint_vel[:] = torch.arange(articulation.joints, dtype=torch.float32)
+        state.root_link_lin_vel_w[:] = torch.tensor([1.0, 0.0, 0.0])
+        sensor.forces[:, sensor.body_names.index("FL_foot"), 2] = 50.0
+        physics_dt, calls = 0.005, []
+
+        def physics_step(render=True):
+            calls.append(render)
+            first = len(calls) == 1
+            state.applied_torque[:] = 7.0 if first else -100.0  # torque of each physics step
+            state.joint_vel[:] += 0.01 if first else 5.0
+            state.root_link_lin_vel_w[:, 0] += 0.02 if first else 5.0
+            state.root_link_ang_vel_w[:, 2] += 0.03 if first else 5.0
+
+        simulation = SimpleNamespace(get_physics_dt=lambda: physics_dt, step=physics_step, forward=lambda: None)
+        group = IsaacGroup(simulation, [env], 4)
+        env.prepare(np.zeros((3, env.joints)))
+        group.advance()
+        start = env.collect().start
+        self.assertEqual(start.torque.shape, (2, env.joints))
+        torch.testing.assert_close(start.torque, torch.full((2, env.joints), 7.0, dtype=torch.float64))
+        torch.testing.assert_close(start.acceleration, torch.full((2, env.joints), 0.01 / physics_dt, dtype=torch.float64), rtol=1e-4, atol=0)  # float32 fake
+        torch.testing.assert_close(start.state.qd[0], torch.tensor(order, dtype=torch.float64))
+        # World x is base -y after a quarter turn about z; z stays z.
+        torch.testing.assert_close(start.state.linear_velocity[0], torch.tensor([0.0, -1.0, 0.0], dtype=torch.float64), atol=1e-6, rtol=0)
+        expected = torch.tensor([0.0, -0.02 / physics_dt, 0.0, 0.0, 0.0, 0.03 / physics_dt], dtype=torch.float64)
+        torch.testing.assert_close(start.base_acceleration[1], expected, atol=1e-2, rtol=1e-4)
+        self.assertEqual(start.contacts[:, FEET.index("FL_foot")].tolist(), [True, True])
+        self.assertEqual(start.pushed.tolist(), [False, False])
+
+    def test_implicit_actuators_give_no_start_labels(self) -> None:
+        """The implicit PD torque Isaac Lab reports is not what PhysX applied, so nothing is recorded."""
+        env, _, _, _, _ = build(count=2, label_worlds=2)
+        simulation = SimpleNamespace(get_physics_dt=lambda: 0.005, step=lambda render=True: None, forward=lambda: None)
+        env.prepare(np.zeros((2, env.joints)))
+        IsaacGroup(simulation, [env], 2).advance()
+        self.assertFalse(env.exact_labels)
+        self.assertIsNone(env.collect().start)
+
+    def test_label_worlds_keep_nominal_masses(self) -> None:
+        """Randomization leaves the label worlds' masses and center of mass alone."""
+        _, articulation, _, _, _ = build(count=3, randomize=True, explicit=True, label_worlds=1)
+        torch.testing.assert_close(articulation.masses[0], torch.ones_like(articulation.masses[0]))
+        self.assertEqual(float(articulation.coms[0].abs().max()), 0.0)
+        self.assertFalse(torch.allclose(articulation.masses[1], torch.ones_like(articulation.masses[1])))
 
     def test_rollout_runs_on_the_adapter(self) -> None:
         """The training loop's rollout builds observations from the adapter's state."""

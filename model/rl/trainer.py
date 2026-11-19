@@ -88,9 +88,12 @@ class TrainingArguments:
         clip_to_envelope (bool): Keep the requested effort inside each actuator's
             torque-speed envelope (``model.rl.actions.ActionMap``); the robot must do the same.
         physics_replay (bool): Also train the physics losses on the policy's own rollouts.
+            The recorded worlds become label worlds (``EnvConfig.label_worlds``): nominal
+            masses, and exact torque and acceleration labels where the simulator gives
+            them (MuJoCo; Isaac Lab with ``"explicit_actuators": true`` on the source).
         physics_replay_fraction (float): Share of physics batches drawn from them, once
             some are processed.
-        physics_replay_envs (int): Environments recorded per robot.
+        physics_replay_envs (int): Environments recorded per robot (the label worlds).
         physics_replay_length (int): Control steps per recorded episode.
         physics_replay_episodes (int): Episodes kept per robot.
     """
@@ -346,7 +349,8 @@ def build_group(arguments: TrainingArguments, embodiments: list[Embodiment], poo
     for item in embodiments:
         urdf = resolve_path(item.source.get("simulation_urdf", item.source["urdf"]), item.base)
         settings = IsaacRobotConfig(
-            str(urdf), item.source.get("ros_package_paths", []), item.source.get("undesired_contact_links"), bool(item.source.get("self_collisions", True))
+            str(urdf), item.source.get("ros_package_paths", []), item.source.get("undesired_contact_links"), bool(item.source.get("self_collisions", True)),
+            bool(item.source.get("explicit_actuators", False)),
         )
         robots.append((item.record, item.env_config, settings))
     return build_isaac_group(robots, simulation, arguments.isaac_spacing)
@@ -386,9 +390,19 @@ class FbCprTrainer:
         shares = np.array_split(np.arange(arguments.online_parallel_envs), len(self.embodiments))
         if min(len(share) for share in shares) == 0:
             raise ValueError("online_parallel_envs must be at least the number of robots")
+        replay_on = self.config.train_encoder and self.config.physics_loss_weight > 0 and arguments.physics_replay
         for embodiment, share in zip(self.embodiments, shares):
             embodiment.env_config.num_envs = len(share)
+            embodiment.env_config.label_worlds = min(arguments.physics_replay_envs, len(share)) if replay_on else 0
         self.group = build_group(arguments, self.embodiments, self.pool, simulation)
+        if replay_on:
+            for env in self.group.envs:
+                if not env.exact_labels:
+                    print(
+                        f"NOTE: {env.record.name}: the simulator gives no exact torque labels (Isaac Lab implicit actuators); "
+                        "its physics replay has no forward or inverse dynamics labels. Set \"explicit_actuators\": true on the source to add them.",
+                        flush=True,
+                    )
         generator = torch.Generator().manual_seed(arguments.seed)
         noise = ObservationNoise(enabled=arguments.observation_noise)
         capacity = max(arguments.buffer_size // len(self.embodiments), self.config.batch_size)
@@ -555,6 +569,8 @@ class FbCprTrainer:
                 if self.physics_replay is not None:
                     final["physics_replay/episodes"] = float(self.physics_replay.episodes)
                     writer.add_scalar("physics_replay/episodes", final["physics_replay/episodes"], self.frames)
+                    final["physics_replay/exact_episodes"] = float(self.physics_replay.exact_episodes)
+                    writer.add_scalar("physics_replay/exact_episodes", final["physics_replay/exact_episodes"], self.frames)
                 writer.flush()
                 print(f"frames {self.frames}: " + ", ".join(f"{k}={v:.4g}" for k, v in sorted(final.items()) if "aux_rew" not in k), flush=True)
                 totals, updates, last_log_time, last_log_frames = {}, 0, now, self.frames

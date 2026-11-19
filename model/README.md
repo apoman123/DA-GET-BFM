@@ -190,8 +190,9 @@ The modules:
   changes per sample.
 * `model/rl/actions.py`: `ActionMap` (actions to PD targets inside the torque
   envelope, shared by simulators and robot) and `TorqueMonitor` (torque penalties).
-* `model/rl/physics_replay.py`: physics-loss episodes from RL rollouts, labelled
-  without torque.
+* `model/rl/physics_replay.py`: physics-loss episodes from RL rollouts; label
+  worlds give exact start-of-step torque and accelerations (`StepStart` in
+  `model/rl/envs.py`), the other worlds kinematic labels only.
 
 See the repository README for the full description, the training commands,
 and the recommended datasets.

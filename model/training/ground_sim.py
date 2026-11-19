@@ -35,6 +35,7 @@ from model.physics import ActuatorSpec, actuator_tensors
 from model.training.episodes import EmbodimentRecord, Trajectory
 
 GRAVITY = 9.80665
+STIFF_SOLIMP = (0.99, 0.999, 0.001)  # contact impedance; MuJoCo's default is (0.9, 0.95, 0.001)
 
 
 @dataclass
@@ -107,10 +108,16 @@ def build_mjcf(
     timestep: float = 0.002,
     body_collision_radius: float | None = None,
     armature: float | None = None,
+    actuator_type: str = "position",
+    contact_solimp: tuple[float, float, float] | None = STIFF_SOLIMP,
 ) -> str:
-    """Write MJCF for a robot with foot contacts and position actuators.
+    """Write MJCF for a robot with foot contacts and actuators.
 
-    The root gets a free joint only if the graph has a floating base.
+    The root gets a free joint only if the graph has a floating base. Contacts are stiff
+    by default (``STIFF_SOLIMP``): MuJoCo's default impedance (0.9 to 0.95) lets feet
+    sink and accelerate, which moves the simulated response about 20% away from the
+    rigid-contact response ``G(q)`` the response labels use; with 0.99 to 0.999 it is
+    about 3% (``docs/dynamics.md``).
 
     Args:
         record (EmbodimentRecord): Robot, with ``contact_links`` if it has feet.
@@ -125,10 +132,17 @@ def build_mjcf(
             each joint's value from ``record.graph.armature``, so the simulated robot
             and the analytic labels have the same inertia. URDFs have none, and light
             links with stiff gains need some to stay numerically stable.
+        actuator_type (str): ``position`` (MuJoCo's PD with ``kp``, ``kv`` and a peak force
+            range) or ``motor`` (torque in ``ctrl``, gear 1, peak force range; the caller
+            computes the PD torque, for example with ``model.physics.pd_envelope_torque``).
+        contact_solimp (tuple | None): ``solimp`` (d0, d_width, width) of every collision
+            geom and the floor; None keeps MuJoCo's default.
 
     Returns:
         str: MJCF XML.
     """
+    if actuator_type not in ("position", "motor"):
+        raise ValueError(f"actuator_type must be 'position' or 'motor', not {actuator_type!r}")
     graph = record.graph
     rotor = graph.joint_armature.numpy() if armature is None else np.full(graph.num_joints, float(armature))
     surface = record.surface_contacts if record.surface_contacts is not None else len(record.contact_links) <= 2
@@ -181,18 +195,25 @@ def build_mjcf(
         peak = float(actuator["peak_torque"][index])
         if peak <= 0:
             continue
-        actuators.append(
-            f'    <position name="a_{name}" joint="{name}" kp="{kp[index]:.6g}" kv="{kd[index]:.6g}" '
-            f'forcelimited="true" forcerange="{-peak:.6g} {peak:.6g}" ctrllimited="false"/>'
-        )
+        if actuator_type == "motor":
+            actuators.append(
+                f'    <motor name="a_{name}" joint="{name}" gear="1" '
+                f'forcelimited="true" forcerange="{-peak:.6g} {peak:.6g}" ctrllimited="false"/>'
+            )
+        else:
+            actuators.append(
+                f'    <position name="a_{name}" joint="{name}" kp="{kp[index]:.6g}" kv="{kd[index]:.6g}" '
+                f'forcelimited="true" forcerange="{-peak:.6g} {peak:.6g}" ctrllimited="false"/>'
+            )
+    solimp = "" if contact_solimp is None else f' solimp="{_vector(contact_solimp)}"'
     return "\n".join(
         [
             f'<mujoco model="{graph.name}">',
             '  <compiler angle="radian"/>',
             f'  <option timestep="{timestep}" gravity="0 0 {-GRAVITY}" integrator="implicitfast"/>',
-            '  <default><geom contype="1" conaffinity="0"/></default>',
+            f'  <default><geom contype="1" conaffinity="0"{solimp}/></default>',
             "  <worldbody>",
-            f'    <geom name="floor" type="plane" size="0 0 1" contype="0" conaffinity="1" friction="{friction} 0.02 0.002"/>',
+            f'    <geom name="floor" type="plane" size="0 0 1" contype="0" conaffinity="1" friction="{friction} 0.02 0.002"{solimp}/>',
             *base_lines,
             "  </worldbody>",
             "  <actuator>",

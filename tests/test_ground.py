@@ -83,11 +83,38 @@ class GroundSimulationTest(unittest.TestCase):
         self.assertFalse(bool(episode["contacts_detected"].any()))
         self.assertTrue(bool(episode["base_acceleration_known"].all()))
         self.assertEqual(episode["dynamics_features"].shape[-1], 5)
-        # Response labels are dropped only around contact changes.
-        changes = (trajectory.contacts[1:] != trajectory.contacts[:-1]).any(-1)
-        if not bool(changes.any()):
-            self.assertTrue(bool(episode["response_valid"].all()))
-        self.assertTrue(bool(episode["response_valid"].any()))
+        # Response labels are dropped around contact changes and where a foot in contact slides.
+        from model.training.episodes import _stable_contacts, contact_point_speeds
+
+        speeds = contact_point_speeds(records[0].graph, trajectory.positions, trajectory.velocities,
+                                      trajectory.base_linear_velocity, trajectory.base_angular_velocity, FEET)
+        slipping = (trajectory.contacts & (speeds > 0.1)).any(-1)
+        stable = _stable_contacts(trajectory.contacts, 2)
+        self.assertTrue(bool(slipping.any()) and not bool(slipping.all()))
+        torch.testing.assert_close(episode["contact_slipping"], slipping)
+        torch.testing.assert_close(episode["response_valid"], stable & ~slipping)
+        loose = process_episode(records[0], trajectory, max_contact_slip=None)
+        torch.testing.assert_close(loose["response_valid"], stable)
+        self.assertFalse(bool(loose["contact_slipping"].any()))
+
+    def test_mjcf_contacts_are_stiff_and_actuators_selectable(self) -> None:
+        """Collision geoms and the floor get the stiff solimp; motor actuators carry torque in ctrl."""
+        import mujoco
+
+        from model.training.ground_sim import STIFF_SOLIMP, ContactGeometry, build_mjcf, ground_specs
+
+        graph = EmbodimentGraph.from_urdf(quadruped(), floating_base=True).with_armature(1e-3)
+        record = EmbodimentRecord.build("quad", graph, ground_specs(actuator_specs(graph)), contact_links=FEET)
+        zeros = np.zeros(graph.num_joints)
+        model = mujoco.MjModel.from_xml_string(build_mjcf(record, zeros, zeros, ContactGeometry()))
+        np.testing.assert_allclose(model.geom_solimp[:, :3], np.tile(STIFF_SOLIMP, (model.ngeom, 1)))
+        soft = mujoco.MjModel.from_xml_string(build_mjcf(record, zeros, zeros, ContactGeometry(), contact_solimp=None))
+        np.testing.assert_allclose(soft.geom_solimp[0, :2], (0.9, 0.95))
+        motor = mujoco.MjModel.from_xml_string(build_mjcf(record, zeros, zeros, ContactGeometry(), actuator_type="motor"))
+        np.testing.assert_allclose(motor.actuator_gainprm[:, 0], 1.0)
+        np.testing.assert_allclose(motor.actuator_biasprm[:, :3], 0.0)
+        with self.assertRaises(ValueError):
+            build_mjcf(record, zeros, zeros, ContactGeometry(), actuator_type="velocity")
 
     def test_constrained_response_matches_mujoco_with_stiff_contacts(self) -> None:
         """G(q) dtau equals MuJoCo's acceleration change once its contacts are made stiff.

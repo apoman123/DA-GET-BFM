@@ -186,10 +186,18 @@ The modules:
 * `model/pretraining.py`: the auxiliary heads A, B, C, R, R⁻¹, D and E.
 * `model/training/`: the data pipeline and Trainer. `episodes.py` labels each
   variant with its torque source (`none`, `measured`, `exact`) and stores the
-  response operator `G(q)`; `dataset.py` draws the response tasks' torque
-  changes per sample.
+  response operator `G(q)`, and drops response labels where contacts change or
+  slide; `contacts.py` infers contacts for data without them (subset selection
+  with a confidence); `dataset.py` draws the response tasks' torque changes per
+  sample.
+* `model/physics.py`: the torque-speed envelope (`envelope_limit`,
+  `envelope_clip`, `pd_envelope_torque`), shared by `ActionMap`, the MuJoCo
+  environment's per-physics-step PD and the Isaac Lab envelope actuator.
 * `model/rl/actions.py`: `ActionMap` (actions to PD targets inside the torque
-  envelope, shared by simulators and robot) and `TorqueMonitor` (torque penalties).
+  envelope, shared by simulators and robot) and `TorqueMonitor` (torque penalties
+  over every physics step).
+* `model/rl/constraints.py`: `PenaltyMultipliers`, per-robot Lagrange multipliers
+  of the torque penalties' weights.
 * `model/rl/physics_replay.py`: physics-loss episodes from RL rollouts; label
   worlds give exact start-of-step torque and accelerations (`StepStart` in
   `model/rl/envs.py`), the other worlds kinematic labels only.

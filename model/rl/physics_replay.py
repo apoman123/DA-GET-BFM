@@ -58,6 +58,8 @@ class PhysicsReplaySettings:
         process_per_update (int): Chunks processed into episodes before each update round.
         proposal_variants (int): Motor proposals per frame (as in the data config).
         contact_margin_steps (int): Frames around a contact change without response labels.
+        max_contact_slip (float | None): Frames with a foot in contact faster than this
+            (m/s) get no response labels (as in the data config).
     """
 
     envs_per_robot: int = 4
@@ -67,6 +69,7 @@ class PhysicsReplaySettings:
     process_per_update: int = 2
     proposal_variants: int = 2
     contact_margin_steps: int = 2
+    max_contact_slip: float | None = 0.1
 
 
 @dataclass
@@ -252,6 +255,7 @@ class PhysicsReplay:
                 proposal_variants=self.settings.proposal_variants,
                 contact_margin_steps=self.settings.contact_margin_steps,
                 seed=self.seed * 1_000_003 + self.processed,
+                max_contact_slip=self.settings.max_contact_slip,
             )
             self._episodes[robot].append(episode)
             self.processed += 1

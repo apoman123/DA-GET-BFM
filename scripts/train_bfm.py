@@ -37,6 +37,8 @@ MODEL_FIELDS = (
     "forward_hidden_size", "forward_num_attention_heads", "forward_intermediate_size", "forward_num_latent_tokens",
 )
 OPTIONAL_INT = {"eval_motions"}
+# Agent fields set from Python only (dicts and pairs); the CLI keeps their defaults.
+PYTHON_ONLY = {"aux_reward_scales", "torque_targets", "penalty_multiplier_bounds"}
 
 
 def to_bool(text: str) -> bool:
@@ -77,7 +79,7 @@ def build_parser() -> argparse.ArgumentParser:
         model_group.add_argument(f"--{name}", type=kind, default=None, help=f"override preset (legacy default: {default})")
     add_fields(
         parser.add_argument_group("agent"),
-        {item.name: item.default for item in dataclasses.fields(FbCprConfig) if item.name != "aux_reward_scales"},
+        {item.name: item.default for item in dataclasses.fields(FbCprConfig) if item.name not in PYTHON_ONLY},
     )
     return parser
 
@@ -87,7 +89,7 @@ def split_settings(values: dict) -> tuple[TrainingArguments, dict, FbCprConfig]:
     run = TrainingArguments(**{item.name: values[item.name] for item in dataclasses.fields(TrainingArguments)})
     model = {name: values[name] for name in MODEL_FIELDS if values[name] is not None}
     model.update({f"{role}_size": values[f"{role}_size"] for role in ("actor", "forward", "backward")})
-    agent = FbCprConfig(**{item.name: values[item.name] for item in dataclasses.fields(FbCprConfig) if item.name != "aux_reward_scales"})
+    agent = FbCprConfig(**{item.name: values[item.name] for item in dataclasses.fields(FbCprConfig) if item.name not in PYTHON_ONLY})
     return run, model, agent
 
 

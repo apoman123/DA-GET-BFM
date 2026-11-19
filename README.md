@@ -42,7 +42,8 @@ URDF + dynamics ─────────────────► DaGetEnco
 | Training data: synthetic, MuJoCo ground contact, Hub datasets, converters | Done |
 | BFM networks: backward map, discriminator, actor, forward map, critics | Done and unit tested |
 | Online off-policy FB-CPR training across robots | Logic done and tested on MuJoCo; **only short runs, so no policy is trained yet** |
-| Actuator limits in RL: torque-envelope target clipping (same code on the robot), three torque penalties, metrics | Done and tested on MuJoCo ([details](docs/bfm.md#actuator-torque-limits)) |
+| Actuator limits in RL: torque-speed envelope at every physics step, target clipping (same code on the robot), three torque penalties with per-robot Lagrange multipliers, metrics | Done and tested on MuJoCo; Isaac Lab actuator tested with a fake ([details](docs/bfm.md#actuator-torque-limits)) |
+| Contact inference for data without foot sensors (dynamics-consistent subset selection with a confidence) | Done; measured on six real Go1 recordings and four simulated robots ([details](docs/dynamics.md#which-feet-are-down-inferring-contacts)) |
 | 50 Hz deployment (`DaGetBfmPolicy`, CUDA Graphs) | Done; on an RTX 5070 Ti a G1 step takes at most 6.3 ms, 12.6 ms with live tracking, for every encoder size (budget 20 ms; robot communication not included) ([details](docs/bfm.md#inference-latency-at-50-hz)) |
 | Isaac Lab simulation (self-collision, getting up, prioritized motions) | **Written against Isaac Lab 3 and tested with a fake only; never run in Isaac Lab, which needs a GPU** |
 | **Prompting one robot with another's motion** | **B and D are shared, but nothing aligns behaviors across robots yet** ([details](docs/bfm.md#sharing-z-across-robots)) |
@@ -54,7 +55,9 @@ URDF + dynamics ─────────────────► DaGetEnco
 | Per-joint tokens, graph attention bias, `da_get_zero` preset | GET-Zero | Floating bases and multirotors |
 | Mass-matrix attention bias, Physics Cross Attention, physics pretraining | This repo | |
 | Contact-constrained response task (labels `G(q) δτ` without any torque) | This repo, from constrained rigid-body dynamics (Featherstone 2008) | |
-| Torque-envelope target clipping and torque penalties | This repo | Added on top of BFM-Zero's auxiliary rewards |
+| Torque-envelope target clipping, per-physics-step envelope, torque penalties | This repo | Added on top of BFM-Zero's auxiliary rewards |
+| Adaptive torque-penalty weights | Lagrangian constrained RL (Altman 1999; Tessler et al. 2019; Stooke et al. 2020) | Per-robot multipliers with data-sheet targets |
+| Contact inference from kinematics and dynamics | Probabilistic contact estimation on legged robots (Camurri et al. 2017; Bledt et al. 2018) | Subset MAP with friction pyramids, minimum load and a confidence filter for labels |
 | Backward map and discriminator heads, truncated-normal policy, latent inference | BFM-Zero / FB-CPR | One shared DA-GET encoder with a state-token adapter; padding mask |
 | Actor and forward map interfaces | BFM-Zero / FB-CPR | Rebuilt to read joint embeddings and cross-attend to z; one action per joint |
 | Training losses, z mixture, rollout logic, fall starts, motion priorities, hyperparameters | BFM-Zero / FB-CPR | Per-robot worlds, buffers, and prompts; encoder tuned with physics losses |
@@ -404,10 +407,11 @@ model/                     library code
   modeling_da_get.py         DaGetEncoder and Physics Cross Attention
   modeling_bfm.py            backward map, discriminator, actor, forward map, critics
   rl/                        FB-CPR agent, Isaac Lab and MuJoCo worlds, action map and torque limits,
-                             physics replay, replay buffers, evaluation, training loop, deployment
+                             torque-penalty multipliers, physics replay, replay buffers, evaluation,
+                             training loop, deployment
   pretraining.py             physics pretraining model (heads A, B, C, R, R^-1, D, E)
   dynamics.py                rigid-body dynamics, constrained response, torque estimation (analysis only)
-  training/, conversion/     data pipeline and dataset converters
+  training/, conversion/     data pipeline (including contact inference) and dataset converters
 scripts/                   training, data config generator, converters, validation, latency benchmark
 configs/data/              example data configs
 docs/                      documentation by topic
@@ -421,12 +425,19 @@ tests/                     test suite
 - **Torque estimates are not used.** They are 43–97% off on a real Go1 and
   47–72% on ANYmal D, so datasets without torque sensors supervise dynamics
   only through the constrained response.
-- **The response assumes rigid contacts that hold.** MuJoCo's default soft
-  contacts change it by about 20% (3% with stiff contacts); without contact
-  sensors, which feet are down is detected heuristically and frames near a
-  contact change are dropped.
-- **Torque penalty weights are untuned** starting points, and the simulators
-  enforce only the constant peak torque within a control step.
+- **The response assumes rigid contacts that stick.** The generated MuJoCo models
+  use stiff contacts (3% from the rigid response, against 20% with MuJoCo's
+  defaults), and frames where a foot in contact slides faster than 0.1 m/s are
+  dropped. Without contact sensors, contacts are inferred
+  ([how and how well](docs/dynamics.md#which-feet-are-down-inferring-contacts)):
+  on six real Go1 gait recordings, 82–97% of the frames that keep response labels
+  have the right contact set (47–80% with the old lowest-foot rule).
+- **Torque targets are data-sheet style choices.** The simulators clip the PD
+  torque to the torque-speed envelope at every physics step, and the torque
+  penalty weights adapt per robot to targets (Lagrange multipliers), but the
+  targets themselves (5% of joints over the envelope, thermal load ≤ 1, 2% over
+  the power limit) are not measured on a robot. The envelope limits braking like
+  driving torque, which is conservative.
 - **The offline ground simulation stands, it does not walk.** Gaits would need a
   locomotion controller per robot. Recorded datasets give locomotion kinematics,
   and the RL physics replay gives exact torque and acceleration labels on the
@@ -497,6 +508,20 @@ Motion datasets have their own licenses; see
   Control of a Quadrotor UAV on SE(3).* CDC 2010 (flight controller).
 - Shuo Yang et al. *Multi-IMU Proprioceptive Odometry for Legged Robots.*
   IROS 2023 (MIPO data used for validation).
+- Eitan Altman. *Constrained Markov Decision Processes.* Chapman & Hall/CRC, 1999;
+  Chen Tessler, Daniel J. Mankowitz, and Shie Mannor. *Reward Constrained Policy
+  Optimization.* ICLR 2019; Adam Stooke, Joshua Achiam, and Pieter Abbeel.
+  *Responsive Safety in Reinforcement Learning by PID Lagrangian Methods.* ICML 2020
+  (Lagrange multipliers of the torque penalties).
+- Marco Camurri, Maurice Fallon, Stéphane Bazeille, Andreea Radulescu, Victor
+  Barasuol, Darwin G. Caldwell, and Claudio Semini. *Probabilistic Contact Estimation
+  and Impact Detection for State Estimation of Quadruped Robots.* IEEE RA-L 2017;
+  Gerardo Bledt, Patrick M. Wensing, Sam Ingersoll, and Sangbae Kim. *Contact Model
+  Fusion for Event-Based Locomotion in Unstructured Terrains.* ICRA 2018 (contact
+  inference from kinematics and dynamics).
+- Nikita Rudin, David Hoeller, Philipp Reist, and Marco Hutter. *Learning to Walk in
+  Minutes Using Massively Parallel Deep Reinforcement Learning.* CoRL 2021
+  (legged_gym; explicit PD torques at every physics step).
 - Yi Zhou et al. *On the Continuity of Rotation Representations in Neural
   Networks.* CVPR 2019 (6D rotations).
 

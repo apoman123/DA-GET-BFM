@@ -56,7 +56,7 @@ def smooth(values: np.ndarray, window: int) -> np.ndarray:
     if window <= 1:
         return values
     kernel = np.ones(window) / window
-    padded = np.pad(values, ((window // 2, window // 2), (0, 0)), mode="edge")
+    padded = np.pad(values, ((window // 2, window - 1 - window // 2), (0, 0)), mode="edge")  # same length for even windows
     return np.stack([np.convolve(padded[:, column], kernel, mode="valid") for column in range(values.shape[1])], 1)
 
 
@@ -95,6 +95,7 @@ def load(path: Path, window: int, stride: int) -> dict[str, torch.Tensor | float
         "qd": tensor(velocity),
         "tau": tensor(effort),
         "contacts": tensor(foot) > 200.0,
+        "foot_force": tensor(foot),
         "rotation": rotation,
         "gravity": gravity,
         "gyro": tensor(gyro),

@@ -6,15 +6,23 @@ through a fake of its API (``tests/test_isaac_env.py``), because Isaac Lab needs
 One simulation holds every robot. Each robot's worlds live under ``/World/robot<r>_<i>`` on
 a shared grid, one ``Articulation`` per robot, as in Isaac Lab's articulation tutorial.
 
-Exact start-of-step labels (``model.rl.envs.StepStart``) need explicit actuators
-(``IsaacRobotConfig.explicit_actuators``). With Isaac Lab's default implicit actuators the PD
-law is solved inside PhysX, and the reported ``applied_torque`` is the explicit PD formula,
-which Isaac Lab keeps only as telemetry: it is not the torque PhysX applied. With
-``IdealPDActuatorCfg`` the adapter computes the torque, PhysX applies exactly that over the
-next physics step, and the labels are that torque with the accelerations of the first
-physics step, ``(v_1 - v_0) / physics_dt`` (joint, base linear in the world rotated into
-the start base frame, base angular likewise). Explicit PD with stiff gains needs a small
-physics step; check stability before training with it.
+Actuators are explicit by default (``IsaacRobotConfig.explicit_actuators``): an
+``IdealPDActuator`` subclass (``envelope_actuator_cfg``) computes the PD torque at every
+physics step and clips it to the torque-speed envelope with ``model.physics.envelope_clip``,
+the same function ``ActionMap`` and the MuJoCo environment use. PhysX then applies exactly
+that torque, which gives
+
+* the speed-dependent envelope inside a control step, as a motor driver enforces it;
+* exact start-of-step labels (``model.rl.envs.StepStart``): the first physics step's torque
+  with its accelerations ``(v_1 - v_0) / physics_dt`` (joint, base linear in the world
+  rotated into the start base frame, base angular likewise).
+
+With implicit actuators (``explicit_actuators=False``) PhysX solves the PD law itself, only
+the constant peak clip applies, and the reported ``applied_torque`` is the explicit PD
+formula, which Isaac Lab keeps only as telemetry: it is not the torque PhysX applied, so no
+start-of-step labels are recorded. Explicit PD with stiff gains needs a small enough physics
+step (legged_gym, Rudin et al., CoRL 2021, computes PD torques explicitly at 200 Hz); check
+stability for your robots before training.
 """
 
 from __future__ import annotations
@@ -74,16 +82,17 @@ class IsaacRobotConfig:
         undesired_contact_links (list[str]): Regexes of links whose contact is penalized; by
             default every link but the feet (BFM-Zero's G1: pelvis, shoulders, hips).
         self_collisions (bool): Enable self-collisions.
-        explicit_actuators (bool): Compute the PD torque in the adapter
-            (``IdealPDActuatorCfg``) instead of inside PhysX (``ImplicitActuatorCfg``). Needed
-            for exact start-of-step labels (see the module docstring).
+        explicit_actuators (bool): Compute the PD torque at every physics step with the
+            torque-speed envelope (``envelope_actuator_cfg``) instead of inside PhysX
+            (``ImplicitActuatorCfg``, peak clip only). Needed for the envelope inside a
+            control step and for exact start-of-step labels (see the module docstring).
     """
 
     urdf: str
     ros_package_paths: list[dict[str, str]] = field(default_factory=list)
     undesired_contact_links: list[str] | None = None
     self_collisions: bool = True
-    explicit_actuators: bool = False
+    explicit_actuators: bool = True
 
 
 class IsaacEmbodimentEnv(EmbodimentEnv):
@@ -106,6 +115,7 @@ class IsaacEmbodimentEnv(EmbodimentEnv):
         super().__init__(record, config)
         self.explicit_actuators = explicit_actuators
         self._capture: dict[str, Any] | None = None
+        self._substeps: list[tuple[torch.Tensor, torch.Tensor]] = []
         self.articulation, self.contact_sensor = articulation, contact_sensor
         self.origins = origins
         self.device = origins.device
@@ -237,6 +247,7 @@ class IsaacEmbodimentEnv(EmbodimentEnv):
     def prepare(self, actions: np.ndarray) -> None:
         """Apply targets, then write this step's pushes as one batch of velocity changes."""
         super().prepare(actions)
+        self._substeps = []
         if not self._pushes:
             return
         ids = torch.as_tensor([item[0] for item in self._pushes], dtype=torch.long, device=self.device)
@@ -265,6 +276,20 @@ class IsaacEmbodimentEnv(EmbodimentEnv):
 
     def _torque(self) -> torch.Tensor:
         return self.articulation.data.applied_torque.torch[:, self.joint_map].detach().cpu().double()
+
+    def record_substep(self) -> None:
+        """Keep the torque just computed for this physics step and the joint velocity it used."""
+        data = self.articulation.data
+        self._substeps.append(
+            (data.applied_torque.torch[:, self.joint_map].detach().clone(), data.joint_vel.torch[:, self.joint_map].detach().clone())
+        )
+
+    def _torque_substeps(self) -> tuple[np.ndarray, np.ndarray]:
+        if not self._substeps:
+            return super()._torque_substeps()
+        torque = torch.stack([item[0] for item in self._substeps], dim=1)
+        speed = torch.stack([item[1] for item in self._substeps], dim=1)
+        return torque.cpu().double().numpy(), speed.cpu().double().numpy()
 
     @property
     def exact_labels(self) -> bool:
@@ -390,11 +415,63 @@ class IsaacGroup:
         for substep in range(self.substeps):
             for env in self.envs:
                 env.articulation.write_data_to_sim()
+                env.record_substep()
             self.simulation.step(render=False)
             self._update(self.physics_dt)
             if substep == 0:
                 for env in self.envs:
                     env.end_capture(self.physics_dt)
+
+
+def envelope_actuator_cfg(record: EmbodimentRecord, armature: Any) -> Any:
+    """Return the explicit actuator config of a robot: PD at every physics step, clipped to the envelope.
+
+    The actuator class subclasses Isaac Lab's ``IdealPDActuator`` and only replaces its
+    effort clip with ``model.physics.envelope_clip`` (peak torque, power limit and no-load
+    speed per joint), so it applies the envelope ``ActionMap`` and the MuJoCo environment use.
+
+    Args:
+        record (EmbodimentRecord): Robot with position-mode actuators.
+        armature (Any): Rotor inertia, one value or ``{joint: value}``.
+
+    Returns:
+        Any: An ``IdealPDActuatorCfg`` subclass instance for every joint.
+    """
+    from isaaclab.actuators import IdealPDActuator, IdealPDActuatorCfg
+    from isaaclab.actuators.actuator_base import resolve_joint_parameter
+    from isaaclab.utils import configclass
+
+    from model.physics import envelope_clip
+
+    class EnvelopePDActuator(IdealPDActuator):
+        """Ideal PD drive whose effort is clipped to the torque-speed envelope at every physics step."""
+
+        def __init__(self, cfg, *args, **kwargs):
+            super().__init__(cfg, *args, **kwargs)
+            self._max_power = resolve_joint_parameter(self.cfg.max_power, None, self._joint_names, self._num_envs, self._device)
+            self._no_load_velocity = resolve_joint_parameter(self.cfg.no_load_velocity, None, self._joint_names, self._num_envs, self._device)
+
+        def _clip_effort(self, effort, joint_vel):
+            return envelope_clip(effort, joint_vel, self.actuator_effort_limit, self._max_power, self._no_load_velocity)
+
+    @configclass
+    class EnvelopePDActuatorCfg(IdealPDActuatorCfg):
+        """Config of ``EnvelopePDActuator``: ``max_power`` and ``no_load_velocity`` per joint."""
+
+        class_type: type = EnvelopePDActuator
+        max_power: Any = None
+        no_load_velocity: Any = None
+
+    names = list(record.graph.joint_names)
+    actuator = record.actuator
+
+    def per_joint(key: str) -> dict[str, float]:
+        return {name: float(actuator[key][index]) for index, name in enumerate(names)}
+
+    return EnvelopePDActuatorCfg(
+        joint_names_expr=[".*"], stiffness=per_joint("kp"), damping=per_joint("kd"), actuator_effort_limit=per_joint("peak_torque"),
+        armature=armature, max_power=per_joint("max_power"), no_load_velocity=per_joint("max_velocity"),
+    )
 
 
 def build_isaac_group(robots: list[tuple[EmbodimentRecord, EnvConfig, IsaacRobotConfig]], simulation: Any, spacing: float = 5.0) -> IsaacGroup:
@@ -411,7 +488,7 @@ def build_isaac_group(robots: list[tuple[EmbodimentRecord, EnvConfig, IsaacRobot
         IsaacGroup: The environments.
     """
     import isaaclab.sim as sim_utils
-    from isaaclab.actuators import IdealPDActuatorCfg, ImplicitActuatorCfg
+    from isaaclab.actuators import ImplicitActuatorCfg
     from isaaclab.assets import Articulation, ArticulationCfg
     from isaaclab.sensors import ContactSensor, ContactSensorCfg
     from isaaclab_physx.sim.schemas import PhysxArticulationCfg
@@ -454,7 +531,7 @@ def build_isaac_group(robots: list[tuple[EmbodimentRecord, EnvConfig, IsaacRobot
                 prim_path=f"/World/robot{robot_index}_.*/Robot",
                 spawn=spawn,
                 actuators={
-                    "all": (IdealPDActuatorCfg if settings.explicit_actuators else ImplicitActuatorCfg)(
+                    "all": envelope_actuator_cfg(record, armature) if settings.explicit_actuators else ImplicitActuatorCfg(
                         joint_names_expr=[".*"], stiffness=joint_gain, damping=joint_damping, actuator_effort_limit=joint_effort, armature=armature
                     )
                 },

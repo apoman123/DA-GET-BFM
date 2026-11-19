@@ -6,7 +6,10 @@ termination, starts from prioritized motion frames with 30% lying-down starts, d
 randomization (nominal pose, pushes; simulators add friction, mass, center of mass), and
 the auxiliary rewards. On top of BFM-Zero, targets pass through ``model.rl.actions.ActionMap``
 (the same code the robot runs), which keeps the requested effort inside each actuator's
-torque-speed envelope, and three torque penalties are added (``model.rl.actions``).
+torque-speed envelope, and three torque penalties are added (``model.rl.actions``), with
+per-robot weights adapted by Lagrange multipliers (``model.rl.constraints``). The PD torque
+itself is computed at every physics step and clipped to the envelope there
+(``EnvConfig.substep_envelope``), as a motor driver does.
 
 The first ``EnvConfig.label_worlds`` worlds of a robot also record exact dynamics labels
 for the physics replay (``model.rl.physics_replay``): at the start of every control step,
@@ -27,6 +30,7 @@ from dataclasses import dataclass, field
 import numpy as np
 import torch
 
+from model.physics import pd_envelope_torque
 from model.physics_schema import ACTUATOR_MODES
 from model.rl.actions import ActionMap, TorqueMonitor
 from model.rl.observation import RobotState
@@ -72,6 +76,11 @@ class EnvConfig:
             at 200 Hz).
         clip_to_envelope (bool): Move targets so the requested effort stays inside the
             torque-speed envelope (``ActionMap``); the robot must do the same.
+        substep_envelope (bool): Compute the PD torque at every physics step and clip it
+            to the torque-speed envelope there (``model.physics.pd_envelope_torque``), as a
+            motor driver does inside its own loop. Off, MuJoCo's position actuators apply
+            the PD law with only the constant peak clip. (Isaac Lab: see
+            ``IsaacRobotConfig.explicit_actuators``.)
         label_worlds (int): The first worlds that record exact start-of-step dynamics
             labels (``EnvStep.start``) and skip link mass and base center-of-mass
             randomization (friction and the rest stay randomized). 0 turns it off.
@@ -94,6 +103,7 @@ class EnvConfig:
     max_tilt_degrees: float = 70.0
     armature: float = 0.01
     clip_to_envelope: bool = True
+    substep_envelope: bool = True
     label_worlds: int = 0
     thermal_time_constant: float = 1.0
     nominal_pose: dict[str, float] = field(default_factory=dict)
@@ -136,8 +146,9 @@ class EnvStep:
 
     Attributes:
         state (RobotState): Next state of every world.
-        torque (torch.Tensor): ``[N, J]`` applied joint torques (simulator only; for the
-            torque penalties and metrics, never a policy input).
+        torque (torch.Tensor): ``[N, J]`` applied joint torques averaged over the step's
+            physics steps (simulator only; for the torque penalties and metrics, never a
+            policy input).
         target (torch.Tensor): ``[N, J]`` joint targets that were commanded.
         terminated (torch.Tensor): Bool ``[N]``: diverged, or fell if that ends episodes.
         truncated (torch.Tensor): Bool ``[N]``: reached the time limit.
@@ -338,8 +349,9 @@ class EmbodimentEnv:
             "penalty_undesired_contact": torch.from_numpy(self._undesired_contact().astype(np.float64)),
             "penalty_feet_ori": torch.from_numpy(self._feet_orientation()),
         }
-        torque = self._torque()
-        torque_rewards, metrics = self.torque_monitor.after_step(torque.numpy(), state.qd.numpy())
+        torques, speeds = self._torque_substeps()
+        torque = torch.from_numpy(torques.mean(axis=1))
+        torque_rewards, metrics = self.torque_monitor.after_step(torques, speeds)
         aux_rewards.update(torque_rewards)
         self.previous_action = self._actions.copy()
         return EnvStep(
@@ -362,6 +374,11 @@ class EmbodimentEnv:
 
     def _torque(self) -> torch.Tensor:
         raise NotImplementedError
+
+    def _torque_substeps(self) -> tuple[np.ndarray, np.ndarray]:
+        """Return the applied torque of every physics step ``[N, S, J]`` and the joint
+        velocity it was computed at ``[N, S, J]``; one step at the end state by default."""
+        return self._torque().numpy()[:, None], self.read_state().qd.numpy()[:, None]
 
     def _diverged(self) -> np.ndarray:
         raise NotImplementedError
@@ -406,7 +423,7 @@ class MujocoEmbodimentEnv(EmbodimentEnv):
         armature = None if record.graph.armature is not None else config.armature
         xml = build_mjcf(
             record, actuator["kp"].numpy(), actuator["kd"].numpy(), config.geometry, 0.9, config.physics_dt,
-            body_collision_radius=radius, armature=armature,
+            body_collision_radius=radius, armature=armature, actuator_type="motor" if config.substep_envelope else "position",
         )
         self.base_model = mujoco.MjModel.from_xml_string(xml)
         self._resolve_indices()
@@ -415,6 +432,8 @@ class MujocoEmbodimentEnv(EmbodimentEnv):
         for model, data in zip(self.models, self.datas):
             mujoco.mj_setConst(model, data)
         self.reference_height = self._nominal_height()
+        self._substep_torque = np.zeros((self.num_envs, self.substeps, self.joints))
+        self._substep_speed = np.zeros((self.num_envs, self.substeps, self.joints))
 
     def _resolve_indices(self) -> None:
         """Look up the MuJoCo addresses of joints, actuators and collision geoms."""
@@ -492,12 +511,24 @@ class MujocoEmbodimentEnv(EmbodimentEnv):
             if frame is not None:
                 data.qvel[:3] = rotation @ frame["linear"]
                 data.qvel[3:6] = frame["angular"]
-        data.ctrl[:] = data.qpos[self.qpos_index][self.actuator_joint]
+        # Hold the pose until the next targets: a position target, or no torque for motors.
+        data.ctrl[:] = 0.0 if self.config.substep_envelope else data.qpos[self.qpos_index][self.actuator_joint]
         self.mujoco.mj_forward(model, data)
 
     def _apply_targets(self, targets: np.ndarray) -> None:
+        if self.config.substep_envelope:
+            return  # the PD torque is computed at every physics step from ``self._targets``
         for index, data in enumerate(self.datas):
             data.ctrl[:] = targets[index, self.actuator_joint]
+
+    def _drive(self, index: int) -> None:
+        """Set one world's motor torques from its targets and current state (substep envelope)."""
+        data = self.datas[index]
+        torque = pd_envelope_torque(
+            self.record.actuator, torch.from_numpy(self._targets[index]),
+            torch.from_numpy(data.qpos[self.qpos_index]), torch.from_numpy(data.qvel[self.dof_index]),
+        ).numpy()
+        data.ctrl[:] = torque[self.actuator_joint]
 
     def _push(self, index: int, linear: np.ndarray, angular: np.ndarray) -> None:
         data = self.datas[index]
@@ -513,20 +544,25 @@ class MujocoEmbodimentEnv(EmbodimentEnv):
         """Step one world through a control step; return its start-of-step labels if it records them."""
         model, data = self.models[index], self.datas[index]
         labels = None
-        if index < self.label_worlds and self.capturing:
-            # The first physics step starts from this state with these targets: its forces
-            # and accelerations, computed here, are the labels of the state.
-            self.mujoco.mj_forward(model, data)
-            base = np.zeros(6)
-            if self.floating:
-                rotation = data.xmat[1].reshape(3, 3)
-                base = np.concatenate((rotation.T @ data.qacc[0:3], data.qacc[3:6]))
-            labels = (
-                self._read_world(index), data.qfrc_actuator[self.dof_index].copy(), data.qacc[self.dof_index].copy(),
-                base, self._world_contacts(data),
-            )
-        for _ in range(self.substeps):
+        for substep in range(self.substeps):
+            if self.config.substep_envelope:
+                self._drive(index)
+            self._substep_speed[index, substep] = data.qvel[self.dof_index]
+            if substep == 0 and index < self.label_worlds and self.capturing:
+                # The first physics step starts from this state with these torques: its
+                # forces and accelerations, computed here, are the labels of the state.
+                self.mujoco.mj_forward(model, data)
+                base = np.zeros(6)
+                if self.floating:
+                    rotation = data.xmat[1].reshape(3, 3)
+                    base = np.concatenate((rotation.T @ data.qacc[0:3], data.qacc[3:6]))
+                labels = (
+                    self._read_world(index), data.qfrc_actuator[self.dof_index].copy(), data.qacc[self.dof_index].copy(),
+                    base, self._world_contacts(data),
+                )
             self.mujoco.mj_step(model, data)
+            # After mj_step, qfrc_actuator holds the force of the step just taken.
+            self._substep_torque[index, substep] = data.qfrc_actuator[self.dof_index]
         return labels
 
     def advance(self) -> None:
@@ -566,7 +602,10 @@ class MujocoEmbodimentEnv(EmbodimentEnv):
         return q, qd, -rotation[2], data.qvel[3:6].copy(), rotation.T @ data.qvel[:3], float(data.qpos[2])
 
     def _torque(self) -> torch.Tensor:
-        return torch.from_numpy(np.stack([data.qfrc_actuator[self.dof_index].copy() for data in self.datas]))
+        return torch.from_numpy(self._substep_torque.mean(axis=1))
+
+    def _torque_substeps(self) -> tuple[np.ndarray, np.ndarray]:
+        return self._substep_torque.copy(), self._substep_speed.copy()
 
     def _diverged(self) -> np.ndarray:
         return np.array(

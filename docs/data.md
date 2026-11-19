@@ -48,9 +48,12 @@ runs; the feet carry the rest.
 
 The torque source of these episodes is `exact`: task B and C labels are the applied
 torques (C projected onto the motion-determined part when feet are down), and the
-response labels use MuJoCo's own contact flags. MuJoCo's default contacts are slightly
-soft; the rigid-contact response differs from MuJoCo's by about 20% with them and 3%
-with stiff contacts ([details](dynamics.md#assumptions-and-checks)).
+response labels use MuJoCo's own contact flags. The generated model has stiff contacts
+(`solimp` 0.99–0.999): with MuJoCo's default soft contacts the rigid-contact response
+would differ from MuJoCo's by about 20%, with these by 3%. Frames where a foot in
+contact slides faster than 0.1 m/s get no response labels; the random joint targets
+make feet slide often, so this drops 8–68% of the stance frames depending on the robot
+([details](dynamics.md#assumptions-and-checks)).
 
 ```bash
 uv sync --extra sim

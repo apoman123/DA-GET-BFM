@@ -14,6 +14,7 @@ and how inaccurate those estimates are.
   - [Derivation](#derivation)
   - [What it does not depend on](#what-it-does-not-depend-on)
   - [Assumptions and checks](#assumptions-and-checks)
+  - [Which feet are down: inferring contacts](#which-feet-are-down-inferring-contacts)
 - [Why training uses no estimated torque](#why-training-uses-no-estimated-torque)
   - [What went into the model before](#what-went-into-the-model-before)
   - [What replaces it](#what-replaces-it)
@@ -148,30 +149,129 @@ on `P δτ` only, exactly like task C.
 
 - **Contacts hold.** The response is the local, bilateral one: it assumes the
   feet neither slip nor lift under the change. The label of a frame is therefore
-  dropped within `contact_margin_steps` (default 2) of a contact change.
+  dropped within `contact_margin_steps` (default 2) of a contact change, and where a
+  foot in contact moves faster than `max_contact_slip` (default 0.1 m/s; needs the base
+  linear velocity). The speed is that of the contact link's frame origin, the point
+  the constraints hold still (`contact_point_speeds`). With inferred contacts, every
+  foot near the ground is checked, since the inference may have left a sliding foot
+  out. Measured against MuJoCo (RL environment, quadruped under random actions, stiff
+  contacts, 0.5 N m random torque changes), the error of `G δτ` grows with the speed
+  of the fastest foot in contact:
+
+  | Fastest stance-foot speed | Frames | Median error | 90th percentile |
+  |---|---|---|---|
+  | < 0.02 m/s | 10 | 0.8% | 15% |
+  | 0.02–0.05 m/s | 26 | 1.9% | 37% |
+  | 0.05–0.1 m/s | 46 | 1.9% | 37% |
+  | 0.1–0.2 m/s | 38 | 8.9% | 31% |
+  | 0.2–0.5 m/s | 110 | 20% | 54% |
+  | > 0.5 m/s | 192 | 23% | 69% |
+
+  In the offline ground simulation (`configs/data/ground_contact.json`) the random
+  joint targets push the feet along the floor, and this check drops 8% (H1), 44%
+  (Go1), 46% (G1) and 68% (ANYmal D) of the frames with contact. Those frames still
+  train every other task. A smaller `target_amplitude` gives more sticking frames.
 - **Which feet are down must be known.** Contacts from a sensor or a simulator
-  are trusted. Detected contacts (lowest-foot heuristic) are kept only where they
-  explain the base wrench the motion needs within `max_contact_residual`
-  (default 0.5) of the weight; this check uses the inverse-dynamics machinery for
-  its residual only, and no torque is kept.
+  are trusted. Without them they are inferred
+  ([below](#which-feet-are-down-inferring-contacts)), and only frames where the
+  inference is confident and explains the base wrench the motion needs within
+  `max_contact_residual` (default 0.5) of the weight keep response labels.
 - **The support must be known.** A floating robot with no contact links, no rotors
   and no recorded support wrench (for example arms recorded on a humanoid whose legs
   are not in the data) gets no response labels. Declare such data as
   `"floating_base": false` if the torso is held still, or give `contact_links`.
 - **Rigid contacts.** MuJoCo's default contacts are soft (`solimp` 0.9–0.95), which
-  lets the feet accelerate slightly. Against a Go1-like quadruped standing on four
-  feet in MuJoCo, with small torque changes:
+  lets the feet sink and accelerate. The MJCF built by `build_mjcf` (offline ground
+  simulation and RL environments) therefore uses stiff contacts, `solimp` 0.99–0.999
+  (`STIFF_SOLIMP`, `contact_solimp=None` restores MuJoCo's default). Against a
+  Go1-like quadruped standing on four feet in MuJoCo, with small torque changes:
 
   | MuJoCo contact model | Median error of `G δτ` against MuJoCo's `δq̈` |
   |---|---|
   | default soft contacts | ≈ 20% |
-  | stiff contacts (`solimp` 0.99–0.999) | 3% |
+  | stiff contacts (`solimp` 0.99–0.999, **the default here**) | 3% |
   | stiff contacts (`solimp` 0.9999) | 2.7% (tested: `test_constrained_response_matches_mujoco_with_stiff_contacts`) |
   | ignoring the contacts (free floating) | > 100% |
 
   The rigid model is therefore exact up to contact compliance. Real feet with rubber
   pads are also slightly compliant; this is a model error of the same kind as an
   inaccurate URDF inertia, and it is deterministic, unlike torque-estimation noise.
+
+### Which feet are down: inferring contacts
+
+A wrong contact set gives a badly wrong response label, so data without foot sensors
+needs a reliable inference and a way to know when it is unsure
+([`model/training/contacts.py`](../model/training/contacts.py)). Two methods
+(`contact_detection` in the data config or per source):
+
+- **`height`**: a foot is down when it is within `contact_height_tolerance` (3 cm) of
+  the lowest foot along gravity and, with a known base velocity, slower than
+  `contact_speed_tolerance` (0.5 m/s). It assumes flat ground and cannot tell a
+  low swing foot from a stance foot.
+- **`dynamics`** (default, `select_contacts`): a maximum a posteriori choice among all
+  `2^C` subsets of the feet (up to 8 feet; more fall back to `height`). The cost of a
+  subset adds:
+  1. a **kinematic prior** per foot, `p = exp(−((h/3 cm)² + (v/0.2 m/s)²)/2)`, from its
+     height above the lowest foot and its speed (when the base velocity is known);
+  2. a **dynamics likelihood**: the base wrench the motion needs (floating-base RNEA)
+     must come from pushing-only forces inside friction pyramids (μ = 0.8) at the
+     subset's feet (flat feet: at four sole corners), solved as nonnegative least
+     squares; the cost is `(residual / 0.15 m g)² / 2`;
+  3. a **minimum load**: every chosen foot must carry at least 5% of the weight. A
+     foot that carries nothing is, for dynamics, a foot in the air; without this term
+     every foot fits a flight phase;
+  4. without a base velocity, the **velocity consistency** of the subset: feet that
+     stand still in the world all move alike relative to the base (the cue of legged
+     odometry), so the spread of the subset's foot velocities is penalized.
+
+  The **confidence** of a frame is how much more the second-best subset costs. Only
+  frames above `min_contact_confidence` (default 3) keep response labels. A foot on a
+  higher step is still chosen when the weight needs it, so the method does not assume
+  flat ground.
+
+`scripts/evaluate_contact_detection.py` hides the contacts of episodes that have them,
+infers them, and compares. "Usable" is the share of frames that keep response labels
+(margin, slip, residual and, for `dynamics`, confidence), and "usable set" the share of
+those whose whole contact set is right; a wrong set there is a wrong label.
+
+Real Unitree Go1, [MIPO](https://huggingface.co/datasets/Open-IO/mipo-go1-odometry)
+(Yang et al., IROS 2023), 50 Hz, reference from the foot-force sensors (each sensor's
+offset plus 10% of its range; the offsets drift, one stand-trot sensor reads 24–39 in
+the air). MIPO has no base velocity, so neither the speed evidence nor the slip check
+applies:
+
+| Sequence | `height`: usable | usable set | `dynamics`: usable | usable set |
+|---|---|---|---|---|
+| stand-trot 04-06 | 43% | 80.2% | 52% | **93.2%** |
+| trot 05-036 | 38% | 49.0% | 46% | **92.9%** |
+| trot 10-036, convex MPC | 59% | 65.5% | 55% | **84.7%** |
+| trot 05-036, kicked | 42% | 52.7% | 51% | **82.0%** |
+| flying trot 08-040 | 61% | 47.1% | 32% | **93.0%** |
+| flying trot 04-032 | 50% | 61.6% | 45% | **96.8%** |
+
+MuJoCo ground simulation (`configs/data/ground_contact.json`, one robot per source,
+three episodes each), reference from MuJoCo:
+
+| Robot | `height`: usable | usable set | `dynamics`: usable | usable set |
+|---|---|---|---|---|
+| Go1 | 39% | 84.9% | 29% | **96.4%** |
+| ANYmal D | 18% | 97.6% | 14% | **97.9%** |
+| G1 | 54% | 100% | 35% | 100% |
+| H1 | 91% | 99.9% | 80% | 100% |
+
+On real gaits the height rule labels many swing feet as down (precision 0.39–0.83),
+and about half of its usable frames carry a wrong set. The dynamics method keeps a
+similar share of frames with 82–97% right sets; its low-confidence frames hold most of
+the remaining errors (on flying trot 04-032 the share of right sets is 70% over all
+stable frames and 98.9% above confidence 3). For dynamic gaits without contact data,
+`"detected_contact_response": false` on a source turns their response labels off
+entirely; FK, D and E still train on them.
+
+```bash
+uv run python scripts/evaluate_contact_detection.py --data_config configs/data/ground_contact.json
+uv run --extra validation python scripts/evaluate_contact_detection.py \
+    --mipo indoor/20230625_gait/230625-risqh-flytrot-04-032-33square.h5
+```
 
 The unit tests also check `J G = 0`, `G (I − P) = 0`, `J` against finite-differenced
 foot velocities, `G = M⁻¹` for a fixed base, and `G δτ` against the difference of two

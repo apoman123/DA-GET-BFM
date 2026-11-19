@@ -252,7 +252,7 @@ These keys of a robot's first expert source configure its worlds:
 | `ros_package_paths` | none | Isaac Lab: `[{"name": ..., "path": ...}]` for `package://` meshes |
 | `undesired_contact_links` | every link but the feet | Isaac Lab: regexes of penalized links (BFM-Zero's G1: pelvis, shoulders, hips) |
 | `self_collisions` | true | Isaac Lab: enable self-collisions |
-| `explicit_actuators` | false | Isaac Lab: compute the PD torque in the adapter (`IdealPDActuatorCfg`) so the physics replay gets exact torque labels ([details](#physics-losses-during-rl)); check stability at your physics step first |
+| `explicit_actuators` | true | Isaac Lab: compute the PD torque at every physics step inside the torque-speed envelope (`envelope_actuator_cfg`, an `IdealPDActuator`), which also gives the physics replay exact torque labels ([limits](#actuator-torque-limits), [replay](#physics-losses-during-rl)); false uses PhysX's implicit PD with only a peak clip. Check stability at your physics step |
 | `contact_geometry` | sphere of 2 cm | MuJoCo only: foot radius, `sole_offset`, `foot_size` |
 
 If any motion of a robot lacks base height or linear velocity, the state tokens hide
@@ -295,7 +295,8 @@ of the paper):
 | Replay is not saved in checkpoints | Resuming continues with an empty buffer |
 | Rotor robots are not supported | Not needed yet; `NotImplementedError` |
 | Targets pass through `ActionMap`, which keeps the requested effort inside each actuator's torque-speed envelope | BFM-Zero relies on the simulator's constant effort limit only; see [Actuator torque limits](#actuator-torque-limits) |
-| Three torque penalties (limit, continuous load, power) | Normalized by each robot's own limits, so they fit every robot |
+| The simulators clip the PD torque to the torque-speed envelope at every physics step | A motor driver does; BFM-Zero's simulator clips at a constant effort |
+| Three torque penalties (limit, continuous load, power), with per-robot weights adapted by Lagrange multipliers | Normalized by each robot's own limits, with data-sheet targets instead of tuned weights |
 | No torque in any observation | BFM-Zero's G1 has no torque input either; earlier versions of this repo fed the last torque, now removed ([why](dynamics.md#why-training-uses-no-estimated-torque)) |
 | Physics losses on the policy's own rollouts (physics replay) | Keeps the encoder's dynamics faithful on the states the policy visits |
 
@@ -303,28 +304,42 @@ of the paper):
 
 The actor outputs normalized actions; a PD drive turns the resulting position targets
 into torque. A policy that asks for far more torque than a motor has saturates it,
-heats it, or behaves differently on hardware. Three layers handle this, and none needs a
-torque measurement on the robot.
-
-**1. The simulators clip at peak torque.** Isaac Lab's actuator `effort_limit` and
-MuJoCo's `forcerange` are `τ^peak`, as on the hardware's motor driver. This is the only
-limit inside a control step (the PD effort changes over the four physics steps).
-
-**2. `ActionMap` keeps the request inside the torque-speed envelope.**
-[`model/rl/actions.py`](../model/rl/actions.py) maps an action to a target as BFM-Zero
-does (`nominal + action_scale · a`, clipped to the joint limits) and then moves each
-position-mode target so the effort the PD law requests at the current state,
-`K_p (a − q) − K_d qd`, stays within the envelope
+heats it, or behaves differently on hardware. Four layers handle this, and none needs a
+torque measurement on the robot. All of them use one definition of the envelope,
+`model.physics.envelope_limit`:
 
 ```text
 τ^max(qd) = min(τ^peak, P^max / |qd|)   for |qd| ≤ ω^max,   0 beyond
 ```
 
-(`model.physics.envelope_targets`; the same `torque_limit` defines the motor
-feasibility labels of task D). The moved target is `q + (clip(τ) + K_d qd) / K_p`.
-The environments call it every control step (`EnvConfig.clip_to_envelope`,
-`--clip_to_envelope`, default true), and **the robot must call the same code**, so the
-policy is trained on exactly the targets it will send:
+**1. The simulators apply the envelope at every physics step.** A motor driver limits
+current inside its own fast loop, so the torque available changes with speed within a
+control step. The simulators do the same:
+
+| Simulator | How | Setting |
+|---|---|---|
+| MuJoCo (`MujocoEmbodimentEnv`) | `motor` actuators; before every `mj_step` the environment computes `clip(K_p (a − q) − K_d qd, ±τ^max(qd))` with `model.physics.pd_envelope_torque` | `EnvConfig.substep_envelope` (default true; false uses MuJoCo's `position` actuators with only the constant peak clip) |
+| Isaac Lab (`IsaacEmbodimentEnv`) | an `IdealPDActuator` subclass (`envelope_actuator_cfg`) whose effort clip is `model.physics.envelope_clip`, evaluated by Isaac Lab at every physics step | `"explicit_actuators"` on the source (default true; false uses `ImplicitActuatorCfg` with only the constant peak clip) |
+
+Without this, a joint near its no-load speed still received up to peak torque within a
+control step: on the test quadruped with full random actions, MuJoCo's peak clip alone
+exceeded the envelope by up to 10 N m (the full peak), and the per-physics-step clip by
+0 (`test_every_physics_step_stays_inside_the_envelope`). The explicit actuators also give
+the physics replay its exact torque labels ([below](#physics-losses-during-rl)). Explicit
+PD with stiff gains needs a small enough physics step; legged_gym (Rudin et al., CoRL 2021)
+computes PD torques explicitly at 200 Hz, and the MuJoCo tests (including the light G1
+wrists) are stable at 200 Hz with the default rotor inertia. Check new robots before a
+long run.
+
+**2. `ActionMap` keeps the request inside the envelope at the control rate.**
+[`model/rl/actions.py`](../model/rl/actions.py) maps an action to a target as BFM-Zero
+does (`nominal + action_scale · a`, clipped to the joint limits) and then moves each
+position-mode target so the effort the PD law requests at the current state,
+`K_p (a − q) − K_d qd`, stays within `τ^max(qd)` (`model.physics.envelope_targets`; the
+same `torque_limit` defines the motor feasibility labels of task D). The moved target is
+`q + (clip(τ) + K_d qd) / K_p`. The environments call it every control step
+(`EnvConfig.clip_to_envelope`, `--clip_to_envelope`, default true), and **the robot must
+call the same code**, so the policy is trained on exactly the targets it will send:
 
 ```python
 from model.rl import ActionMap
@@ -337,28 +352,62 @@ The observation's previous-action features use the sent (clipped) target, in tra
 and on the robot alike.
 
 **3. Torque penalties shape the policy.** `TorqueMonitor` adds three auxiliary rewards,
-each a sum over actuated joints and dimensionless, so one weight fits every robot:
+each a sum over actuated joints and dimensionless, so one weight fits every robot. It
+receives the applied torque of every physics step (`[N, S, J]`), and averages loads and
+powers over them:
 
-| Reward | Formula | Weight (default) |
+| Reward | Formula | Starting weight |
 |---|---|---|
 | `penalty_torque_limit` | `relu(\|τ_req\| − τ^max(qd)) / τ^peak` of the actor's raw targets, before `ActionMap` clips them: how far the actor asks beyond the envelope | −2.0 |
 | `penalty_torque_continuous` | `relu(EMA[(τ / τ^cont)²] − 1)`, the load averaged over `thermal_time_constant` (1 s, `EnvConfig`): sustained torque above the continuous rating, a thermal proxy | −0.5 |
 | `penalty_power` | `relu(\|τ qd\| − P^max) / P^max` | −0.5 |
 
-`τ` is the simulator's applied torque (exact there; never a policy input). The weights
-are ours, not BFM-Zero's, and untuned. They enter Q_R with BFM-Zero's penalties through
-`aux_reward_scales`.
+`τ` is the simulator's applied torque (exact there; never a policy input). The penalties
+enter Q_R with BFM-Zero's penalties through `aux_reward_scales`.
+
+**4. The penalty weights adapt per robot (Lagrange multipliers).** Fixed weights would
+need tuning: too weak and the policy rides the limits and overheats the motors, too
+strong and it moves timidly and cannot get up. Instead each penalty has a target from
+the data sheet on a measured metric, and its weight is the starting weight times a
+per-robot multiplier `λ` ([`model/rl/constraints.py`](../model/rl/constraints.py)),
+updated before every update round by multiplicative dual ascent:
+
+```text
+λ ← clip(λ · exp(rate · (metric − target) / target), 0.1, 10)
+```
+
+| Penalty | Metric (mean over the rollout since the last update) | Target |
+|---|---|---|
+| `penalty_torque_limit` | `torque_request_over_envelope`: share of joints whose request exceeds `τ^max(qd)` | 0.05 |
+| `penalty_torque_continuous` | `torque_load_over_continuous`: the largest thermal load `EMA[(τ/τ^cont)²]` | 1.0 |
+| `penalty_power` | `power_over_limit`: share of joints and physics steps above `P^max` | 0.02 |
+
+A robot that violates a target gets a growing weight until it complies; one that
+complies easily gets a shrinking weight, so it is not held back. This is the Lagrangian
+relaxation of a constrained MDP (Altman 1999; Tessler et al., RCPO, ICLR 2019; Stooke et
+al., PID Lagrangian, ICML 2020), with the multipliers in log space so they stay positive
+and scale-free. The agent keeps one row of reward weights per robot
+(`DaGetFbCprAgent.set_reward_scales`), and checkpoints keep the multipliers.
+
+| Setting (`FbCprConfig`) | Default | Meaning |
+|---|---|---|
+| `adaptive_torque_penalties` (`--adaptive_torque_penalties`) | true | False keeps the starting weights fixed |
+| `penalty_multiplier_rate` (`--penalty_multiplier_rate`) | 0.05 | Step size per update round, relative to the target |
+| `penalty_multiplier_bounds` | (0.1, 10) | Multiplier range (Python only) |
+| `torque_targets` | the table above | `{reward: [metric, target]}` (Python only) |
 
 TensorBoard shows, per robot: `rollout/<robot>/torque_request_over_envelope` (share of
-joints whose raw request exceeds the envelope), `torque_at_envelope` (share at ≥ 99% of
-it after clipping), `torque_rms_over_continuous`, and `torque_load_over_continuous`
-(the largest load average).
+joints whose raw request exceeds the envelope), `torque_at_envelope` (share of joints and
+physics steps at ≥ 99% of it), `torque_rms_over_continuous`, `torque_load_over_continuous`
+(the largest load average), `power_over_limit`, and `multiplier/<penalty>` (the current
+multipliers).
 
-**Limits of this design.** The envelope is enforced at the control rate; within a
-step only the simulator's constant peak clip applies, and Isaac Lab's implicit PD
-cannot express the speed-dependent envelope. A robot whose firmware runs the PD loop
-at a higher rate should apply its own envelope there too. The motor heads of task D
-learn the same envelope, but they do not constrain actions.
+**Limits of this design.** The envelope is symmetric: braking torque (opposite to the
+velocity) is limited like driving torque, although many drives brake up to peak torque.
+This is conservative (the simulated robot brakes less than the real one), and the motor
+labels of task D use the same convention. The targets are data-sheet style choices, not
+measured on a robot. The motor heads of task D learn the envelope, but they do not
+constrain actions.
 
 ### Tuning the encoder
 
@@ -413,8 +462,8 @@ removes the mismatch without recording every physics step.
 | Simulator | How the labels are taken | Exact |
 |---|---|---|
 | MuJoCo (`MujocoEmbodimentEnv`) | `mj_forward` before the first `mj_step`: `qfrc_actuator` and `qacc` of the state | yes; checked against the graph's floating-base dynamics to 1e-6 in flight (`test_label_worlds_have_exact_start_labels_in_flight`) |
-| Isaac Lab, `"explicit_actuators": true` | `IdealPDActuatorCfg`: the adapter computes the PD torque, PhysX applies it for the first physics step; acceleration is `(v₁ − v₀)/physics_dt` of that step, base terms rotated into the start base frame | the torque is exact; the acceleration is PhysX's velocity change with that torque, equal to the instantaneous acceleration up to PhysX's integrator and solver tolerance. Unverified on a real Isaac Lab (no GPU here) |
-| Isaac Lab, default implicit actuators | none: PhysX solves the PD law internally, and Isaac Lab's reported `applied_torque` is the explicit formula kept as telemetry, not the torque PhysX applied | — (kinematic episodes; the trainer prints a note) |
+| Isaac Lab, `"explicit_actuators": true` (default) | the envelope actuator computes the PD torque, PhysX applies it for the first physics step; acceleration is `(v₁ − v₀)/physics_dt` of that step, base terms rotated into the start base frame | the torque is exact; the acceleration is PhysX's velocity change with that torque, equal to the instantaneous acceleration up to PhysX's integrator and solver tolerance. Unverified on a real Isaac Lab (no GPU here) |
+| Isaac Lab, `"explicit_actuators": false` | none: PhysX solves the PD law internally, and Isaac Lab's reported `applied_torque` is the explicit formula kept as telemetry, not the torque PhysX applied | — (kinematic episodes; the trainer prints a note) |
 
 Label worlds keep the **nominal link masses and base center of mass** (friction, pushes
 and the nominal-pose offset stay randomized), so their labels belong to the robot their
@@ -438,9 +487,11 @@ so a push at step `t` ends frame `t`'s transition. Either way the interrupted tr
 gets no effect label (`transition_valid`), since the push is not part of the dynamics.
 An exact chunk has no final end-of-chunk frame, because that state has no labels yet.
 
-What remains approximate: MuJoCo's contacts are slightly soft, which does not affect B
-and C (they are MuJoCo's own forces and accelerations) but makes MuJoCo differ from the
-rigid-contact response of R by about 20% with default contacts
+What remains approximate: the MuJoCo models are built with stiff contacts
+(`solimp` 0.99–0.999), with which MuJoCo differs from the rigid-contact response of R by
+about 3% (20% with MuJoCo's default soft contacts); B and C are MuJoCo's own forces and
+accelerations and do not depend on it. Frames where a foot in contact slides faster than
+`max_contact_slip` (0.1 m/s) get no response labels, as in the offline data
 ([details](dynamics.md#assumptions-and-checks)). Joint-limit forces enter the
 accelerations without a feature that describes them, as in the offline simulated data.
 
@@ -505,7 +556,8 @@ python scripts/train_bfm.py --data_config configs/rl/go1_h1_ground.json \
 | `train/critic_loss`, `aux_critic_loss`, `Q_discriminator`, `Q_aux`, `Q_fb`, `actor_loss` | Critics and actor |
 | `train/physics/loss`, `physics/loss_fk`, `loss_response`, … | Physics auxiliary losses of the encoder |
 | `train/aux_rew/*` | Each unscaled auxiliary reward, including `penalty_torque_limit`, `penalty_torque_continuous`, `penalty_power` |
-| `rollout/<robot>/torque_request_over_envelope`, `torque_at_envelope`, `torque_rms_over_continuous`, `torque_load_over_continuous` | Torque-limit use ([details](#actuator-torque-limits)) |
+| `rollout/<robot>/torque_request_over_envelope`, `torque_at_envelope`, `torque_rms_over_continuous`, `torque_load_over_continuous`, `power_over_limit` | Torque-limit use ([details](#actuator-torque-limits)) |
+| `rollout/<robot>/multiplier/<penalty>` | Lagrange multiplier of each torque penalty's weight (1 = starting weight) |
 | `physics_replay/episodes` | Rollout episodes available to the physics losses |
 | `physics_replay/exact_episodes` | Those with exact torque labels (label worlds of MuJoCo, or Isaac Lab with explicit actuators) |
 | `train/frames_per_second`, `gradient_steps` | Throughput |
@@ -619,9 +671,10 @@ What keeps `observation` small on the CPU:
   history via `DaGetTokenizer`, and the last action as its target and the PD
   effort it requests. No torque measurement enters. Base-level signals can go in
   as context tokens.
-- **Contact compliance.** The response labels assume rigid contacts; MuJoCo's
-  default soft contacts differ by about 20%. Whether to stiffen the simulators'
-  contacts or to model compliance in the labels is open.
+- **Contact compliance.** The response labels assume rigid, sticking contacts. The
+  generated MuJoCo models use stiff contacts (3% from the rigid response instead of
+  20%), and sliding frames are dropped; compliant real feet (rubber pads, soft ground)
+  remain a model error of a few percent, like an inaccurate URDF inertia.
 - **Tuning.** The shared encoder's learning rate, physics weight, and state
   adapter have no reference values.
 - **Offline training.** Training needs a simulator, as in BFM-Zero.

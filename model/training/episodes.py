@@ -432,22 +432,66 @@ def detect_contacts(
     lowest = depth.max(dim=-1, keepdim=True).values
     contact = depth >= lowest - height_tolerance
     if base.linear_known:
-        linear, angular = frame_velocities(
-            graph, positions, velocities, base.linear_velocity, base.angular_velocity
-        )
-        bodies = graph.link_bodies[graph.link_index(links)].tolist()
-        frames = graph.forward_kinematics(positions)
-        speeds = []
-        for index, body in enumerate(bodies):
-            point = points[:, index]
-            if body < 0:
-                velocity = base.linear_velocity + torch.linalg.cross(base.angular_velocity, point, dim=-1)
-            else:
-                lever = point - frames[:, body, :3, 3]
-                velocity = linear[:, body] + torch.linalg.cross(angular[:, body], lever, dim=-1)
-            speeds.append(velocity.norm(dim=-1))
-        contact &= torch.stack(speeds, dim=-1) < speed_tolerance
+        speeds = contact_point_speeds(graph, positions, velocities, base.linear_velocity, base.angular_velocity, links)
+        contact &= speeds < speed_tolerance
     return contact
+
+
+def contact_point_speeds(
+    graph,
+    positions: torch.Tensor,
+    velocities: torch.Tensor,
+    base_linear_velocity: torch.Tensor,
+    base_angular_velocity: torch.Tensor,
+    links: list[str],
+) -> torch.Tensor:
+    """Return the speed in the world of each contact link's frame origin, ``[T, C]`` in m/s.
+
+    The origin is the point the contact constraints hold still (``model.dynamics.contact_maps``),
+    so its speed measures how far a frame is from the "contacts hold" assumption of the
+    response labels.
+
+    Args:
+        graph (EmbodimentGraph): Robot with a floating base.
+        positions (torch.Tensor): ``[T, J]`` q.
+        velocities (torch.Tensor): ``[T, J]`` qd.
+        base_linear_velocity (torch.Tensor): ``[T, 3]`` base frame.
+        base_angular_velocity (torch.Tensor): ``[T, 3]`` base frame.
+        links (list[str]): Contact links.
+
+    Returns:
+        torch.Tensor: ``[T, C]`` speeds.
+    """
+    return contact_point_velocities(graph, positions, velocities, base_linear_velocity, base_angular_velocity, links).norm(dim=-1)
+
+
+def contact_point_velocities(
+    graph,
+    positions: torch.Tensor,
+    velocities: torch.Tensor,
+    base_linear_velocity: torch.Tensor,
+    base_angular_velocity: torch.Tensor,
+    links: list[str],
+) -> torch.Tensor:
+    """Return the world velocity of each contact link's frame origin in the base frame, ``[T, C, 3]``.
+
+    With a zero base linear velocity this is the velocity relative to the base origin's
+    motion, which is the same for every foot that stands still in the world.
+    """
+    points = graph.link_poses(positions, links)[..., :3, 3]
+    linear, angular = frame_velocities(graph, positions, velocities, base_linear_velocity, base_angular_velocity)
+    bodies = graph.link_bodies[graph.link_index(links)].tolist()
+    frames = graph.forward_kinematics(positions)
+    result = []
+    for index, body in enumerate(bodies):
+        point = points[:, index]
+        if body < 0:
+            velocity = base_linear_velocity + torch.linalg.cross(base_angular_velocity, point, dim=-1)
+        else:
+            lever = point - frames[:, body, :3, 3]
+            velocity = linear[:, body] + torch.linalg.cross(angular[:, body], lever, dim=-1)
+        result.append(velocity)
+    return torch.stack(result, dim=-2)
 
 
 def action_features(
@@ -550,13 +594,37 @@ def _contact_state(
     base: _BaseTrack,
     height_tolerance: float,
     speed_tolerance: float,
-) -> tuple[torch.Tensor | None, bool]:
-    """Return the contact flags ``[T, C]`` (None without contact links) and whether they were given."""
+    method: str = "height",
+    accelerations: torch.Tensor | None = None,
+) -> tuple[torch.Tensor | None, bool, torch.Tensor | None, torch.Tensor | None]:
+    """Return the contact flags ``[T, C]`` (None without contact links), whether they were
+    given, and, for the ``dynamics`` method, the unexplained base wrench in N ``[T]`` and the
+    selection confidence ``[T]`` (else None for both)."""
+    from model.training.contacts import CONTACT_DETECTION_METHODS, select_contacts
+
+    if method not in CONTACT_DETECTION_METHODS:
+        raise ValueError(f"contact_detection must be one of {CONTACT_DETECTION_METHODS}, not {method!r}")
     if not (record.graph.floating_base and record.contact_links):
-        return None, False
+        return None, False, None, None
     if trajectory.contacts is not None:
-        return trajectory.contacts.to(torch.bool), True
-    return detect_contacts(record, q, qd, gravity, base, height_tolerance, speed_tolerance), False
+        return trajectory.contacts.to(torch.bool), True, None, None
+    if method == "dynamics" and len(record.contact_links) <= 8:
+        contacts, relative, confidence = select_contacts(
+            record, q, qd, accelerations, gravity, base, record.actuator, trajectory.base_external_wrench,
+            height_tolerance=height_tolerance,
+        )
+        weight = record.graph.total_mass * gravity.norm(dim=-1)
+        return contacts, False, relative * weight, confidence
+    # More than eight feet would mean too many subsets: fall back to the height rule.
+    return detect_contacts(record, q, qd, gravity, base, height_tolerance, speed_tolerance), False, None, None
+
+
+def _low_feet(record: EmbodimentRecord, positions: torch.Tensor, gravity: torch.Tensor, tolerance: float) -> torch.Tensor:
+    """Return bool ``[T, C]``: feet within ``tolerance`` of the lowest foot along gravity."""
+    points = record.graph.link_poses(positions, list(record.contact_links))[..., :3, 3]
+    down = gravity / gravity.norm(dim=-1, keepdim=True).clamp_min(EPSILON)
+    depth = (points * down[:, None]).sum(-1)
+    return depth >= depth.max(dim=-1, keepdim=True).values - tolerance
 
 
 def _stable_contacts(contacts: torch.Tensor, margin: int) -> torch.Tensor:
@@ -609,7 +677,7 @@ def estimate_episode_efforts(
     if not graph.floating_base:
         zeros = torch.zeros((steps, 3), dtype=torch.float64)
         base = _BaseTrack(False, False, zeros, zeros, zeros, zeros, False, None, None)
-    contacts, _ = _contact_state(record, trajectory, q, qd, gravity, base, contact_height_tolerance, contact_speed_tolerance)
+    contacts, _, _, _ = _contact_state(record, trajectory, q, qd, gravity, base, contact_height_tolerance, contact_speed_tolerance)
     estimate = estimate_joint_efforts(
         graph, q, qd, qdd, gravity,
         BaseMotion(base.linear_velocity, base.angular_velocity, base.linear_acceleration, base.angular_acceleration),
@@ -647,6 +715,10 @@ def process_episode(
     proposal_variants: int = 2,
     contact_margin_steps: int = 2,
     seed: int = 0,
+    max_contact_slip: float | None = 0.1,
+    contact_detection: str = "dynamics",
+    detected_contact_response: bool = True,
+    min_contact_confidence: float = 3.0,
 ) -> dict[str, torch.Tensor]:
     """Compute features and labels for every frame and action variant, without torque estimates.
 
@@ -676,6 +748,18 @@ def process_episode(
         contact_margin_steps (int): Frames before and after a contact change whose
             response labels are dropped (the contact set is uncertain there).
         seed (int): Seed of the proposals.
+        max_contact_slip (float | None): Response labels are dropped in frames where a
+            foot in contact moves faster than this (m/s): the contact does not hold there,
+            and against MuJoCo the rigid response's median error grows from about 2%
+            below 0.1 m/s to 9% at 0.1-0.2 m/s and over 20% above. Needs the base linear
+            velocity; None turns the check off.
+        contact_detection (str): How contacts are inferred when the data has none:
+            ``dynamics`` (default) or ``height`` (``model.training.contacts``).
+        detected_contact_response (bool): Give response labels on frames whose contacts
+            were inferred (False: only sensor or simulator contacts give them).
+        min_contact_confidence (float): With ``dynamics`` detection, response labels are
+            kept only where the chosen foot set beats the next best by this cost margin
+            (``select_contacts``).
 
     Returns:
         dict[str, torch.Tensor]: Per-frame ``[T, ...]`` and per-variant
@@ -712,8 +796,9 @@ def process_episode(
         base = _BaseTrack(False, False, zeros, zeros, zeros, zeros, False, None, None)
     actuator = record.actuator
     has_thrust = bool((actuator["mode"] == ACTUATOR_MODES.index("thrust")).any())
-    contacts, contacts_given = _contact_state(
-        record, trajectory, q, qd, gravity, base, contact_height_tolerance, contact_speed_tolerance
+    contacts, contacts_given, selection_residual, confidence = _contact_state(
+        record, trajectory, q, qd, gravity, base, contact_height_tolerance, contact_speed_tolerance,
+        contact_detection, qdd,
     )
     surface = record.surface_contacts if record.surface_contacts is not None else len(record.contact_links) <= 2
     links = list(record.contact_links)
@@ -733,7 +818,9 @@ def process_episode(
     # This check uses the inverse-dynamics machinery, but only its residual: no
     # estimated torque is kept.
     residual = torch.zeros(steps, dtype=torch.float64)
-    if contacts is not None and not contacts_given:
+    if selection_residual is not None:
+        residual = selection_residual  # pushing-only forces in friction pyramids
+    elif contacts is not None and not contacts_given:
         residual = estimate_joint_efforts(
             graph, q, qd, qdd, gravity,
             BaseMotion(base.linear_velocity, base.angular_velocity, base.linear_acceleration, base.angular_acceleration),
@@ -762,8 +849,19 @@ def process_episode(
         not floating or has_thrust or bool(links) or trajectory.base_external_wrench is not None
     )
     response_valid = torch.full((steps,), support_known)
+    slipping = torch.zeros(steps, dtype=torch.bool)
     if contacts is not None:
         response_valid &= _stable_contacts(contacts, contact_margin_steps)
+        if not contacts_given and not detected_contact_response:
+            response_valid[:] = False
+        if confidence is not None:
+            response_valid &= confidence > min_contact_confidence
+        if max_contact_slip is not None and floating and base.linear_known:
+            speeds = contact_point_speeds(graph, q, qd, base.linear_velocity, base.angular_velocity, links)
+            # Inferred contacts may leave out a sliding foot; every foot near the ground counts.
+            checked = contacts if contacts_given else contacts | _low_feet(record, q, gravity, contact_height_tolerance)
+            slipping = (checked & (speeds > max_contact_slip)).any(dim=-1)
+            response_valid &= ~slipping
 
     # Variant 0: what was executed.
     if trajectory.actions is not None:
@@ -944,6 +1042,8 @@ def process_episode(
         "response_valid": response_valid,
         "contact_residual": store(residual),
         "contacts_detected": torch.full((steps,), contacts is not None and not contacts_given),
+        "contact_slipping": slipping,
+        "contact_flags": contacts if contacts is not None else torch.zeros((steps, 0), dtype=torch.bool),
         "floating_base": torch.full((steps,), floating),
         # Per variant [T, V, ...]
         "torque_source": source,

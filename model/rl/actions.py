@@ -17,8 +17,14 @@ robot's own limits so one weight fits every robot:
   above the continuous rating, a thermal proxy with time constant ``thermal_time_constant``;
 * ``penalty_power``: ``sum_j relu(|tau qd| - P^max) / P^max``.
 
-``tau`` is the simulator's applied torque, which is exact there. A real robot only needs
-``ActionMap``; it never needs a torque measurement.
+Their weights adapt per robot to data-sheet targets on the metrics below
+(``model.rl.constraints``), so they need no tuning.
+
+``tau`` is the simulator's applied torque of every physics step of the control step
+(``[N, S, J]``), which is exact there; loads and powers are averaged over the physics steps.
+The simulators also clip the PD torque to the envelope at every physics step
+(``EnvConfig.substep_envelope``, ``IsaacRobotConfig.explicit_actuators``). A real robot only
+needs ``ActionMap``; it never needs a torque measurement.
 """
 
 from __future__ import annotations
@@ -111,15 +117,20 @@ class TorqueMonitor:
         """Update the load average with the applied torque and return rewards and metrics.
 
         Args:
-            torque (np.ndarray): ``[N, J]`` applied joint torques of the step.
-            qd (np.ndarray): ``[N, J]`` joint velocities after the step.
+            torque (np.ndarray): ``[N, S, J]`` applied joint torques of the step's ``S``
+                physics steps (``[N, J]`` is one physics step).
+            qd (np.ndarray): Joint velocities at which each torque was applied, same shape.
 
         Returns:
             tuple: Unscaled auxiliary rewards ``{name: [N]}`` and metrics ``{name: [N]}``.
         """
+        torque, qd = np.asarray(torque, dtype=np.float64), np.asarray(qd, dtype=np.float64)
+        if torque.ndim == 2:
+            torque, qd = torque[:, None], qd[:, None]
         continuous = self.tensors["continuous_torque"].numpy()
         ratio = np.where(self.actuated, torque / (continuous + EPSILON), 0.0)
-        self.load += self.rate * (ratio**2 - self.load)
+        square = (ratio**2).mean(axis=1)  # [N, J] mean over the physics steps
+        self.load += self.rate * (square - self.load)
         power_limit = self.tensors["max_power"].numpy()
         power = np.where(self.actuated, np.clip(np.abs(torque * qd) - power_limit, 0.0, None) / (power_limit + EPSILON), 0.0)
         envelope = torque_limit(self.tensors, torch.as_tensor(qd)).numpy()
@@ -127,13 +138,14 @@ class TorqueMonitor:
         rewards = {
             "penalty_torque_limit": torch.from_numpy(self.requested_excess.copy()),
             "penalty_torque_continuous": torch.from_numpy(np.clip(self.load - 1.0, 0.0, None).sum(axis=1)),
-            "penalty_power": torch.from_numpy(power.sum(axis=1)),
+            "penalty_power": torch.from_numpy(power.mean(axis=1).sum(axis=1)),
         }
         count = max(int(self.actuated.sum()), 1)
         metrics = {
             "torque_request_over_envelope": torch.from_numpy(self.saturated.copy()),
-            "torque_at_envelope": torch.from_numpy(at_limit.sum(axis=1) / count),
-            "torque_rms_over_continuous": torch.from_numpy(np.sqrt((ratio**2).sum(axis=1) / count)),
+            "torque_at_envelope": torch.from_numpy(at_limit.mean(axis=1).sum(axis=1) / count),
+            "torque_rms_over_continuous": torch.from_numpy(np.sqrt(square.sum(axis=1) / count)),
             "torque_load_over_continuous": torch.from_numpy(self.load.max(axis=1)),
+            "power_over_limit": torch.from_numpy(((power > 0) & self.actuated).mean(axis=1).sum(axis=1) / count),
         }
         return rewards, metrics

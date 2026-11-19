@@ -496,11 +496,41 @@ def dynamics_features(
     return assemble_dynamics_features(mass_diagonal, coriolis, gravity_term, friction, tensors["continuous_torque"])
 
 
-def torque_limit(tensors: Mapping[str, torch.Tensor], velocities: torch.Tensor) -> torch.Tensor:
-    """Evaluate the torque-speed envelope ``tau^max(qd)``.
+def envelope_limit(
+    velocities: torch.Tensor, peak_torque: torch.Tensor, max_power: torch.Tensor, max_velocity: torch.Tensor
+) -> torch.Tensor:
+    """Evaluate the torque-speed envelope from its three parameters.
 
-    ``tau^max = min(tau^peak, P^max / |qd|)`` for ``|qd| <= omega^max``, and zero
-    beyond the no-load speed.
+    ``tau^max = min(tau^peak, P^max / |qd|)`` for ``|qd| <= omega^max``, and zero beyond
+    the no-load speed. This is the one definition of the envelope: ``torque_limit``,
+    ``ActionMap``, the MuJoCo environment's per-physics-step clip and the Isaac Lab
+    actuator all call it.
+
+    Args:
+        velocities (torch.Tensor): ``[..., J]`` joint velocities.
+        peak_torque (torch.Tensor): ``[J]`` (or broadcastable) peak effort.
+        max_power (torch.Tensor): Mechanical power limit.
+        max_velocity (torch.Tensor): No-load speed.
+
+    Returns:
+        torch.Tensor: ``[..., J]`` available effort magnitude.
+    """
+    speed = velocities.abs()
+    peak = peak_torque.to(velocities)
+    limit = torch.minimum(peak, max_power.to(velocities) / speed.clamp_min(EPSILON))
+    return torch.where(speed <= max_velocity.to(velocities), limit, torch.zeros_like(limit))
+
+
+def envelope_clip(
+    torque: torch.Tensor, velocities: torch.Tensor, peak_torque: torch.Tensor, max_power: torch.Tensor, max_velocity: torch.Tensor
+) -> torch.Tensor:
+    """Clip efforts into ``[-tau^max(qd), tau^max(qd)]`` (``envelope_limit``)."""
+    limit = envelope_limit(velocities.to(torque), peak_torque, max_power, max_velocity)
+    return torch.maximum(torch.minimum(torque, limit), -limit)
+
+
+def torque_limit(tensors: Mapping[str, torch.Tensor], velocities: torch.Tensor) -> torch.Tensor:
+    """Evaluate the torque-speed envelope ``tau^max(qd)`` of a robot (``envelope_limit``).
 
     Args:
         tensors (Mapping[str, torch.Tensor]): Output of ``actuator_tensors``.
@@ -509,11 +539,34 @@ def torque_limit(tensors: Mapping[str, torch.Tensor], velocities: torch.Tensor) 
     Returns:
         torch.Tensor: ``[..., J]`` available effort magnitude.
     """
-    speed = velocities.abs()
-    peak = tensors["peak_torque"].to(velocities)
-    power = tensors["max_power"].to(velocities)
-    limit = torch.minimum(peak, power / speed.clamp_min(EPSILON))
-    return torch.where(speed <= tensors["max_velocity"].to(velocities), limit, torch.zeros_like(limit))
+    return envelope_limit(velocities, tensors["peak_torque"], tensors["max_power"], tensors["max_velocity"])
+
+
+def pd_envelope_torque(
+    tensors: Mapping[str, torch.Tensor], targets: torch.Tensor, positions: torch.Tensor, velocities: torch.Tensor
+) -> torch.Tensor:
+    """Return the effort a position-mode PD drive applies, inside the envelope.
+
+    ``clip(K_p (a - q) - K_d qd, -tau^max(qd), tau^max(qd))`` for position-mode joints with
+    ``K_p > 0``, zero for the others. Simulators call it at every physics step, the way a
+    motor driver limits current inside its own loop.
+
+    Args:
+        tensors (Mapping[str, torch.Tensor]): Output of ``actuator_tensors``.
+        targets (torch.Tensor): ``[..., J]`` position targets.
+        positions (torch.Tensor): ``[..., J]`` q now.
+        velocities (torch.Tensor): ``[..., J]`` qd now.
+
+    Returns:
+        torch.Tensor: ``[..., J]`` applied efforts.
+    """
+    targets = targets.to(torch.float64)
+    kp = tensors["kp"].to(targets)
+    kd = tensors["kd"].to(targets)
+    position_mode = (tensors["mode"].to(targets.device) == ACTUATOR_MODES.index("position")) & (kp > 0)
+    request = kp * (targets - positions.to(targets)) - kd * velocities.to(targets)
+    applied = envelope_clip(request, velocities.to(targets), tensors["peak_torque"], tensors["max_power"], tensors["max_velocity"])
+    return torch.where(position_mode, applied, torch.zeros_like(applied))
 
 
 def torque_limit_excess(tensors: Mapping[str, torch.Tensor], torque: torch.Tensor, velocities: torch.Tensor) -> torch.Tensor:

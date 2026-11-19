@@ -8,7 +8,9 @@ def default_aux_reward_scales() -> dict[str, float]:
 
     The first five are BFM-Zero's weights (paper Table 4) for its embodiment-independent
     penalties. The three torque penalties are ours (``model.rl.actions``); they are
-    normalized by each robot's own limits, and their weights are untuned starting points.
+    normalized by each robot's own limits. With ``adaptive_torque_penalties`` their weights
+    are only starting values, scaled per robot by Lagrange multipliers
+    (``model.rl.constraints``).
     """
     return {
         "limits_dof_pos": -10.0,
@@ -20,6 +22,13 @@ def default_aux_reward_scales() -> dict[str, float]:
         "penalty_torque_continuous": -0.5,
         "penalty_power": -0.5,
     }
+
+
+def default_torque_targets() -> dict[str, list]:
+    """Return the torque penalties' metric targets (``model.rl.constraints``)."""
+    from model.rl.constraints import DEFAULT_TORQUE_TARGETS
+
+    return {name: [metric, target] for name, (metric, target) in DEFAULT_TORQUE_TARGETS.items()}
 
 
 @dataclass
@@ -68,6 +77,12 @@ class FbCprConfig:
         rollout_expert_trajectories_length (int): Length of those rollouts in steps.
         rollout_expert_trajectories_percentage (float): Fraction of such environments.
         aux_reward_scales (dict[str, float]): Weight of each auxiliary reward.
+        adaptive_torque_penalties (bool): Scale the torque penalties' weights per robot by
+            Lagrange multipliers that hold each metric at its target (``model.rl.constraints``).
+        torque_targets (dict[str, list]): Reward name to ``[metric name, target]``.
+        penalty_multiplier_rate (float): Step size of the multiplier update (log scale, per
+            update round, relative to the target).
+        penalty_multiplier_bounds (tuple[float, float]): Multiplier range.
     """
 
     lr_f: float = 3e-4
@@ -108,6 +123,10 @@ class FbCprConfig:
     rollout_expert_trajectories_length: int = 250
     rollout_expert_trajectories_percentage: float = 0.5
     aux_reward_scales: dict[str, float] = field(default_factory=default_aux_reward_scales)
+    adaptive_torque_penalties: bool = True
+    torque_targets: dict[str, list] = field(default_factory=default_torque_targets)
+    penalty_multiplier_rate: float = 0.05
+    penalty_multiplier_bounds: tuple[float, float] = (0.1, 10.0)
 
     def __post_init__(self) -> None:
         """Reject mixture ratios that cannot be sampled."""

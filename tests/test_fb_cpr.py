@@ -3,6 +3,7 @@
 import importlib.util
 import itertools
 import json
+import math
 import sys
 import tempfile
 import unittest
@@ -824,7 +825,8 @@ class EnvironmentTest(unittest.TestCase):
             self.assertTrue(bool((result.aux_rewards[name] >= 0).all()), name)
         # Full actions ask far beyond the envelope of these weak actuators.
         self.assertGreater(float(result.aux_rewards["penalty_torque_limit"].min()), 0.0)
-        self.assertEqual(set(result.metrics), {"torque_request_over_envelope", "torque_at_envelope", "torque_rms_over_continuous", "torque_load_over_continuous"})
+        self.assertEqual(set(result.metrics), {"torque_request_over_envelope", "torque_at_envelope", "torque_rms_over_continuous",
+                                               "torque_load_over_continuous", "power_over_limit"})
         self.assertEqual(tuple(result.contacts.shape), (2, len(FEET)))
 
     def test_targets_stay_inside_the_torque_envelope(self) -> None:
@@ -875,6 +877,8 @@ class EnvironmentTest(unittest.TestCase):
         power = (np.clip(np.abs(torque[0] * qd[0]) - tensors["max_power"].numpy(), 0, None) / tensors["max_power"].numpy()).sum()
         self.assertAlmostEqual(float(rewards["penalty_power"][0]), float(power), delta=1e-6 * max(float(power), 1.0))
         self.assertAlmostEqual(float(metrics["torque_rms_over_continuous"][0]), 2.0, places=4)
+        over = (np.abs(torque[0] * qd[0]) > tensors["max_power"].numpy()).mean()
+        self.assertAlmostEqual(float(metrics["power_over_limit"][0]), float(over), places=6)
         monitor.reset(np.array([0]))
         self.assertEqual(float(monitor.load.max()), 0.0)
 
@@ -1002,6 +1006,30 @@ class EnvironmentTest(unittest.TestCase):
         self.assertTrue({"fd", "id", "response", "effect"} <= set(output.loss_components))
         self.assertTrue(torch.isfinite(output.loss))
 
+    def test_every_physics_step_stays_inside_the_envelope(self) -> None:
+        """With the substep envelope, no physics step exceeds tau^max(qd); MuJoCo's peak clip alone does."""
+        from model.physics import torque_limit
+
+        excess = {}
+        for substep_envelope in (True, False):
+            env, embodiment = self.env(num_envs=4, clip_to_envelope=False, substep_envelope=substep_envelope)
+            env.reset(frames=[None] * 4)
+            rng = np.random.default_rng(0)
+            tensors = embodiment.record.actuator
+            worst, power_limited = 0.0, 0
+            for _ in range(40):
+                step = env.step(rng.choice([-1.0, 1.0], (4, env.joints)))
+                torque, speed = env._torque_substeps()
+                self.assertEqual(torque.shape, (4, env.substeps, env.joints))
+                limit = torque_limit(tensors, torch.from_numpy(speed)).numpy()
+                worst = max(worst, float((np.abs(torque) - limit).max()))
+                power_limited += int((limit < tensors["peak_torque"].numpy() - 1e-9).sum())
+            torch.testing.assert_close(step.torque, torch.from_numpy(torque.mean(axis=1)))
+            self.assertGreater(power_limited, 100)  # the speed-dependent part is exercised
+            excess[substep_envelope] = worst
+        self.assertLessEqual(excess[True], 1e-9)
+        self.assertGreater(excess[False], 1.0)
+
     def test_fixed_base_robot_tracks_targets(self) -> None:
         """A robot without a floating base gets no free joint and follows its targets."""
         from model.rl.envs import DomainRandomization, EnvConfig, MujocoEmbodimentEnv
@@ -1099,13 +1127,59 @@ class EnvironmentTest(unittest.TestCase):
                     "train/physics/loss_fk", "train/physics/loss_response", "train/aux_rew/penalty_undesired_contact",
                     "train/aux_rew/penalty_torque_limit", "rollout/quad/0-ground/fallen_fraction",
                     "rollout/quad/0-ground/torque_request_over_envelope", "physics_replay/episodes", "physics_replay/exact_episodes",
-                    "train/physics/loss_fd", "train/physics/loss_id",
+                    "train/physics/loss_fd", "train/physics/loss_id", "rollout/quad/0-ground/multiplier/penalty_torque_limit",
                     "eval/quad/0-ground/tracking_mpjpe", "eval/quad/0-ground/tracking_emd", "eval/quad/0-ground/getting_up_rate", "eval/biped/0-ground/goal_mpjpe"):
             self.assertIn(tag, tags)
         names = [item["name"] for item in json.loads((output / "embodiments.json").read_text())]
         self.assertEqual(names, ["quad/0-ground", "biped/0-ground"])
         script.main([*common, "--num_env_steps", "64", "--resume_from", str(checkpoint)])
         self.assertEqual(torch.load(checkpoint, weights_only=False)["frames"], 64)
+
+
+class PenaltyMultiplierTest(unittest.TestCase):
+    """Torque penalty weights adapt per robot to their metric targets."""
+
+    def test_dual_step(self) -> None:
+        """Above the target the multiplier grows, below it shrinks, within bounds; unobserved robots keep theirs."""
+        from model.rl.constraints import PenaltyMultipliers
+
+        multipliers = PenaltyMultipliers(2, {"penalty_power": ("power_over_limit", 0.1)}, rate=0.5, bounds=(0.5, 2.0))
+        multipliers.observe(0, {"power_over_limit": torch.tensor([0.15, 0.15])})
+        values = multipliers.update()
+        self.assertAlmostEqual(float(values[0, 0]), math.exp(0.5 * (0.15 - 0.1) / 0.1), places=6)
+        self.assertEqual(float(values[1, 0]), 1.0)
+        for _ in range(20):
+            multipliers.observe(0, {"power_over_limit": torch.tensor([1.0])})
+            multipliers.observe(1, {"power_over_limit": torch.tensor([0.0])})
+            values = multipliers.update()
+        self.assertEqual(values[:, 0].tolist(), [2.0, 0.5])
+        multipliers.update()  # nothing observed: unchanged
+        self.assertEqual(multipliers.values[:, 0].tolist(), [2.0, 0.5])
+        scales = multipliers.scales({"penalty_power": -0.5, "limits_dof_pos": -10.0}, ["limits_dof_pos", "penalty_power"])
+        torch.testing.assert_close(scales, torch.tensor([[-10.0, -1.0], [-10.0, -0.25]]))
+        restored = PenaltyMultipliers(2, {"penalty_power": ("power_over_limit", 0.1)})
+        restored.load_state_dict(multipliers.state_dict())
+        self.assertEqual(restored.values.tolist(), multipliers.values.tolist())
+        with self.assertRaises(ValueError):
+            PenaltyMultipliers(1, {"penalty_power": ("power_over_limit", 0.0)})
+
+    def test_agent_uses_each_robots_weights(self) -> None:
+        """The auxiliary reward of a transition uses its robot's row; checkpoints keep the rows."""
+        agent, replays, motions = build_agent()
+        scales = agent.reward_scales
+        self.assertEqual(tuple(scales.shape), (agent.robots, len(agent.reward_names)))
+        scales[1] = 0.0
+        agent.set_reward_scales(scales)
+        with self.assertRaises(ValueError):
+            agent.set_reward_scales(torch.zeros(3))
+        batch = agent._training_batch(replays, [4] * agent.robots)
+        picked = agent._reward_scales[batch.robots]
+        self.assertTrue(bool((picked[batch.robots == 1] == 0).all()))
+        self.assertTrue(bool((picked[batch.robots == 0] != 0).any()))
+        state = agent.state_dict()
+        other, _, _ = build_agent()
+        other.load_state_dict(state)
+        torch.testing.assert_close(other.reward_scales, scales)
 
 
 class EncoderCheckpointTest(unittest.TestCase):

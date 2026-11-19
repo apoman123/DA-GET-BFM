@@ -387,6 +387,65 @@ class GroupTest(unittest.TestCase):
         self.assertEqual(float(articulation.coms[0].abs().max()), 0.0)
         self.assertFalse(torch.allclose(articulation.masses[1], torch.ones_like(articulation.masses[1])))
 
+    def test_torque_metrics_use_every_physics_step(self) -> None:
+        """The monitor sees the torque of each physics step, recorded after each write."""
+        env, articulation, _, _, _ = build(count=2)
+        torques = iter([1.0, 2.0, 3.0, 4.0])
+
+        def write():
+            articulation.calls.append("write")
+            articulation.state.applied_torque[:] = next(torques)
+
+        articulation.write_data_to_sim = write
+        simulation = SimpleNamespace(get_physics_dt=lambda: 0.005, step=lambda render=True: None, forward=lambda: None)
+        env.prepare(np.zeros((2, env.joints)))
+        IsaacGroup(simulation, [env], 4).advance()
+        torque, speed = env._torque_substeps()
+        self.assertEqual(torque.shape, (2, 4, env.joints))
+        self.assertEqual(torque[0, :, 0].tolist(), [1.0, 2.0, 3.0, 4.0])
+        step = env.collect()
+        torch.testing.assert_close(step.torque, torch.full((2, env.joints), 2.5, dtype=torch.float64))
+
+    def test_envelope_actuator_clips_like_the_rest(self) -> None:
+        """The explicit Isaac Lab actuator replaces only the effort clip, with ``envelope_clip``."""
+        import sys
+        from types import ModuleType
+        from unittest import mock
+
+        from model.physics import torque_limit
+        from model.rl.isaac_env import envelope_actuator_cfg
+
+        class IdealPDActuatorCfg:  # minimal stand-ins for Isaac Lab's classes
+            def __init__(self, **kwargs):
+                for key, value in kwargs.items():
+                    setattr(self, key, value)
+
+        class IdealPDActuator:
+            def __init__(self, cfg, joint_names, num_envs, device):
+                self.cfg, self._joint_names, self._num_envs, self._device = cfg, joint_names, num_envs, device
+                self.actuator_effort_limit = torch.tensor([[cfg.actuator_effort_limit[name] for name in joint_names]] * num_envs)
+
+        def resolve(value, default, names, num_envs, device):
+            return torch.tensor([[value[name] for name in names]] * num_envs)
+
+        modules = {"isaaclab": ModuleType("isaaclab"), "isaaclab.actuators": ModuleType("isaaclab.actuators"),
+                   "isaaclab.actuators.actuator_base": ModuleType("isaaclab.actuators.actuator_base"), "isaaclab.utils": ModuleType("isaaclab.utils")}
+        modules["isaaclab.actuators"].IdealPDActuator = IdealPDActuator
+        modules["isaaclab.actuators"].IdealPDActuatorCfg = IdealPDActuatorCfg
+        modules["isaaclab.actuators.actuator_base"].resolve_joint_parameter = resolve
+        modules["isaaclab.utils"].configclass = lambda cls: cls
+        robot = record()
+        with mock.patch.dict(sys.modules, modules):
+            cfg = envelope_actuator_cfg(robot, 0.01)
+            actuator = cfg.class_type(cfg, list(robot.graph.joint_names), 3, "cpu")
+        self.assertEqual(cfg.armature, 0.01)
+        tensors = robot.actuator
+        speed = torch.stack([torch.zeros(robot.graph.num_joints), 0.9 * tensors["max_velocity"], 1.1 * tensors["max_velocity"]])
+        effort = torch.full_like(speed, 1e3)
+        clipped = actuator._clip_effort(effort, speed)
+        torch.testing.assert_close(clipped, torque_limit(tensors, speed).to(clipped))
+        torch.testing.assert_close(actuator._clip_effort(-effort, speed), -clipped)
+
     def test_rollout_runs_on_the_adapter(self) -> None:
         """The training loop's rollout builds observations from the adapter's state."""
         from model.rl.trainer import ObservationNoise, Rollout

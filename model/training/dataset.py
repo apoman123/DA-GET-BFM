@@ -10,6 +10,9 @@ A JSON data config lists trajectory sources and the observation layout::
       "measured_torque_weight": 0.0,
       "max_contact_residual": 0.5,
       "contact_margin_steps": 2,
+      "max_contact_slip": 0.1,
+      "contact_detection": "dynamics",
+      "min_contact_confidence": 3.0,
       "proposal_variants": 2,
       "response_range": [0.02, 1.0],
       "sources": [
@@ -63,7 +66,7 @@ from model.training.episodes import (
 )
 from model.training.sources import SOURCE_TYPES, resolve_path
 
-CACHE_VERSION = 5
+CACHE_VERSION = 6
 VARIABLE_LOCAL_SIZE = 5
 VARIABLE_GLOBAL_SIZE = BASE_FEATURE_SIZE
 FD_TORQUE_CLIP = 5.0
@@ -123,6 +126,11 @@ def load_data_config(source: str | Path | dict) -> tuple[dict[str, Any], Path | 
         return source, None
     path = Path(source)
     return json.loads(path.read_text(encoding="utf-8")), path.parent
+
+
+def _optional_float(value: Any) -> float | None:
+    """Return ``float(value)``, or None for None."""
+    return None if value is None else float(value)
 
 
 def _cache_key(config: dict[str, Any], base: Path | None) -> str:
@@ -230,6 +238,10 @@ def build_physics_datasets(
                             proposal_variants=int(config.get("proposal_variants", 2)),
                             contact_margin_steps=int(config.get("contact_margin_steps", 2)),
                             seed=int(config.get("seed", 0)) * 1_000_003 + len(episodes),
+                            max_contact_slip=_optional_float(config.get("max_contact_slip", 0.1)),
+                            contact_detection=str(source.get("contact_detection", config.get("contact_detection", "dynamics"))),
+                            detected_contact_response=bool(source.get("detected_contact_response", True)),
+                            min_contact_confidence=float(config.get("min_contact_confidence", 3.0)),
                         ),
                     )
                 )

@@ -218,7 +218,20 @@ class DaGetFbCprAgent:
         self.z_buffers = [ZBuffer(config.z_buffer_size, model_config.z_dim, self.device) for _ in range(self.robots)]
         self._tracking: dict[int, tuple[torch.Tensor, torch.Tensor]] = {}
         self.reward_names = tuple(config.aux_reward_scales)
-        self._reward_scales = torch.tensor([config.aux_reward_scales[name] for name in self.reward_names], device=self.device)
+        # One row of weights per robot, so constrained penalties can differ between robots.
+        base = torch.tensor([config.aux_reward_scales[name] for name in self.reward_names], device=self.device)
+        self._reward_scales = base.expand(self.robots, -1).clone()
+
+    def set_reward_scales(self, scales: torch.Tensor) -> None:
+        """Set the auxiliary reward weights ``[robots, K]`` (in ``reward_names`` order)."""
+        if tuple(scales.shape) != tuple(self._reward_scales.shape):
+            raise ValueError(f"reward scales must be {tuple(self._reward_scales.shape)}, got {tuple(scales.shape)}")
+        self._reward_scales = scales.to(self.device, torch.float32).clone()
+
+    @property
+    def reward_scales(self) -> torch.Tensor:
+        """Return the auxiliary reward weights ``[robots, K]``."""
+        return self._reward_scales.clone()
 
     def _embed(self, model: DaGetEncoder, robot: int, observation: Observation, grad: bool = False) -> torch.Tensor:
         """Encode one robot's policy observation with the selected shared core.
@@ -549,7 +562,8 @@ class DaGetFbCprAgent:
         critic_loss, target, value, uncertainty = self._value_loss(
             self.model.critic, self.target_critic, config.critic_pessimism_penalty, reward, batch, embeddings, next_embeddings, z
         )
-        aux_reward = self.aux_normalizer((batch.aux_rewards * self._reward_scales).sum(-1, keepdim=True))
+        scales = self._reward_scales[batch.robots.to(self.device)]
+        aux_reward = self.aux_normalizer((batch.aux_rewards * scales).sum(-1, keepdim=True))
         aux_loss, aux_target, aux_value, aux_uncertainty = self._value_loss(
             self.model.aux_critic, self.target_aux_critic, config.aux_critic_pessimism_penalty, aux_reward, batch, embeddings, next_embeddings, z
         )
@@ -663,6 +677,7 @@ class DaGetFbCprAgent:
             "target_critic": self.target_critic.state_dict(),
             "target_aux_critic": self.target_aux_critic.state_dict(),
             "aux_normalizer": self.aux_normalizer.state_dict(),
+            "reward_scales": self._reward_scales.cpu(),
             "optimizers": {name: optimizer.state_dict() for name, optimizer in self.optimizers.items()},
             "model_config": asdict(self.model_config),
             "config": asdict(self.config),
@@ -679,6 +694,8 @@ class DaGetFbCprAgent:
         self.target_critic.load_state_dict(state["target_critic"])
         self.target_aux_critic.load_state_dict(state["target_aux_critic"])
         self.aux_normalizer.load_state_dict(state["aux_normalizer"])
+        if "reward_scales" in state:
+            self.set_reward_scales(state["reward_scales"])
         for name, optimizer in self.optimizers.items():
             optimizer.load_state_dict(state["optimizers"][name])
 

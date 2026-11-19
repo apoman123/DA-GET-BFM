@@ -37,8 +37,10 @@ DA-GET-BFM/
 │   │   ├── configuration_fb_cpr.py # FbCprConfig: BFM-Zero's training hyperparameters
 │   │   ├── observation.py     # policy and state views of one robot (no torque input)
 │   │   ├── actions.py         # ActionMap (targets inside the torque envelope), TorqueMonitor
-│   │   ├── envs.py            # simulator-independent environment logic and MuJoCo worlds
-│   │   ├── isaac_env.py       # Isaac Lab worlds; several robots in one simulation
+│   │   ├── constraints.py     # PenaltyMultipliers: torque-penalty weights by Lagrange multipliers
+│   │   ├── envs.py            # environment logic, MuJoCo worlds (PD and envelope per physics step),
+│   │   │                      # start-of-step labels of label worlds
+│   │   ├── isaac_env.py       # Isaac Lab worlds; several robots in one simulation; envelope actuator
 │   │   ├── buffers.py         # per-robot replay buffer and expert motions
 │   │   ├── agent.py           # DaGetFbCprAgent: D, F, B, critics, encoder and actor updates
 │   │   ├── evaluation.py      # tracking, goal and getting-up tasks, EMD, motion priorities
@@ -56,7 +58,8 @@ DA-GET-BFM/
 │   │   ├── sources.py         # synthetic, MuJoCo ground, and Hugging Face sources
 │   │   ├── ground_sim.py      # MJCF from the graph, standing and pushes on the ground
 │   │   ├── episodes.py        # per-frame features and labels (torque sources, response
-│   │   │                      # operator), base reconstruction, contact detection, records
+│   │   │                      # operator, slip check), base reconstruction, height rule, records
+│   │   ├── contacts.py        # contact inference: subset selection with confidence, evaluation
 │   │   ├── dataset.py         # data config, caching, dataset, collator
 │   │   └── trainer.py         # Trainer that logs each task loss
 │   └── README.md              # module-level technical notes
@@ -66,6 +69,7 @@ DA-GET-BFM/
 │   ├── make_data_config.py           # write a data config from a URDF and a dataset
 │   ├── convert_dataset.py            # convert public datasets to the table format
 │   ├── validate_torque_estimation.py # estimated vs measured torques on a real Go1 (analysis)
+│   ├── evaluate_contact_detection.py # inferred vs sensor or simulator contacts
 │   ├── benchmark_inference.py        # 50 Hz latency of every network
 │   └── download_urdfs.py             # fetch Unitree and ANYmal D URDFs into assets/urdf
 ├── assets/robots/quadrotor_x.urdf    # X quadrotor for synthetic flight
@@ -88,7 +92,7 @@ uv sync --all-extras
 uv run pytest
 ```
 
-The suite has 182 tests (the MuJoCo and HDF5 tests are skipped without the
+The suite has 197 tests (the MuJoCo and HDF5 tests are skipped without the
 `sim` and `validation` extras, and the CUDA Graph test without a GPU):
 
 - `test_embodiment.py`: URDF graphs, features, kinematics, mass matrix,
@@ -127,13 +131,26 @@ The suite has 182 tests (the MuJoCo and HDF5 tests are skipped without the
 - `test_ground.py` (MuJoCo):
   - the generated MJCF has our dynamics (mass matrix and bias forces);
   - a quadruped stands with exact labels and probe accelerations, and trusted
-    simulator contacts;
+    simulator contacts; response labels are dropped exactly where contacts change or
+    a foot in contact slides faster than `max_contact_slip`;
+  - the generated MJCF has the stiff contact `solimp` and selectable `position` or
+    `motor` actuators;
   - `G δτ` matches MuJoCo's acceleration change within 5% once its contacts are
     stiff (about 20% with the default soft contacts), while ignoring the contacts
     is off by more than 100%;
   - estimated torques differ from MuJoCo's almost only by internal contact
     forces (motion-determined error below 10%);
   - a biped is steadied by a small recorded spotter wrench.
+- `test_contacts.py`:
+  - the contact selector chooses all four feet of a standing quadruped confidently,
+    no foot in free fall (a foot that carries nothing is not a contact), and leaves
+    out a foot that moves unlike the others when the base velocity is unknown;
+  - kinematic contact probabilities follow height; robots without feet are rejected;
+  - the evaluation metrics;
+  - (MuJoCo) frames that keep response labels have the simulator's contact set more
+    than 90% of the time; the switches `detected_contact_response`,
+    `min_contact_confidence` and `contact_detection` act as documented; the evaluation
+    script reports both methods.
 - `test_conversion.py`:
   - every converter on small files in each dataset's real format;
   - the NeuroBEM thrust identification;
@@ -161,6 +178,11 @@ The suite has 182 tests (the MuJoCo and HDF5 tests are skipped without the
     torque penalties and their formulas;
   - the targets sent stay inside the torque envelope, and `ActionMap` on the
     robot gives the same targets as the environment;
+  - with the per-physics-step envelope no physics step exceeds `τ^max(qd)`, while
+    MuJoCo's peak clip alone exceeds it by more than 1 N m, and the speed-dependent
+    part is exercised;
+  - the torque-penalty multipliers: dual step, bounds, per-robot weights in the
+    agent's auxiliary reward, checkpoints;
   - the physics replay turns rollout chunks into episodes with response, effect,
     motor and FK labels and no torque labels when the simulator gives no
     start-of-step labels;
@@ -179,8 +201,10 @@ The suite has 182 tests (the MuJoCo and HDF5 tests are skipped without the
 - `test_isaac_env.py`: the Isaac Lab adapter against a fake of its API: joint and
   body orders, quaternions and frames, contact penalties, randomization, batched writes,
   stepping several robots, start-of-step labels from the first physics step with
-  explicit actuators (and none with implicit ones), and nominal masses in label
-  worlds. It does not run Isaac Lab.
+  explicit actuators (and none with implicit ones), nominal masses in label
+  worlds, the torque of every physics step for the monitor, and the envelope
+  actuator's clip (on stand-ins of Isaac Lab's actuator classes). It does not run
+  Isaac Lab.
 - `test_pretraining.py`:
   - both data sources and caching;
   - collation and masks;
@@ -277,22 +301,28 @@ a pipeline check, not a conclusive ablation.
   forward and inverse dynamics come from simulated data.
 - **The response is a rigid, holding-contact model.** It assumes contacts that
   neither slip nor lift under the torque change, and needs to know which feet are
-  down. MuJoCo's soft contacts differ by about 20%. Without contact sensors, the
-  contact set comes from a height-and-speed heuristic checked by the base-wrench
-  residual.
+  down. The generated MuJoCo models use stiff contacts (3% from the rigid response;
+  20% with MuJoCo's defaults), and frames with a foot sliding faster than 0.1 m/s
+  are dropped (this check needs the base linear velocity). Without contact sensors,
+  the contact set is inferred with a confidence; on six real Go1 recordings 82–97%
+  of the frames that keep response labels have the right set, so some label noise
+  remains on recorded data without contacts.
 - **Rotor inertia must be supplied.** URDFs have none; set `armature` from motor
   data. The RL default (0.01 kg m²) is a stability value, not a measurement.
-- **Torque limits are enforced at the control rate.** `ActionMap` clips the
-  request at each control step; inside a step only the simulator's constant peak
-  clip applies. The torque penalty weights are untuned.
+- **Torque targets are not measured on a robot.** The simulators clip the PD torque
+  to the envelope at every physics step, and the penalty weights adapt per robot
+  through Lagrange multipliers, but the targets (5% of joints over the envelope,
+  thermal load ≤ 1, 2% over the power limit) are data-sheet style choices. The
+  envelope limits braking like driving torque (conservative). The multipliers have
+  only run in short CPU runs.
 - **The offline ground simulation stands, it does not walk.** The MuJoCo source
   produces stance, crouching, weight shifting, partial foot lift, and push
   recovery, not gaits; gaits would need a locomotion controller per robot.
   Bipeds need the recorded spotter. Feet are spheres from `contact_geometry`,
   and only feet collide, so falls end the episode. Locomotion kinematics come
   from recorded datasets; exact dynamics labels on gaits come from the RL
-  physics replay's label worlds, which in Isaac Lab need
-  `"explicit_actuators": true` (unverified on a real Isaac Lab).
+  physics replay's label worlds, which in Isaac Lab use the explicit envelope
+  actuators (the default; unverified on a real Isaac Lab).
 - **Automatic configs are guesses.** The URDF analysis and column matching
   print their reasoning; check them, especially for unusual robots, and
   replace rule-of-thumb gains and propeller coefficients with measured ones.

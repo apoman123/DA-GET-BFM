@@ -28,6 +28,7 @@ from model.pretraining import DaGetForPhysicsPretraining, DaGetPhysicsPretrainin
 from model.rl.agent import DaGetFbCprAgent
 from model.rl.buffers import ExpertMotions, ReplayBuffer
 from model.rl.configuration_fb_cpr import FbCprConfig
+from model.rl.constraints import PenaltyMultipliers
 from model.rl.envs import DomainRandomization, EmbodimentEnv, EnvConfig, EnvStep, MujocoEmbodimentEnv, MujocoGroup
 from model.rl.evaluation import evaluate, motion_priorities
 from model.rl.observation import EmbodimentObserver, Observation, RobotState, trajectory_state
@@ -350,7 +351,7 @@ def build_group(arguments: TrainingArguments, embodiments: list[Embodiment], poo
         urdf = resolve_path(item.source.get("simulation_urdf", item.source["urdf"]), item.base)
         settings = IsaacRobotConfig(
             str(urdf), item.source.get("ros_package_paths", []), item.source.get("undesired_contact_links"), bool(item.source.get("self_collisions", True)),
-            bool(item.source.get("explicit_actuators", False)),
+            bool(item.source.get("explicit_actuators", True)),
         )
         robots.append((item.record, item.env_config, settings))
     return build_isaac_group(robots, simulation, arguments.isaac_spacing)
@@ -399,8 +400,8 @@ class FbCprTrainer:
             for env in self.group.envs:
                 if not env.exact_labels:
                     print(
-                        f"NOTE: {env.record.name}: the simulator gives no exact torque labels (Isaac Lab implicit actuators); "
-                        "its physics replay has no forward or inverse dynamics labels. Set \"explicit_actuators\": true on the source to add them.",
+                        f"NOTE: {env.record.name}: the simulator gives no exact torque labels (Isaac Lab implicit actuators, "
+                        "\"explicit_actuators\": false); its physics replay has no forward or inverse dynamics labels.",
                         flush=True,
                     )
         generator = torch.Generator().manual_seed(arguments.seed)
@@ -422,11 +423,21 @@ class FbCprTrainer:
                 episodes_per_robot=arguments.physics_replay_episodes,
                 proposal_variants=int(data_config.get("proposal_variants", 2)),
                 contact_margin_steps=int(data_config.get("contact_margin_steps", 2)),
+                max_contact_slip=None if data_config.get("max_contact_slip", 0.1) is None else float(data_config.get("max_contact_slip", 0.1)),
             )
             self.physics_replay = PhysicsReplay(
                 [embodiment.record for embodiment in self.embodiments], observers[0].history_size,
                 self.embodiments[0].env_config.control_dt, settings, CollatorSettings.from_config(data_config), arguments.seed,
             )
+        self.multipliers: PenaltyMultipliers | None = None
+        if self.config.adaptive_torque_penalties:
+            targets = {name: (metric, float(target)) for name, (metric, target) in self.config.torque_targets.items()}
+            self.multipliers = PenaltyMultipliers(
+                len(self.embodiments), targets, self.config.penalty_multiplier_rate, tuple(self.config.penalty_multiplier_bounds)
+            )
+            if arguments.resume_from and "penalty_multipliers" in state:
+                self.multipliers.load_state_dict(state["penalty_multipliers"])
+            self.agent.set_reward_scales(self.multipliers.scales(self.config.aux_reward_scales, self.agent.reward_names))
         self.output = Path(arguments.output_dir)
         self.output.mkdir(parents=True, exist_ok=True)
 
@@ -465,6 +476,8 @@ class FbCprTrainer:
         state = self.agent.state_dict()
         state["frames"] = self.frames
         state["motion_priorities"] = [motions.priorities for motions in self.motions]
+        if self.multipliers is not None:
+            state["penalty_multipliers"] = self.multipliers.state_dict()
         torch.save(state, path)
         self.agent.pretrained.save_pretrained(self.output / "encoder")
         return path
@@ -524,6 +537,8 @@ class FbCprTrainer:
                 fallen_fraction[robot].append(float(rollout.env.fallen(step.state).mean()))
                 for name, value in step.metrics.items():
                     torque_metrics[robot].setdefault(name, []).append(float(value.float().mean()))
+                if self.multipliers is not None:
+                    self.multipliers.observe(robot, step.metrics)
                 done = step.terminated | step.truncated
                 episode_lengths[robot].extend(int(steps) for steps in rollout.env.steps[done.numpy()])
                 if self.physics_replay is not None:
@@ -539,6 +554,9 @@ class FbCprTrainer:
                 last["update"] = self.frames
                 if self.physics_replay is not None:
                     self.physics_replay.process()
+                if self.multipliers is not None:
+                    self.multipliers.update()
+                    self.agent.set_reward_scales(self.multipliers.scales(self.config.aux_reward_scales, self.agent.reward_names))
                 for _ in range(arguments.num_agent_updates):
                     physics = self._physics_batch()
                     metrics = self.agent.update(self.replays, self.motions, physics)
@@ -563,6 +581,10 @@ class FbCprTrainer:
                     for metric, values in torque_metrics[robot].items():
                         final[f"{name}/{metric}"] = float(np.mean(values))
                         writer.add_scalar(f"{name}/{metric}", final[f"{name}/{metric}"], self.frames)
+                    if self.multipliers is not None:
+                        for index, reward in enumerate(self.multipliers.rewards):
+                            final[f"{name}/multiplier/{reward}"] = float(self.multipliers.values[robot, index])
+                            writer.add_scalar(f"{name}/multiplier/{reward}", final[f"{name}/multiplier/{reward}"], self.frames)
                     episode_lengths[robot].clear()
                     fallen_fraction[robot].clear()
                     torque_metrics[robot].clear()

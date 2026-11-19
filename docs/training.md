@@ -58,10 +58,14 @@ or `none`.
 | RL rollouts, label worlds ([physics replay](bfm.md#physics-losses-during-rl)) | ✓ | ✓ start-of-step torque and acceleration, weight 1 (MuJoCo; Isaac Lab with explicit actuators) | ✓ (simulator contacts) | ✓ targets and proposals | ✓ conditioned on the target |
 | RL rollouts, other worlds or implicit Isaac Lab | ✓ | — | ✓ (simulator contacts) | ✓ targets and proposals | ✓ conditioned on the target |
 
-R and R⁻¹ need to know which feet are down and what holds the base: frames within
-`contact_margin_steps` of a contact change, frames whose detected contacts leave
-more than `max_contact_residual` of the weight unexplained, and floating robots
-without contacts, rotors or a recorded support wrench get no response labels.
+R and R⁻¹ need to know which feet are down, that they stick, and what holds the
+base. No response labels go to frames within `contact_margin_steps` of a contact
+change, frames where a foot in contact slides faster than `max_contact_slip`, frames
+whose inferred contacts are not confident (`min_contact_confidence`) or leave more than
+`max_contact_residual` of the weight unexplained, and floating robots without contacts,
+rotors or a recorded support wrench
+([details](dynamics.md#assumptions-and-checks),
+[contact inference](dynamics.md#which-feet-are-down-inferring-contacts)).
 
 ### Shared notation and loss reduction
 
@@ -524,6 +528,9 @@ A data config is JSON. Relative paths start from the config file.
   "measured_torque_weight": 0.0,
   "max_contact_residual": 0.5,
   "contact_margin_steps": 2,
+  "max_contact_slip": 0.1,
+  "contact_detection": "dynamics",
+  "min_contact_confidence": 3.0,
   "proposal_variants": 2,
   "response_range": [0.02, 1.0],
   "sources": [ { "type": "synthetic", ... }, { "type": "huggingface", ... } ]
@@ -536,8 +543,11 @@ A data config is JSON. Relative paths start from the config file.
 | `joint_features` | `da_get_zero` | Hardware features of the tokens (`cross_embodiment`, or `JointFeatureConfig` fields) |
 | `eval_fraction`, `seed` | 0.05, 0 | Episodes held out; split and proposal seed |
 | `measured_torque_weight` | 0.0 | Loss weight of FD/ID labels from torque sensors. Simulated torques always weigh 1. Off by default: sensor torques (Unitree's current-based estimate, for example) are themselves approximate |
-| `max_contact_residual` | 0.5 | Response labels of frames whose *detected* contacts leave more than this fraction of the weight in the base wrench unexplained are dropped |
+| `max_contact_residual` | 0.5 | Response labels of frames whose *inferred* contacts leave more than this fraction of the weight in the base wrench unexplained are dropped |
 | `contact_margin_steps` | 2 | Frames before and after a contact change without response labels |
+| `max_contact_slip` | 0.1 | Frames where a foot in contact moves faster than this (m/s) get no response labels; `null` turns the check off. Needs the base linear velocity |
+| `contact_detection` | `dynamics` | How contacts are inferred for data without them: `dynamics` (subset selection with kinematic prior, pushing-only forces in friction cones, minimum load, velocity consistency) or `height` (lowest-foot rule). A source can override it |
+| `min_contact_confidence` | 3.0 | With `dynamics`, response labels only where the chosen foot set beats the next best by this cost margin |
 | `proposal_variants` | 2 | Random torque proposals per frame (task D) for data without probes |
 | `response_range` | `[0.02, 1.0]` | Torque changes of R and R⁻¹, as fractions of peak torque (log-uniform, random sign) |
 | `include_probe_variants` | true | Index probe and proposal variants as samples |
@@ -604,7 +614,8 @@ columns that are concatenated in order.
 | `base_orientation_key` (+ `_indices`, `base_orientation_format`: `wxyz`, `xyzw`, `rpy`, `matrix`), `base_position_key` | Base pose in the world. |
 | `base_linear_velocity_key`, `base_angular_velocity_key` (+ `_frame`: `base` or `world`) | Base twist; IMU gyros give angular velocity in the base frame. |
 | `projected_gravity_key`, `imu_acceleration_key` | Unit gravity direction and accelerometer specific force, both in the base frame. |
-| `contact_links`, `contact_key`, `contact_threshold`, `surface_contacts`, `contact_height_tolerance`, `contact_speed_tolerance` | Feet, recorded contact flags or forces, and the detection heuristic. |
+| `contact_links`, `contact_key`, `contact_threshold`, `surface_contacts`, `contact_height_tolerance`, `contact_speed_tolerance` | Feet, recorded contact flags or forces, and the inference settings. |
+| `contact_detection`, `detected_contact_response` | Per-source inference method (overrides the data config), and `false` to give inferred contacts no response labels at all (dynamic gaits without contact data). |
 | `fps`, `episode_key`, `frame_key`, `max_episodes`, `smoothing_window`, `gravity`, `end_effectors` | Timing, grouping, size, smoothing, a constant gravity in the base frame, task-E frames. |
 
 Processed features and labels are cached in `.cache/physics_data/<hash>.pt`.

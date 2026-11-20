@@ -13,6 +13,13 @@ local folder) and proposes a ``huggingface`` data-config source:
 * actions with the same names;
 * base pose, twist, projected gravity, IMU, and contact columns, from their
   feature names (``x y z qx qy qz qw``, ``gx gy gz wx wy wz``, ...).
+
+The score is the size of the intersection of the two word sets over the size of their
+union (the Jaccard index), and joints are assigned greedily by score; the word rules
+are this repository's. ``meta/info.json`` is the LeRobot dataset metadata file
+(https://github.com/huggingface/lerobot); the naming conventions handled are those of
+the datasets in ``docs/data.md`` (for example Unitree's ``kLeftShoulderPitch`` in the
+``unitreerobotics/G1_WBT_*`` sets).
 """
 
 from __future__ import annotations

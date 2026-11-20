@@ -3,10 +3,13 @@
 ``DaGetBfmPolicy`` holds every per-step input in one device buffer, so a control step
 makes one host-to-device copy and one device-to-host copy. On a GPU it records the
 encoder and actor (and, separately, the encoder and B) once as CUDA Graphs
-(NVIDIA, "CUDA Graphs", CUDA C++ Programming Guide; ``torch.cuda.CUDAGraph``) and
-replays them each step: at batch 1 the networks are bound by kernel launches, which a
-replay issues as one. Input values are checked on the CPU before the copy, because a
-check on the device would wait for it, which a graph cannot record.
+(NVIDIA, *CUDA Programming Guide*, Section 4.2 "CUDA Graphs",
+https://docs.nvidia.com/cuda/cuda-programming-guide/04-special-topics/cuda-graphs.html;
+``torch.cuda.CUDAGraph``, PyTorch "CUDA semantics" notes, section "CUDA Graphs",
+https://docs.pytorch.org/docs/stable/notes/cuda.html) and replays them each step: at
+batch 1 the networks are bound by kernel launches, which a replay issues as one. Input
+values are checked on the CPU before the copy, because a check on the device would wait
+for it, which a graph cannot record.
 
 No input is a torque: the dynamics features and mass matrix come from the sensed joint
 state and IMU (``EmbodimentObserver.policy_physics``). Send the returned actions through
@@ -164,7 +167,8 @@ class DaGetBfmPolicy:
         current = torch.cuda.current_stream(self.device)
         side = torch.cuda.Stream(self.device)
         side.wait_stream(current)
-        # Warm up on a side stream (as PyTorch's CUDA Graphs notes ask), so that lazy
+        # Warm up on a side stream (PyTorch's "CUDA semantics" notes, CUDA Graphs: "Warmup
+        # must occur on a side stream"), so that lazy
         # initializations such as cuBLAS workspaces are not recorded.
         with torch.cuda.stream(side), torch.no_grad():
             for _ in range(WARMUP_RUNS):

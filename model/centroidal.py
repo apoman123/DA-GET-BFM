@@ -11,7 +11,9 @@ they are proposed as embodiment-independent auxiliary targets (proposal C3,
 ``docs/zero_shot.md``; using them as encoder targets is an unverified hypothesis).
 
 Everything is expressed in the base frame and made dimensionless with the robot's
-total mass ``m``, characteristic length ``L`` and ``g``:
+total mass ``m``, characteristic length ``L`` and standard gravity ``g`` (dynamic
+similarity: Alexander & Jayes, J. Zool. 201:135-152, 1983, DOI
+10.1111/j.1469-7998.1983.tb04266.x; ``g = 9.80665 m/s^2``, 3rd CGPM 1901):
 
 =====================  ========  ===========================
 quantity               columns   unit
@@ -23,6 +25,9 @@ composite inertia (G)  9-14      ``m L^2`` (xx, xy, xz, yy, yz, zz)
 linear momentum rate   15-17     ``m g``
 angular momentum rate  18-20     ``m g L``
 =====================  ========  ===========================
+
+The composite inertia about G uses Steiner's (parallel-axis) theorem (Lynch & Park,
+*Modern Robotics*, Cambridge University Press 2017, DOI 10.1017/9781316661239, Eq. (8.27)).
 """
 
 from __future__ import annotations
@@ -61,7 +66,7 @@ class CentroidalState:
 
 
 def _cross_matrix(vector: torch.Tensor) -> torch.Tensor:
-    """Return ``|v|^2 I - v v^T`` (the parallel-axis term per unit mass)."""
+    """Return ``|v|^2 I - v v^T`` (the parallel-axis term per unit mass, Steiner's theorem)."""
     eye = torch.eye(3, dtype=vector.dtype, device=vector.device)
     return (vector * vector).sum(-1)[..., None, None] * eye - vector[..., :, None] * vector[..., None, :]
 

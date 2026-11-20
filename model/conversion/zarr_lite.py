@@ -2,6 +2,13 @@
 
 Only what dataset exports such as GrandTour need: ``.zarray`` metadata, C-order
 chunks, and blosc, zstd, gzip, or no compression (decoded with ``numcodecs``).
+
+References:
+    * Zarr Storage Specification Version 2 (``.zarray``, ``.zgroup``, ``.zattrs``, chunk
+      keys and ``dimension_separator``): https://zarr-specs.readthedocs.io/en/latest/v2/v2.0.html.
+      The reader is written from the specification; no zarr code is copied.
+    * ``numcodecs`` (zarr-developers, MIT, https://github.com/zarr-developers/numcodecs)
+      decodes the chunks.
 """
 
 from __future__ import annotations

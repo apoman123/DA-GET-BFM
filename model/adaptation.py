@@ -9,14 +9,14 @@ regularizers. ``scripts/adapt_da_get.py`` runs the whole procedure.
 
 Evidence for the procedure:
 
-* PAD (Hansen et al., "Self-Supervised Policy Adaptation during Deployment",
-  ICLR 2021, arXiv:2007.04309) shares the feature extractor between the policy and a
+* PAD (Hansen, Jangir, Sun, Alenyà, Abbeel, Efros, Pinto and Wang, "Self-Supervised
+  Policy Adaptation during Deployment", ICLR 2021, arXiv:2007.04309) shares the feature extractor between the policy and a
   self-supervised head and, at deployment, updates the extractor and that head with
   the self-supervised loss only (one gradient step per step of the environment; the
   policy head stays fixed). Their footnote 2 avoids forward dynamics in feature space
   because a constant feature solves it trivially; our forward-dynamics task predicts
   simulator labels, not features, so that collapse does not apply.
-* TTT (Sun et al., "Test-Time Training with Self-Supervision for Generalization under
+* TTT (Sun, Wang, Liu, Miller, Efros and Hardt, "Test-Time Training with Self-Supervision for Generalization under
   Distribution Shifts", ICML 2020, PMLR 119:9229-9248, arXiv:1909.13231) fine-tunes
   only the shared feature extractor on the self-supervised loss of the test data; its
   online version starts each update from the previous one. They report a negligible
@@ -25,16 +25,20 @@ Evidence for the procedure:
 
 Building blocks, each from the cited paper (checked against the paper's text):
 
-* ``LoRALinear`` and ``LoRAMultiheadAttention``: LoRA (Hu et al., "LoRA: Low-Rank
-  Adaptation of Large Language Models", ICLR 2022, arXiv:2106.09685, Sec. 4.1):
+* ``LoRALinear`` and ``LoRAMultiheadAttention``: LoRA (Hu, Shen, Wallis, Allen-Zhu, Li,
+  Wang, Wang and Chen, "LoRA: Low-Rank Adaptation of Large Language Models", ICLR 2022,
+  arXiv:2106.09685, Sec. 4.1):
   ``h = W0 x + (alpha / r) B A x`` with ``W0`` frozen, ``B = 0`` at the start, and
   ``A`` random. The paper says "random Gaussian initialization for A" without a
-  standard deviation; the authors' reference code (microsoft/LoRA, ``loralib``, MIT)
+  standard deviation; the authors' reference code (microsoft/LoRA, ``loralib``, MIT,
+  Copyright (c) Microsoft Corporation)
   instead uses ``kaiming_uniform_(A, a=sqrt(5))``, the ``nn.Linear`` default, with the
   comment "this is different than what is described in the paper but should not
   affect performance". That is our default (``init="kaiming_uniform"``);
   ``init="gaussian"`` uses ``std = 1 / r``, the Gaussian option of Hugging Face
-  ``peft``. With ``B = 0`` both start as an exact no-op. Hu et al. "simply set alpha
+  ``peft`` (Mangrulkar, Gugger, Debut, Belkada, Paul, Bossan and Tietz, 2022,
+  https://github.com/huggingface/peft, Apache-2.0, ``init_lora_weights="gaussian"``
+  in ``src/peft/tuners/lora/layer.py``). With ``B = 0`` both start as an exact no-op. Hu et al. "simply set alpha
   to the first r we try and do not tune it"; ``alpha`` is therefore a required
   argument (``scripts/adapt_da_get.py`` defaults it to the rank). The rank has no
   default: Table 6 of the paper sweeps r in {1, 2, 4, 8, 64} and finds r = 1 already
@@ -52,11 +56,12 @@ Building blocks, each from the cited paper (checked against the paper's text):
   Transfer Learning with Convolutional Networks", ICML 2018, PMLR 80:2825-2834,
   arXiv:1802.01483, Eq. 3): ``alpha/2 ||w_S - w0_S||^2 + beta/2 ||w_Sbar||^2``, where
   S are the parameters inherited from the source network and Sbar the new ones. Their
-  Sec. 5: "alpha differs across experiments, and beta = 0.01 is consistently picked by
+  Sec. 4.2: "alpha differs across experiments, and beta = 0.01 is consistently picked by
   cross-validation for regularizing the last layer" (their Fig. 1 grid: alpha in
   {0, 1e-3, 1e-2, 1e-1, 1}). So ``beta`` defaults to 0.01 and ``alpha`` is required.
-* ``lwf_loss``: Learning without Forgetting (Li and Hoiem, ECCV 2016; IEEE TPAMI,
-  2018, DOI 10.1109/TPAMI.2017.2773081, arXiv:1606.09282). The original network's
+* ``lwf_loss``: Learning without Forgetting (Li and Hoiem, ECCV 2016, LNCS Part IV,
+  pp. 614-629, DOI 10.1007/978-3-319-46493-0_37; IEEE TPAMI 40(12):2935-2947, 2018,
+  DOI 10.1109/TPAMI.2017.2773081, arXiv:1606.09282). The original network's
   outputs are recorded on the new task's data and the adapted network is trained to
   keep them, with the temperature-softened cross entropy of their Eq. 2-4, "T = 2
   according to a grid search on a held out set", and the loss balance weight
@@ -82,7 +87,7 @@ Adaptations to this repository, and what is not from the papers:
   effect, motor margins), so their outputs are kept with a squared error. Li and
   Hoiem compare L1, L2, cross entropy and their distillation loss as the
   response-preserving loss (their Fig. 7) and find only a small advantage for
-  distillation ("the similarity measure is not crucial"). The two motor feasibility
+  distillation ("the similarity measure is not crucial", their Sec. 3). The two motor feasibility
   flags are independent binary labels; softening a two-class distribution
   ``(p, 1 - p)`` by their Eq. 4 gives exactly ``sigmoid(logit / T)``, so each flag uses
   their loss on that pair. We return the Kullback-Leibler form: it differs from their
@@ -112,7 +117,7 @@ DEFAULT_LORA_TARGET = (
     r"(self_attention\.attention|cross_attention\.attention|physics_attention\.(query|key|value|output))"
 )
 MHA_PROJECTIONS = ("q", "k", "v", "o")
-# beta of L2-SP: "beta = 0.01 is consistently picked by cross-validation" (Li et al., 2018, Sec. 5).
+# beta of L2-SP: "beta = 0.01 is consistently picked by cross-validation" (Li et al., 2018, Sec. 4.2).
 L2SP_BETA = 0.01
 # T and lambda_o of LwF (Li and Hoiem, TPAMI 2018, Sec. 3).
 LWF_TEMPERATURE = 2.0

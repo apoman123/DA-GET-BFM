@@ -18,6 +18,21 @@ accelerations it produces at that same instant (``StepStart``). These worlds kee
 nominal link masses and base center of mass, so the labels belong to the robot their
 tokens describe. ``MujocoEmbodimentEnv`` runs on CPU from an embodiment graph, for tests
 and small checks. Training at scale uses ``model.rl.isaac_env``.
+
+Sources of the BFM-Zero settings (https://github.com/LeCAR-Lab/BFM-Zero, CC BY-NC 4.0;
+Li et al., ICLR 2026, arXiv:2511.04131): 200 Hz physics with control decimation 4
+(``humanoidverse/config/simulator/isaacsim.yaml``); 10 s episodes with every termination
+off (``config/env/legged_motions.yaml``); lying-down starts with probability 0.3 and
+motion prioritization (``humanoidverse/train.py``; the rotation by a quarter turn about x
+is ``lie_down_init`` in ``envs/legged_robot_motions/legged_robot_motions.py``); the
+randomization ranges (``config/domain_rand/domain_rand.yaml``); the penalty definitions
+(``envs/legged_base_task/legged_robot_base.py`` and ``legged_robot_motions.py``) with
+the soft joint limit of ``config/rewards/reward_bfm_zero.yaml``. The joint-limit and
+action-rate penalties and the soft limits come from legged_gym (Rudin et al.,
+CoRL 2021, PMLR 164:91-100, arXiv:2109.11978). Domain randomization: Tobin et
+al. (IROS 2017, DOI 10.1109/IROS.2017.8202133) and, for dynamics, Peng et al.
+(ICRA 2018, DOI 10.1109/ICRA.2018.8460528). MuJoCo: Todorov, Erez &
+Tassa, IROS 2012, pp. 5026-5033, DOI 10.1109/IROS.2012.6386109.
 """
 
 from __future__ import annotations
@@ -37,13 +52,21 @@ from model.rl.observation import RobotState
 from model.training.episodes import EmbodimentRecord
 from model.training.ground_sim import ContactGeometry, build_mjcf
 
-SOFT_LIMIT = 0.95  # BFM-Zero's soft_dof_pos_limit
+SOFT_LIMIT = 0.95  # BFM-Zero's reward_limit.soft_dof_pos_limit (config/rewards/reward_bfm_zero.yaml)
 QUARTER_TURN = np.array([[1.0, 0.0, 0.0], [0.0, 0.0, -1.0], [0.0, 1.0, 0.0]])
 
 
 @dataclass
 class DomainRandomization:
-    """BFM-Zero's randomization ranges (paper Table 4); ``enabled=False`` turns all of them off."""
+    """BFM-Zero's randomization ranges; ``enabled=False`` turns all of them off.
+
+    The values are those of BFM-Zero's ``humanoidverse/config/domain_rand/domain_rand.yaml``
+    (``friction_range``, ``link_mass_range``, ``base_com_range``,
+    ``default_dof_pos_noise_range``, ``push_interval_s``, ``max_push_vel_xy``,
+    ``max_push_ang_vel``). Table 4 of the paper (arXiv:2511.04131v2) lists the same ranges
+    except the push interval and the angular push, and prints friction as
+    ``U([-0.5, 1.25])``; the config's ``[0.5, 1.25]`` is used here.
+    """
 
     enabled: bool = True
     friction: tuple[float, float] = (0.5, 1.25)
@@ -61,12 +84,16 @@ class EnvConfig:
 
     Attributes:
         num_envs (int): Parallel worlds.
-        control_dt (float): Control period in s (BFM-Zero: 50 Hz).
-        physics_dt (float): Physics step in s (BFM-Zero: 200 Hz).
+        control_dt (float): Control period in s (BFM-Zero: 50 Hz, ``control_decimation`` 4).
+        physics_dt (float): Physics step in s (BFM-Zero: 200 Hz, ``isaacsim.yaml``).
         max_episode_steps (int): Episode length in control steps.
-        action_scale (float): Target offset in rad at ``|action| = 1`` (BFM-Zero: 0.25 x 5).
-        fall_start_probability (float): Episodes that start lying down (BFM-Zero: 0.3).
-        terminate_on_fall (bool): End episodes when fallen (BFM-Zero: no, it must get up).
+        action_scale (float): Target offset in rad at ``|action| = 1`` (BFM-Zero: 0.25 x 5,
+            ``robot.control.action_scale=0.25`` on actions of range
+            ``normalize_action_to=5.0`` in ``humanoidverse/train.py``).
+        fall_start_probability (float): Episodes that start lying down (BFM-Zero:
+            ``lie_down_init_prob=0.3``).
+        terminate_on_fall (bool): End episodes when fallen (BFM-Zero: no, it must get up;
+            ``config/env/legged_motions.yaml``).
         min_height_ratio (float): Fallen below this fraction of the nominal height.
         max_tilt_degrees (float): Fallen above this base tilt.
         armature (float): Rotor inertia of every joint in kg m^2, which URDFs lack, used when
@@ -259,7 +286,10 @@ class EmbodimentEnv:
         self.motion_weights = weights / weights.sum()
 
     def _lie_down(self, frame: dict[str, np.ndarray]) -> dict[str, np.ndarray]:
-        """Turn a motion frame by a quarter turn about x, onto the back or the front (BFM-Zero's start)."""
+        """Turn a motion frame by a quarter turn about x, onto the back or the front.
+
+        BFM-Zero's ``lie_down_init`` (``envs/legged_robot_motions/legged_robot_motions.py``).
+        """
         sign = 1.0 if self.rng.uniform() < 0.5 else -1.0
         turn = QUARTER_TURN.copy()
         turn[1, 2] *= sign
@@ -398,7 +428,7 @@ class EmbodimentEnv:
 
 
 class MujocoEmbodimentEnv(EmbodimentEnv):
-    """Worlds in MuJoCo, built from the embodiment graph.
+    """Worlds in MuJoCo (Todorov, Erez & Tassa, IROS 2012), built from the embodiment graph.
 
     Links collide with the floor through one sphere each, and feet through their contact
     geometry. Meshes are not used and links do not collide with each other, so self-contact
@@ -616,7 +646,10 @@ class MujocoEmbodimentEnv(EmbodimentEnv):
         return {geom for contact in range(data.ncon) for geom in (data.contact[contact].geom1, data.contact[contact].geom2)}
 
     def _slippage(self) -> np.ndarray:
-        """Return the summed speed of feet in contact (BFM-Zero's ``penalty_slippage``)."""
+        """Return the summed speed of feet in contact.
+
+        BFM-Zero's ``_reward_penalty_slippage`` (``legged_robot_base.py``).
+        """
         totals = np.zeros(self.num_envs)
         velocity = np.zeros(6)
         for index, (model, data) in enumerate(zip(self.models, self.datas)):
@@ -643,7 +676,10 @@ class MujocoEmbodimentEnv(EmbodimentEnv):
         return np.array([bool(self._contact_geoms(data) & self.link_geoms) for data in self.datas])
 
     def _feet_orientation(self) -> np.ndarray:
-        """Return the summed ``|g_xy|`` in the frame of each flat foot in contact (BFM-Zero's ``penalty_feet_ori``)."""
+        """Return the summed ``|g_xy|`` in the frame of each flat foot in contact.
+
+        BFM-Zero's ``_reward_penalty_feet_ori`` (``legged_robot_base.py``).
+        """
         if not self.flat_feet:
             return np.zeros(self.num_envs)
         totals = np.zeros(self.num_envs)

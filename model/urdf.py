@@ -4,6 +4,19 @@ Only the parts of URDF that describe joint-level structure are read: links with
 their inertial block, and joints with type, origin, axis, limit, dynamics, and
 mimic tags. Visual and collision geometry are ignored. Xacro must be expanded
 before parsing (for example with ``xacro robot.urdf.xacro > robot.urdf``).
+
+References:
+
+* URDF is the Unified Robot Description Format of ROS (Open Robotics). Tags, units,
+  defaults (``<axis>`` defaults to ``(1, 0, 0)``), the fixed-axis roll-pitch-yaw
+  convention and ``mechanicalReduction`` follow the ROS URDF XML specification:
+  http://wiki.ros.org/urdf/XML/joint, http://wiki.ros.org/urdf/XML/link and
+  http://wiki.ros.org/urdf/XML/Transmission.
+* ``axis_angle_to_matrix`` is Rodrigues' rotation formula (Rodrigues, "Des lois
+  géométriques qui régissent les déplacements d'un système solide dans l'espace...",
+  J. Math. Pures Appl. 5:380-440, 1840, https://numdam.org/item/JMPA_1840_1_5__380_0/;
+  in the form of Lynch & Park, *Modern Robotics*, Cambridge University Press 2017,
+  DOI 10.1017/9781316661239, Eq. (3.51)).
 """
 
 from __future__ import annotations
@@ -366,8 +379,9 @@ def _parse_gear_ratios(
 ) -> dict[str, float]:
     """Read gear ratios from ROS ``<transmission>`` blocks.
 
-    Both the ROS 1 layout (``mechanicalReduction`` under ``<actuator>``) and the
-    older layout (directly under ``<transmission>``) are read. The reduction is
+    Both the ROS 1 layout (``mechanicalReduction`` under ``<actuator>``,
+    http://wiki.ros.org/urdf/XML/Transmission) and the older layout (directly under
+    ``<transmission>``) are read. The reduction is
     the actuator-to-joint gear ratio N, so joint torque is N times motor torque.
 
     Args:
@@ -375,7 +389,8 @@ def _parse_gear_ratios(
         joints (dict[str, UrdfJoint]): Parsed joints, to ignore unknown names.
 
     A negative reduction (used by some robots, for example PAL's Talos, for an actuator
-    mounted in reverse) only flips the direction of motion; the gear ratio is its
+    mounted in reverse; ``talos_reduced.urdf`` of https://github.com/Gepetto/example-robot-data
+    has ``-1.0``) only flips the direction of motion; the gear ratio is its
     magnitude, which is what the torque and the reflected rotor inertia depend on.
 
     Returns:

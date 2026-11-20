@@ -25,6 +25,19 @@ Each frame can carry several *action variants*. Variant 0 is what was executed.
 Simulated data adds probe variants: other torques applied at the same state, which
 test action conditioning at a fixed pose (task B) and give infeasible proposals for
 the motor head (task D). Other data adds proposal variants for the motor head.
+
+References:
+    * Joint tokens and their hardware features (``joint_features``): GET-Zero, Patel &
+      Song, ICRA 2025, DOI 10.1109/ICRA55743.2025.11127922.
+    * Rigid-body and contact-constrained dynamics (``model.dynamics``): Featherstone,
+      Rigid Body Dynamics Algorithms, Springer 2008, DOI 10.1007/978-1-4899-7560-7.
+    * ``_difference`` equals ``numpy.gradient`` with ``edge_order=1`` (NumPy: Harris et
+      al., Nature 585:357-362, 2020, DOI 10.1038/s41586-020-2649-2).
+    * ``exp_rotation`` is Rodrigues' formula and ``_vee_log`` the matrix logarithm of
+      SO(3): Lynch & Park, Modern Robotics, Cambridge University Press 2017, Prop. 3.11
+      (eq. 3.51) and Sec. 3.2.3.3, DOI 10.1017/9781316661239.
+    * The 43-97% torque-estimate error was measured on the MIPO Go1 data
+      (``scripts/validate_torque_estimation.py``; ``docs/data.md#references``).
 """
 
 from __future__ import annotations
@@ -291,7 +304,7 @@ class Trajectory:
 
 
 def _difference(values: torch.Tensor, dt: float, wrap: torch.Tensor | None = None) -> torch.Tensor:
-    """Central finite difference along time, one-sided at the ends."""
+    """Central finite difference along time, one-sided at the ends (``numpy.gradient``)."""
     if values.shape[0] < 2:
         return torch.zeros_like(values)
     forward = values[1:] - values[:-1]
@@ -306,7 +319,7 @@ def _difference(values: torch.Tensor, dt: float, wrap: torch.Tensor | None = Non
 
 
 def _vee_log(rotation: torch.Tensor) -> torch.Tensor:
-    """Return the rotation vector (axis times angle) of rotation matrices."""
+    """Return the rotation vector (axis times angle) of rotation matrices (SO(3) logarithm)."""
     trace = rotation.diagonal(dim1=-2, dim2=-1).sum(-1)
     angle = torch.acos(((trace - 1) / 2).clamp(-1 + 1e-9, 1 - 1e-9))
     skew = torch.stack(
@@ -322,7 +335,7 @@ def _vee_log(rotation: torch.Tensor) -> torch.Tensor:
 
 
 def exp_rotation(vector: torch.Tensor) -> torch.Tensor:
-    """Return the rotation matrix of a rotation vector (Rodrigues)."""
+    """Return the rotation matrix of a rotation vector (Rodrigues' formula)."""
     angle = vector.norm(dim=-1, keepdim=True)
     axis = vector / angle.clamp_min(1e-12)
     x, y, z = axis.unbind(-1)

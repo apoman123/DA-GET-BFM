@@ -6,7 +6,8 @@ Levels (proposal v4, Sec. 5.1):
 * **L1**: parameter changes of training robots. The categories are MetaMorph's six
   zero-shot variations [1] ("variation in dynamics parameters (armature, density,
   damping, gear) and kinematics parameters (module shape, joint angle)", Fig. 6; ranges
-  in Table 2), plus size extrapolation.
+  in Table 2, and the joint-angle rule of "at least 50% overlap with the original joint
+  angle range" in Appendix A.2), plus size extrapolation.
 * **L2**: new topology within a training family, such as the number of knee joints per
   leg and the foot size (the topology parameters of Ai et al. [2], Table 6), from a
   procedural generator.
@@ -43,8 +44,9 @@ generator. Unknown keys are kept, so later tools can add fields.
 References:
     [1] A. Gupta, L. Fan, S. Ganguli, L. Fei-Fei. MetaMorph: Learning Universal
         Controllers with Transformers. ICLR 2022. arXiv:2203.11931.
-    [2] B. Ai et al. Towards Embodiment Scaling Laws in Robot Locomotion. CoRL 2025.
-        arXiv:2505.05753.
+    [2] B. Ai, L. Dai, N. Bohlinger, D. Li, T. Mu, Z. Wu, K. Fay, H. I. Christensen,
+        J. Peters, H. Su. Towards Embodiment Scaling Laws in Robot Locomotion. CoRL
+        2025, PMLR 305:3483-3515. arXiv:2505.05753.
 """
 
 from __future__ import annotations

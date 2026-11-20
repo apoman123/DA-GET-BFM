@@ -2,8 +2,29 @@
 
 The losses, targets, z mixture and rollout logic follow ``FBAgent``, ``FBcprAgent`` and
 ``FBcprAuxAgent`` of BFM-Zero (https://github.com/LeCAR-Lab/BFM-Zero; Copyright (c) Meta
-Platforms, Inc. and affiliates; CC BY-NC 4.0; Li et al., arXiv:2511.04131, 2025, and
-Tirinzoni et al., ICLR 2025). See ``THIRD_PARTY_NOTICES.md``.
+Platforms, Inc. and affiliates; CC BY-NC 4.0; Li et al., ICLR 2026, arXiv:2511.04131, and
+Tirinzoni et al., ICLR 2025, arXiv:2504.11054). See ``THIRD_PARTY_NOTICES.md``.
+
+Adapted code, by source file of that repository:
+
+* ``humanoidverse/agents/fb/agent.py`` (``FBAgent``): the FB and orthonormality losses
+  (``update_fb``), the ensemble pessimism (``get_targets_uncertainty``), the rollout z
+  (``maybe_update_rollout_context``, ``_sample_tracking_z``);
+* ``humanoidverse/agents/fb_cpr/agent.py`` (``FBcprAgent``): ``sample_mixed_z``,
+  ``encode_expert``, ``gradient_penalty_wgan``, ``update_discriminator``, ``update_critic``;
+* ``humanoidverse/agents/fb_cpr_aux/agent.py`` (``FBcprAuxAgent``): ``update`` (order of
+  the steps, relabeling), ``update_aux_critic``, ``update_actor``;
+* ``humanoidverse/agents/misc/zbuffer.py`` (``ZBuffer``) and
+  ``humanoidverse/agents/nn_models.py`` (``EMA``, ``_soft_update_params``).
+
+Methods behind them: forward-backward representations and their Bellman loss (Touati &
+Ollivier, NeurIPS 2021, arXiv:2103.07945; with the orthonormality regularizer as in
+Touati, Rapin & Ollivier, ICLR 2023, arXiv:2209.14935), the TD3-style actor and
+clipped target noise (Fujimoto, van Hoof & Meger, ICML 2018, arXiv:1802.09477), soft
+target updates (Lillicrap et al., ICLR 2016, arXiv:1509.02971), a GAN discriminator
+loss (Goodfellow et al., NIPS 2014, arXiv:1406.2661) used for imitation as in GAIL (Ho &
+Ermon, NIPS 2016, arXiv:1606.03476), its gradient penalty (Gulrajani et al., NIPS 2017,
+arXiv:1704.00028), and Adam (Kingma & Ba, ICLR 2015, arXiv:1412.6980).
 
 What changes for several robots:
 
@@ -39,7 +60,10 @@ LATENT_CHUNK = 4096
 
 
 def ensemble_pessimism(values: torch.Tensor, penalty: float) -> tuple[torch.Tensor, torch.Tensor, torch.Tensor]:
-    """Return the mean, the mean pairwise distance, and ``mean - penalty * distance`` over dim 0."""
+    """Return the mean, the mean pairwise distance, and ``mean - penalty * distance`` over dim 0.
+
+    BFM-Zero's ``FBAgent.get_targets_uncertainty`` (``humanoidverse/agents/fb/agent.py``).
+    """
     members = values.shape[0]
     difference = torch.abs(values.unsqueeze(0) - values.unsqueeze(1)).sum(dim=(0, 1)) / (members**2 - members)
     mean = values.mean(dim=0)
@@ -54,7 +78,10 @@ def _off_diagonal(size: int, reference: torch.Tensor, pairs: torch.Tensor | None
 
 def fb_bellman_loss(measures: torch.Tensor, discount: torch.Tensor, target: torch.Tensor,
                     pairs: torch.Tensor | None = None) -> tuple[torch.Tensor, torch.Tensor, torch.Tensor]:
-    """Return the FB loss with its diagonal and off-diagonal terms.
+    """Return the FB loss with its diagonal and off-diagonal terms (BFM-Zero's ``FBAgent.update_fb``).
+
+    The measure-valued Bellman loss of forward-backward representations (Touati &
+    Ollivier, NeurIPS 2021); ``pairs`` restricting the compared entries is this repo's.
 
     Args:
         measures (torch.Tensor): ``F(s_i, a_i, z_i)ᵀ B(s'_j)``, ``[P, B, B]``.
@@ -70,7 +97,11 @@ def fb_bellman_loss(measures: torch.Tensor, discount: torch.Tensor, target: torc
 
 
 def orthonormality_loss(embeddings: torch.Tensor, pairs: torch.Tensor | None = None) -> tuple[torch.Tensor, torch.Tensor, torch.Tensor]:
-    """Return the loss pushing ``B Bᵀ`` toward a scaled identity, with its two terms."""
+    """Return the loss pushing ``B Bᵀ`` toward a scaled identity, with its two terms.
+
+    BFM-Zero's orthonormality loss (``FBAgent.update_fb``); see Touati, Rapin & Ollivier
+    (ICLR 2023).
+    """
     covariance = embeddings @ embeddings.T
     mask = _off_diagonal(covariance.shape[0], covariance, pairs)
     diagonal = -covariance.diag().mean()
@@ -79,7 +110,10 @@ def orthonormality_loss(embeddings: torch.Tensor, pairs: torch.Tensor | None = N
 
 
 def soft_update(source: nn.Module, target: nn.Module, tau: float) -> None:
-    """Move target parameters toward the source by ``tau``."""
+    """Move target parameters toward the source by ``tau``.
+
+    Soft target updates (Lillicrap et al., ICLR 2016), as BFM-Zero's ``_soft_update_params``.
+    """
     with torch.no_grad():
         for parameter, target_parameter in zip(source.parameters(), target.parameters()):
             target_parameter.mul_(1 - tau).add_(parameter, alpha=tau)
@@ -91,7 +125,11 @@ def split_counts(total: int, groups: int) -> list[int]:
 
 
 class EmaRewardNormalizer(nn.Module):
-    """Divide rewards by the running std of the batch mean and square (BFM-Zero's ``EMA``, ``scale=True``)."""
+    """Divide rewards by the running std of the batch mean and square.
+
+    BFM-Zero's ``EMA`` with ``scale=True`` (``humanoidverse/agents/nn_models.py``), whose
+    ``1 - tau^t`` division is the bias correction of Adam (Kingma & Ba, ICLR 2015).
+    """
 
     def __init__(self, tau: float = 0.99, epsilon: float = 1e-8) -> None:
         super().__init__()
@@ -111,7 +149,10 @@ class EmaRewardNormalizer(nn.Module):
 
 
 class ZBuffer:
-    """Ring buffer of latents used in training, sampled for rollouts (one per robot)."""
+    """Ring buffer of latents used in training, sampled for rollouts (one per robot).
+
+    Adapted from BFM-Zero's ``ZBuffer`` (``humanoidverse/agents/misc/zbuffer.py``).
+    """
 
     def __init__(self, capacity: int, dim: int, device: torch.device) -> None:
         self.storage = torch.zeros((capacity, dim), device=device)
@@ -297,7 +338,10 @@ class DaGetFbCprAgent:
 
     @torch.no_grad()
     def tracking_latents(self, robot: int, view: StateView) -> torch.Tensor:
-        """Return ``z_t`` for a motion ``[T, ...]``: the projected mean of B over its next ``seq_length`` frames."""
+        """Return ``z_t`` for a motion ``[T, ...]``: the projected mean of B over its next ``seq_length`` frames.
+
+        As BFM-Zero's ``FBModel.tracking_inference`` (``humanoidverse/agents/fb/model.py``).
+        """
         embeddings = self._backward(robot, view.select(torch.arange(1, view.local.shape[0])))
         prefix = torch.cat([embeddings.new_zeros(1, embeddings.shape[-1]), embeddings.cumsum(0)])
         starts = torch.arange(embeddings.shape[0], device=embeddings.device)
@@ -310,7 +354,10 @@ class DaGetFbCprAgent:
 
     @torch.no_grad()
     def _sample_tracking_z(self, robot: int, motions: ExpertMotions, count: int, length: int) -> torch.Tensor:
-        """Encode ``count`` expert windows into per-step latents ``[count, length, Z]``."""
+        """Encode ``count`` expert windows into per-step latents ``[count, length, Z]``.
+
+        BFM-Zero's ``FBAgent._sample_tracking_z``.
+        """
         _, following = motions.sample_windows(count, length)
         flat = following.flatten(0, 1)
         embeddings = self._backward(robot, flat).view(count, length, -1)
@@ -321,6 +368,8 @@ class DaGetFbCprAgent:
     @torch.no_grad()
     def rollout_context(self, robot: int, z: torch.Tensor | None, steps: torch.Tensor, motions: ExpertMotions) -> torch.Tensor:
         """Return the latent of each of one robot's environments for this control step.
+
+        Adapted from BFM-Zero's ``FBAgent.maybe_update_rollout_context``.
 
         Args:
             robot (int): Robot index.
@@ -408,7 +457,10 @@ class DaGetFbCprAgent:
 
     @torch.no_grad()
     def encode_expert(self, next_states: list[dict]) -> torch.Tensor:
-        """Return per-frame ``z`` in robot order: the projected mean of B over each expert window."""
+        """Return per-frame ``z`` in robot order: the projected mean of B over each expert window.
+
+        BFM-Zero's ``FBcprAgent.encode_expert``.
+        """
         length = self.model_config.seq_length
         embeddings = torch.cat([
             self.model.backward_map(self.model.encode_state(inputs), inputs["joint_mask"]) for inputs in next_states
@@ -419,6 +471,8 @@ class DaGetFbCprAgent:
     @torch.no_grad()
     def sample_mixed_z(self, robots: torch.Tensor, goals: torch.Tensor, expert_z: torch.Tensor, expert_robots: torch.Tensor) -> torch.Tensor:
         """Sample training latents: replay goals, expert windows or uniform, always from the same robot.
+
+        Adapted from BFM-Zero's ``FBcprAgent.sample_mixed_z``; the per-robot pairing is this repo's.
 
         Args:
             robots (torch.Tensor): ``[B]`` robot of each transition.
@@ -457,6 +511,9 @@ class DaGetFbCprAgent:
     def _gradient_penalty(self, expert: list[dict], expert_z: torch.Tensor, train: list[dict], train_z: torch.Tensor) -> torch.Tensor:
         """Return the WGAN gradient penalty of D's head, between expert and replay samples of each robot.
 
+        The penalty of Gulrajani et al. (NIPS 2017), as in BFM-Zero's
+        ``FBcprAgent.gradient_penalty_wgan``.
+
         BFM-Zero penalizes gradients with respect to its flat input. Here the input of the
         head is the pooled state: second derivatives through attention would be far more
         expensive, and PyTorch's fast CPU attention does not support them.
@@ -478,7 +535,10 @@ class DaGetFbCprAgent:
         return ((torch.cat(gradients, dim=1).norm(2, dim=1) - 1) ** 2).mean()
 
     def update_discriminator(self, expert: list[dict], expert_z: torch.Tensor, train: list[dict], train_z: torch.Tensor, counts: list[int]) -> dict[str, torch.Tensor]:
-        """Train D to separate expert windows from replay states, each with its z."""
+        """Train D to separate expert windows from replay states, each with its z.
+
+        BFM-Zero's ``FBcprAgent.update_discriminator``.
+        """
         expert_loss = -F.logsigmoid(self._discriminator_logits(expert, expert_z, counts))
         train_loss = F.softplus(self._discriminator_logits(train, train_z, counts))
         loss = (expert_loss + train_loss).mean()
@@ -494,7 +554,7 @@ class DaGetFbCprAgent:
         return metrics
 
     def _sample_action(self, embeddings: torch.Tensor, z: torch.Tensor, mask: torch.Tensor) -> torch.Tensor:
-        """Sample a TD3-style clipped action."""
+        """Sample a TD3-style clipped action (Fujimoto et al., ICML 2018)."""
         return self.model.actor(embeddings, z, self.model_config.actor_std, mask).sample(clip=self.config.stddev_clip)
 
     def _fb_loss(self, batch: TrainingBatch, embeddings: torch.Tensor, next_embeddings: torch.Tensor, z: torch.Tensor) -> tuple[torch.Tensor, dict[str, torch.Tensor]]:
@@ -533,7 +593,10 @@ class DaGetFbCprAgent:
 
     def _value_loss(self, critic: nn.Module, target_critic: nn.Module, penalty: float, reward: torch.Tensor, batch: TrainingBatch,
                     embeddings: torch.Tensor, next_embeddings: torch.Tensor, z: torch.Tensor) -> tuple[torch.Tensor, torch.Tensor, torch.Tensor, torch.Tensor]:
-        """Return a critic's Bellman loss, target, Q and uncertainty."""
+        """Return a critic's Bellman loss, target, Q and uncertainty.
+
+        BFM-Zero's ``FBcprAgent.update_critic`` and ``FBcprAuxAgent.update_aux_critic``.
+        """
         mask = batch.joint_mask
         with torch.no_grad():
             next_action = self._sample_action(next_embeddings, z, mask)
@@ -611,7 +674,10 @@ class DaGetFbCprAgent:
         return metrics
 
     def update_actor(self, batch: TrainingBatch, z: torch.Tensor) -> dict[str, torch.Tensor]:
-        """Maximize ``Fᵀz + λ_D Q_D + λ_R Q_R`` with ensemble pessimism; the encoder does not move."""
+        """Maximize ``Fᵀz + λ_D Q_D + λ_R Q_R`` with ensemble pessimism; the encoder does not move.
+
+        BFM-Zero's ``FBcprAuxAgent.update_actor``.
+        """
         config = self.config
         mask = batch.joint_mask
         embeddings = self._padded_embeddings(self.model.encoder, batch.observations, mask.shape[1])

@@ -176,7 +176,8 @@ L2 and L3.
 
 ### E. Robustness to wrong or missing specifications
 
-**E1.** `history_size: 25` at 50 Hz is the 0.5 s history of RMA. **`use_sysid_head`** predicts
+**E1.** `history_size: 25` at 50 Hz is the 0.5 s history of RMA (Kumar et al. 2021: "k = 50
+which corresponds to 0.5s" at 100 Hz). **`use_sysid_head`** predicts
 `log(true / given)` of link mass, peak torque, continuous torque and rotor inertia per joint.
 
 **E2. `spec_noise`** (data config). Multiplicative noise on the specification given to the
@@ -210,8 +211,10 @@ generated robot carries its own standing pose and foot geometry
 (`EmbodimentRecord.metadata["env"]`), which the RL loader uses as per-robot settings. FB-CPR
 on hundreds of morphologies has no precedent ([H]).
 
-**G3.** `model/rl/retarget.py` retargets a motion between robots with corresponding keypoints,
-size scaling and damped-least-squares inverse kinematics (Peng et al. 2020). A prompt from
+**G3.** `model/rl/retarget.py` retargets a motion between robots with corresponding keypoints
+and inverse kinematics as Peng et al. (RSS 2020) do, size scaling, and a
+damped-least-squares solver (Wampler 1986; Nakamura & Hanafusa 1986) with Sugihara's
+(2011) damping. A prompt from
 robot A is retargeted to robot B and then used with BFM-Zero's tracking or goal inference
 unchanged.
 
@@ -274,27 +277,80 @@ by the ablation listed with it in the proposal (section 5.6).
 ## References
 
 The proposal's reference list ([PDF](proposal/DA-GET-BFM_proposal_v4.pdf), section 8) has
-every source with DOI or arXiv number. The ones used directly in code are also cited in
-the module docstrings:
+every source with DOI or arXiv number. Every work named on this page is listed here; the
+ones used directly in code are also cited, with the section or table used, in the module
+docstrings.
 
-- Alexander & Jayes, J. Zool. 201:135-152, 1983 (dynamic similarity).
-- Udwadia & Kalaba, Proc. R. Soc. A 439:407-410, 1992 (Gauss's principle).
-- Featherstone, Rigid Body Dynamics Algorithms, 2008.
-- Orin & Goswami, IROS 2008; Orin, Goswami & Lee, Auton. Robots 35, 2013; Dai, Valenzuela & Tedrake, Humanoids 2014 (centroidal dynamics).
-- Wensing, Kim & Slotine, RA-L 3(1), 2018 (physical consistency).
-- Lutter, Ritter & Peters, ICLR 2019 (DeLaN); Watter et al., NIPS 2015 (E2C).
-- Gupta et al., ICLR 2022 (MetaMorph); Xiong, Beck & Whiteson, ICML 2023 (ModuMorph).
-- Feng et al., CoRL 2022 (GenLoco); Bohlinger et al., CoRL 2024 (URMA); Ai et al., CoRL 2025 (embodiment scaling).
-- Kumar et al., RSS 2021 (RMA); Peng et al., RSS 2020 (motion retargeting).
-- Lample & Conneau, 2019; Conneau et al., ACL 2020; Arivazhagan et al., 2019 (temperature sampling).
-- Devlin et al., NAACL 2019 (BERT); He et al., CVPR 2022 (MAE).
-- Hu et al., ICLR 2022 (LoRA); Li, Grandvalet & Davoine, ICML 2018 (L2-SP); Li & Hoiem, TPAMI 2018 (LwF); Hansen et al., ICLR 2021 (PAD).
-- Alain & Bengio, 2017; Hewitt & Liang, EMNLP 2019; Zhang & Bowman, 2018; Conneau et al., ACL 2018 (probing).
-- Agarwal et al., NeurIPS 2021; Henderson et al., AAAI 2018 (evaluation statistics).
-- Mittal et al., ICRA 2024; Ordoñez-Apraez et al., IJRR 2025 (symmetry).
-- Sugihara, IEEE T-RO 27(5), 2011, DOI 10.1109/TRO.2011.2148230; Wampler, IEEE T-SMC 16(1), 1986; Haviland & Corke, IEEE RAM 2023, DOI 10.1109/MRA.2023.3270228 (damped least-squares inverse kinematics in `model/rl/retarget.py`).
-- Goodfellow, Bengio & Courville, *Deep Learning*, MIT Press 2016, Algorithm 7.1 (early stopping in `scripts/adapt_da_get.py`).
-- Liétard, Abdou & Søgaard, BlackboxNLP 2021 (permuted-target controls, the closest precedent for regression control tasks).
+Behavior foundation models and embodiment transformers:
+
+- Yitang Li, Zhengyi Luo, Tonghe Zhang, Cunxi Dai, Anssi Kanervisto, Andrea Tirinzoni, Haoyang Weng, Kris Kitani, Mateusz Guzek, Ahmed Touati, Alessandro Lazaric, Matteo Pirotta, Guanya Shi. *BFM-Zero: A Promptable Behavioral Foundation Model for Humanoid Control Using Unsupervised Reinforcement Learning.* ICLR 2026, arXiv:2511.04131 (50 Hz control; `E_mpjpe`).
+- Andrea Tirinzoni, Ahmed Touati, Jesse Farebrother, Mateusz Guzek, Anssi Kanervisto, Yingchen Xu, Alessandro Lazaric, Matteo Pirotta. *Zero-Shot Whole-Body Humanoid Control via Behavioral Foundation Models.* ICLR 2025, arXiv:2504.11054 (FB-CPR).
+- Austin Patel, Shuran Song. *GET-Zero: Graph Embodiment Transformer for Zero-shot Embodiment Generalization.* ICRA 2025, arXiv:2407.15002.
+- Vitaly Kurin, Maximilian Igl, Tim Rocktäschel, Wendelin Böhmer, Shimon Whiteson. *My Body is a Cage: the Role of Morphology in Graph-Based Incompatible Control.* ICLR 2021, arXiv:2010.01856 (Amorpheus).
+- Sunghoon Hong, Deunsol Yoon, Kee-Eung Kim. *Structure-Aware Transformer Policy for Inhomogeneous Multi-Task Reinforcement Learning.* ICLR 2022, https://openreview.net/forum?id=fy_XRVHqly (SWAT).
+- Zheng Xiong, Jacob Beck, Shimon Whiteson. *Universal Morphology Control via Contextual Modulation.* ICML 2023, PMLR 202:38286-38300, arXiv:2302.11070 (ModuMorph).
+- Agrim Gupta, Linxi Fan, Surya Ganguli, Li Fei-Fei. *MetaMorph: Learning Universal Controllers with Transformers.* ICLR 2022, arXiv:2203.11931 (L1 variation categories, Fig. 6 and Table 2).
+- Nico Bohlinger, Grzegorz Czechmanowski, Maciej Piotr Krupka, Piotr Kicki, Krzysztof Walas, Jan Peters, Davide Tateo. *One Policy to Run Them All: an End-to-end Learning Approach to Multi-Embodiment Locomotion.* CoRL 2024, PMLR 270:3356-3378, arXiv:2409.06366 (URMA; no initial transfer to H1 or Talos, Appendix I).
+
+Procedural robots and adaptation in locomotion:
+
+- Bo Ai, Liu Dai, Nico Bohlinger, Dichen Li, Tongzhou Mu, Zhanxin Wu, K. Fay, Henrik I. Christensen, Jan Peters, Hao Su. *Towards Embodiment Scaling Laws in Robot Locomotion.* CoRL 2025, PMLR 305:3483-3515, arXiv:2505.05753 (GenBot-1K, Tables 4-7, 20% held out). Generator: https://github.com/BoAi01/embodiment-scaling-laws (BSD-3-Clause, The Berkeley Humanoid Project Developers).
+- Gilbert Feng, Hongbo Zhang, Zhongyu Li, Xue Bin Peng, Bhuvan Basireddy, Linzhu Yue, Zhitao Song, Lizhi Yang, Yunhui Liu, Koushil Sreenath, Sergey Levine. *GenLoco: Generalized Locomotion Controllers for Quadrupedal Robots.* CoRL 2022, PMLR 205:1893-1903, arXiv:2209.05309 (Table 1, mass-scaled gains).
+- Ashish Kumar, Zipeng Fu, Deepak Pathak, Jitendra Malik. *RMA: Rapid Motor Adaptation for Legged Robots.* RSS 2021, DOI 10.15607/RSS.2021.XVII.011, arXiv:2107.04034 (0.5 s history).
+- Xue Bin Peng, Erwin Coumans, Tingnan Zhang, Tsang-Wei Lee, Jie Tan, Sergey Levine. *Learning Agile Robotic Locomotion Skills by Imitating Animals.* RSS 2020, DOI 10.15607/RSS.2020.XVI.064, arXiv:2004.00784 (keypoint retargeting, Sec. IV); code https://github.com/erwincoumans/motion_imitation (Apache-2.0).
+- Michael Gleicher. *Retargetting Motion to New Characters.* SIGGRAPH 1998, pp. 33-42, DOI 10.1145/280814.280820 (retargeting by inverse kinematics, as cited by Peng et al.).
+- Mayank Mittal, Nikita Rudin, Victor Klemm, Arthur Allshire, Marco Hutter. *Symmetry Considerations for Learning Task Symmetric Robot Policies.* ICRA 2024, pp. 7433-7439, DOI 10.1109/ICRA57147.2024.10611493 (mirrored-data augmentation).
+- Daniel Ordoñez-Apraez, Giulio Turrisi, Vladimir Kostic, Mario Martin, Antonio Agudo, Francesc Moreno-Noguer, Massimiliano Pontil, Claudio Semini, Carlos Mastalli. *Morphological Symmetries in Robotics.* IJRR 44(10-11):1743-1766, 2025, DOI 10.1177/02783649241282422.
+
+Mechanics, kinematics and simulation:
+
+- R. McN. Alexander, A. S. Jayes. *A dynamic similarity hypothesis for the gaits of quadrupedal mammals.* J. Zool. 201(1):135-152, 1983, DOI 10.1111/j.1469-7998.1983.tb04266.x (Froude scaling).
+- Firdaus E. Udwadia, Robert E. Kalaba. *A new perspective on constrained motion.* Proc. R. Soc. Lond. A 439(1906):407-410, 1992, DOI 10.1098/rspa.1992.0158 (Gauss's principle).
+- Roy Featherstone. *Rigid Body Dynamics Algorithms.* Springer, 2008, DOI 10.1007/978-1-4899-7560-7.
+- David E. Orin, Ambarish Goswami. *Centroidal Momentum Matrix of a humanoid robot: Structure and properties.* IROS 2008, pp. 653-659, DOI 10.1109/IROS.2008.4650772.
+- David E. Orin, Ambarish Goswami, Sung-Hee Lee. *Centroidal dynamics of a humanoid robot.* Autonomous Robots 35(2-3):161-176, 2013, DOI 10.1007/s10514-013-9341-4.
+- Hongkai Dai, Andres Valenzuela, Russ Tedrake. *Whole-body motion planning with centroidal dynamics and full kinematics.* Humanoids 2014, pp. 295-302, DOI 10.1109/HUMANOIDS.2014.7041375.
+- Patrick M. Wensing, Sangbae Kim, Jean-Jacques E. Slotine. *Linear Matrix Inequalities for Physically Consistent Inertial Parameter Identification: A Statistical Perspective on the Mass Distribution.* IEEE RA-L 3(1):60-67, 2018, DOI 10.1109/LRA.2017.2729659.
+- Charles W. Wampler. *Manipulator Inverse Kinematic Solutions Based on Vector Formulations and Damped Least-Squares Methods.* IEEE Trans. SMC 16(1):93-101, 1986, DOI 10.1109/TSMC.1986.289285.
+- Yoshihiko Nakamura, Hideo Hanafusa. *Inverse Kinematic Solutions With Singularity Robustness for Robot Manipulator Control.* ASME J. Dyn. Syst. Meas. Control 108(3):163-171, 1986, DOI 10.1115/1.3143764.
+- Tomomichi Sugihara. *Solvability-Unconcerned Inverse Kinematics by the Levenberg-Marquardt Method.* IEEE T-RO 27(5):984-991, 2011, DOI 10.1109/TRO.2011.2148230.
+- Jesse Haviland, Peter Corke. *Manipulator Differential Kinematics: Part I: Kinematics, Velocity, and Applications.* IEEE Robotics & Automation Magazine 31(4):149-158, 2024, DOI 10.1109/MRA.2023.3270228, arXiv:2207.01796 (Eq. 51 of the arXiv version).
+- Emanuel Todorov, Tom Erez, Yuval Tassa. *MuJoCo: A physics engine for model-based control.* IROS 2012, pp. 5026-5033, DOI 10.1109/IROS.2012.6386109.
+- Michael Lutter, Christian Ritter, Jan Peters. *Deep Lagrangian Networks: Using Physics as Model Prior for Deep Learning.* ICLR 2019, arXiv:1907.04490 (DeLaN).
+- Manuel Watter, Jost Tobias Springenberg, Joschka Boedecker, Martin Riedmiller. *Embed to Control: A Locally Linear Latent Dynamics Model for Control from Raw Images.* NIPS 2015, arXiv:1506.07365 (E2C).
+
+Training, sampling and adaptation:
+
+- Guillaume Lample, Alexis Conneau. *Cross-lingual Language Model Pretraining.* NeurIPS 2019, arXiv:1901.07291 (temperature sampling, Sec. 3.1).
+- Alexis Conneau, Kartikay Khandelwal, Naman Goyal, Vishrav Chaudhary, Guillaume Wenzek, Francisco Guzmán, Edouard Grave, Myle Ott, Luke Zettlemoyer, Veselin Stoyanov. *Unsupervised Cross-lingual Representation Learning at Scale.* ACL 2020, pp. 8440-8451, DOI 10.18653/v1/2020.acl-main.747 (XLM-R, alpha = 0.3).
+- Naveen Arivazhagan, Ankur Bapna, Orhan Firat, Dmitry Lepikhin, Melvin Johnson, Maxim Krikun, Mia Xu Chen, Yuan Cao, George Foster, Colin Cherry, Wolfgang Macherey, Zhifeng Chen, Yonghui Wu. *Massively Multilingual Neural Machine Translation in the Wild: Findings and Challenges.* arXiv:1907.05019, 2019 (T = 5).
+- Jacob Devlin, Ming-Wei Chang, Kenton Lee, Kristina Toutanova. *BERT: Pre-training of Deep Bidirectional Transformers for Language Understanding.* NAACL-HLT 2019, pp. 4171-4186, DOI 10.18653/v1/N19-1423 (15% masking).
+- Kaiming He, Xinlei Chen, Saining Xie, Yanghao Li, Piotr Dollár, Ross Girshick. *Masked Autoencoders Are Scalable Vision Learners.* CVPR 2022, pp. 15979-15988, DOI 10.1109/CVPR52688.2022.01553 (75% masking).
+- Alex Kendall, Yarin Gal, Roberto Cipolla. *Multi-Task Learning Using Uncertainty to Weigh Losses for Scene Geometry and Semantics.* CVPR 2018, pp. 7482-7491, DOI 10.1109/CVPR.2018.00781, arXiv:1705.07115.
+- Zhao Chen, Vijay Badrinarayanan, Chen-Yu Lee, Andrew Rabinovich. *GradNorm: Gradient Normalization for Adaptive Loss Balancing in Deep Multitask Networks.* ICML 2018, PMLR 80:794-803, arXiv:1711.02257.
+- Edward J. Hu, Yelong Shen, Phillip Wallis, Zeyuan Allen-Zhu, Yuanzhi Li, Shean Wang, Lu Wang, Weizhu Chen. *LoRA: Low-Rank Adaptation of Large Language Models.* ICLR 2022, arXiv:2106.09685; code https://github.com/microsoft/LoRA (`loralib`, MIT, Microsoft Corporation).
+- Xuhong Li, Yves Grandvalet, Franck Davoine. *Explicit Inductive Bias for Transfer Learning with Convolutional Networks.* ICML 2018, PMLR 80:2825-2834, arXiv:1802.01483 (L2-SP).
+- Zhizhong Li, Derek Hoiem. *Learning without Forgetting.* ECCV 2016, pp. 614-629, DOI 10.1007/978-3-319-46493-0_37; IEEE TPAMI 40(12):2935-2947, 2018, DOI 10.1109/TPAMI.2017.2773081, arXiv:1606.09282 (LwF).
+- Nicklas Hansen, Rishabh Jangir, Yu Sun, Guillem Alenyà, Pieter Abbeel, Alexei A. Efros, Lerrel Pinto, Xiaolong Wang. *Self-Supervised Policy Adaptation during Deployment.* ICLR 2021, arXiv:2007.04309 (PAD).
+- Yu Sun, Xiaolong Wang, Zhuang Liu, John Miller, Alexei A. Efros, Moritz Hardt. *Test-Time Training with Self-Supervision for Generalization under Distribution Shifts.* ICML 2020, PMLR 119:9229-9248, arXiv:1909.13231 (TTT, cited in `model/adaptation.py`).
+- Ian Goodfellow, Yoshua Bengio, Aaron Courville. *Deep Learning.* MIT Press, 2016, Sec. 7.8, Algorithm 7.1 (early stopping in `scripts/adapt_da_get.py`).
+
+Probing and evaluation statistics:
+
+- Guillaume Alain, Yoshua Bengio. *Understanding intermediate layers using linear classifier probes.* ICLR 2017 Workshop, arXiv:1610.01644.
+- John Hewitt, Percy Liang. *Designing and Interpreting Probes with Control Tasks.* EMNLP-IJCNLP 2019, pp. 2733-2743, DOI 10.18653/v1/D19-1275; code https://github.com/john-hewitt/control-tasks (Apache-2.0).
+- Kelly W. Zhang, Samuel R. Bowman. *Language Modeling Teaches You More than Translation Does: Lessons Learned Through Auxiliary Syntactic Task Analysis.* BlackboxNLP 2018, pp. 359-361, DOI 10.18653/v1/W18-5448 (arXiv:1809.10040).
+- Alexis Conneau, German Kruszewski, Guillaume Lample, Loïc Barrault, Marco Baroni. *What you can cram into a single $&!#\* vector: Probing sentence embeddings for linguistic properties.* ACL 2018, pp. 2126-2136, DOI 10.18653/v1/P18-1198.
+- Bastien Liétard, Mostafa Abdou, Anders Søgaard. *Do Language Models Know the Way to Rome?* BlackboxNLP 2021, pp. 510-517, DOI 10.18653/v1/2021.blackboxnlp-1.40 (permuted-target controls, the closest precedent for regression control tasks).
+- Rishabh Agarwal, Max Schwarzer, Pablo Samuel Castro, Aaron Courville, Marc G. Bellemare. *Deep Reinforcement Learning at the Edge of the Statistical Precipice.* NeurIPS 2021, pp. 29304-29320, arXiv:2108.13264; library https://github.com/google-research/rliable (Apache-2.0).
+- B. Efron. *Bootstrap Methods: Another Look at the Jackknife.* Ann. Statist. 7(1):1-26, 1979, DOI 10.1214/aos/1176344552.
+- Peter Henderson, Riashat Islam, Philip Bachman, Joelle Pineau, Doina Precup, David Meger. *Deep Reinforcement Learning That Matters.* AAAI 2018, DOI 10.1609/aaai.v32i1.11694.
+
+Robot models (downloaded by `scripts/download_urdfs.py`, not redistributed):
+
+- Unitree Go1, Go2, G1 and H1: `unitreerobotics/unitree_ros`, BSD-3-Clause, HangZhou YuShu Technology Co., Ltd. ("Unitree Robotics").
+- ANYmal D: `ANYbotics/anymal_d_simple_description`, BSD-3-Clause, ANYbotics AG.
+- Talos: PAL Robotics, S.L., CC BY-NC-ND 3.0 (stated in the file), distributed in `Gepetto/example-robot-data` (BSD-3-Clause repository).
 
 ## Corrections found while implementing
 

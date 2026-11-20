@@ -6,6 +6,11 @@ same family, count, seed and ranges simulates exactly these robots. The manifest
 (``manifest.json``) lists each file with its family, seed, sampled parameters, feet,
 nominal pose, mass, size, torque ratio and actuator limits.
 
+The topology, geometry and variation schedule are those of GenBot-1K (Ai, Dai,
+Bohlinger, Li, Mu, Wu, Fay, Christensen, Peters and Su, CoRL 2025, PMLR 305:3483-3515,
+arXiv:2505.05753) and the mass variation that of GenLoco (Feng et al., CoRL 2022,
+PMLR 205:1893-1903, arXiv:2209.05309); ``model.morphology`` cites every value.
+
 Examples::
 
     uv run python scripts/generate_morphologies.py --family quadruped --count 100 --seed 0 \\

@@ -19,6 +19,28 @@ and forces, the push wrench, and the accelerations of probe torques computed
 with the contacts in place. Episodes end early if the robot falls.
 
 Requires ``mujoco`` (``uv sync --extra sim``).
+
+References:
+    * MuJoCo: Todorov, Erez & Tassa, "MuJoCo: A physics engine for model-based
+      control", IROS 2012, pp. 5026-5033, DOI 10.1109/IROS.2012.6386109 (Apache-2.0,
+      https://github.com/google-deepmind/mujoco). MJCF elements, the default
+      ``solimp`` "0.9 0.95 0.001 0.5 2" and the ``implicitfast`` integrator are from the
+      MuJoCo documentation (https://mujoco.readthedocs.io, Modeling: Solver parameters;
+      XML reference: option/integrator).
+    * Quaternion and rotation-matrix conversions: Lynch & Park, Modern Robotics,
+      Cambridge University Press 2017, App. B.3 (eqs. B.10-B.12), DOI
+      10.1017/9781316661239; the branch on the largest diagonal entry follows
+      Shepperd, J. Guidance and Control 1(3):223-224, 1978, DOI 10.2514/3.55767b.
+    * The spotter's frequency ``sqrt(g / h)`` is that of the linear inverted pendulum:
+      Kajita, Kanehiro, Kaneko, Yokoi & Hirukawa, IROS 2001, pp. 239-246, DOI
+      10.1109/IROS.2001.973365.
+    * Mass-proportional gains (``ground_specs``): GenLoco, Feng, Zhang, Li, Peng,
+      Basireddy, Yue, Song, Yang, Liu, Sreenath & Levine, CoRL 2022, PMLR 205:1893-1903,
+      Sec. 3.1 and Table 1.
+    * ``GRAVITY`` is the standard acceleration of gravity, 9.80665 m/s^2 (exact; CODATA,
+      https://physics.nist.gov/cgi-bin/cuu/Value?gn).
+    * The spotter, the gain rule ``K_p = 2 tau^peak``, ``K_d = 0.03 K_p``, the stiff
+      ``solimp`` and the push and target schedules are this repository's choices.
 """
 
 from __future__ import annotations
@@ -35,7 +57,7 @@ from model.physics import ActuatorSpec, actuator_tensors
 from model.training.episodes import EmbodimentRecord, Trajectory
 
 GRAVITY = 9.80665
-STIFF_SOLIMP = (0.99, 0.999, 0.001)  # contact impedance; MuJoCo's default is (0.9, 0.95, 0.001)
+STIFF_SOLIMP = (0.99, 0.999, 0.001)  # contact impedance; MuJoCo's default is "0.9 0.95 0.001 0.5 2"
 
 
 @dataclass
@@ -54,7 +76,7 @@ class ContactGeometry:
 
 
 def _quaternion(rotation: np.ndarray) -> np.ndarray:
-    """Rotation matrix to a w, x, y, z quaternion."""
+    """Rotation matrix to a w, x, y, z quaternion (Lynch & Park eqs. B.10-B.11; Shepperd 1978)."""
     trace = np.trace(rotation)
     if trace > 0:
         s = math.sqrt(trace + 1.0) * 2
@@ -322,7 +344,7 @@ def simulate_ground(
         if assist is None:
             assist = 0.6 if len(record.contact_links) <= 2 else 0.0
         mgh = graph.total_mass * GRAVITY * max(height0, 0.1)
-        omega_n = math.sqrt(GRAVITY / max(height0, 0.1))
+        omega_n = math.sqrt(GRAVITY / max(height0, 0.1))  # linear inverted pendulum (Kajita et al. 2001)
         push = np.zeros(3)
         push_left = 0
         log: dict[str, list] = {key: [] for key in ("q", "qd", "qdd", "tau", "cmd", "R", "x", "v", "w", "a", "alpha", "contact", "ext", "probe", "probe_exec", "probe_acc", "probe_base")}
@@ -460,8 +482,8 @@ def ground_specs(
     ``peak_torque`` (default) sets ``K_p = 2 gain_scale tau^peak`` (peak torque at
     0.5 rad of error). ``mass`` sets the same ``K_p = gain_scale kp_per_kg m`` on every
     joint, proportional to the robot's total mass as GenLoco scales its PD gains
-    (Feng et al., CoRL 2022, PMLR 205:1893-1903; proposal G1). ``K_d = 0.03 K_p`` in
-    both modes.
+    (Feng et al., CoRL 2022, PMLR 205:1893-1903, Sec. 3.1 "PD gains"; proposal G1).
+    ``K_d = 0.03 K_p`` in both modes.
 
     Args:
         specs (tuple[ActuatorSpec, ...]): Actuator specs.

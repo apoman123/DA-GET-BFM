@@ -3,10 +3,15 @@
 Runs, layer by layer, on a pretrained ``DaGetForPhysicsPretraining`` checkpoint (or a
 randomly initialized model) and the same model with a fresh random encoder:
 
-1. linear (ridge) and MLP probes with control tasks and selectivity
-   (``model.evaluation.probes``);
+1. linear (ridge) and MLP probes, one per layer (Alain and Bengio, ICLR 2017 workshop,
+   arXiv:1610.01644), with control tasks and selectivity (Hewitt and Liang,
+   EMNLP-IJCNLP 2019, DOI 10.18653/v1/D19-1275), on the trained and on a random
+   encoder (the untrained-encoder baselines of Zhang and Bowman, BlackboxNLP 2018,
+   DOI 10.18653/v1/W18-5448, and Conneau, Kruszewski, Lample, Barrault and Baroni,
+   ACL 2018, DOI 10.18653/v1/P18-1198) (``model.evaluation.probes``, which gives the
+   details and the [H] regression adaptation);
 2. the dimensionless physics metrics of the heads (``model.evaluation.physics_metrics``);
-3. the head-capacity test (heads trained on a frozen random encoder);
+3. the head-capacity test (heads trained on a frozen random encoder; proposal B0);
 4. the head re-initialization transfer test (new heads on the frozen trained encoder,
    trained on training robots, evaluated on held-out robots);
 5. counterfactual one-link mass changes against the analytic ``Delta G``
@@ -25,7 +30,8 @@ Examples::
 Held-out robots of the transfer test are the data config's robots that the split
 manifest puts in L1–L4 (matched by name, ``model.evaluation.splits.name_matches``).
 Without a manifest, or when none matches, 20% of the robots are held out with
-``make_heldout_split`` (Ai et al., CoRL 2025). The test is only meaningful if the
+``make_heldout_split`` (Ai et al., CoRL 2025, arXiv:2505.05753: "randomly holding out
+20% of the generated embodiments"). The test is only meaningful if the
 checkpoint was not pretrained on those robots; the report says which robots were used.
 """
 

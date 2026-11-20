@@ -1,22 +1,27 @@
 """Assemble GET-Zero per-joint tokens: one token per degree of freedom.
 
-GET-Zero (Patel and Song, ICRA 2025) builds token ``j`` at time ``t`` as
+GET-Zero (Patel and Song, ICRA 2025, arXiv:2407.15002) builds token ``j`` at time ``t``
+as
 
     T_j^t = [o_vg^{t-H+1..t}, o_fg, o_vl,j^{t-H+1..t}, o_fl,j]
 
 * ``o_vg`` variable global observations with history, shared by every token
-  (GET-Zero: a sinusoidal task phase; for a legged robot: base angular velocity,
-  projected gravity, velocity command).
+  (GET-Zero: a sinusoidal phase with a period of two seconds; for a legged robot: base
+  angular velocity, projected gravity, velocity command).
 * ``o_fg`` fixed global observations (for example a task identifier).
 * ``o_vl,j`` variable local observations of joint ``j`` with history (GET-Zero:
   the normalized joint position and the PD target position).
 * ``o_fl,j`` fixed local hardware properties of joint ``j`` from URDF, given by
   ``EmbodimentGraph.joint_features``.
 
-History is flattened feature-major, as in the GET-Zero code: all timesteps of the
-first feature, then all timesteps of the second feature, and so on. Pass
-history ordered oldest to newest. The encoder applies a layer norm and a learned
-linear embedding to these raw tokens.
+History is flattened feature-major, as in the GET-Zero code
+(``get_zero/distill/utils/embodiment_util.py`` permutes its history buffers to
+``(env, dof, feature, history)``; https://github.com/real-stanford/get_zero, commit
+279652d): all timesteps of the first feature, then all timesteps of the second
+feature, and so on. Pass history ordered oldest to newest. The encoder applies a layer
+norm (GET-Zero's ``enable_input_layer_norm``) and a learned linear embedding (the
+paper's token embedding) to these raw tokens. The layout is reimplemented; no GET-Zero
+code is copied.
 """
 
 from __future__ import annotations

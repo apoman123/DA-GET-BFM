@@ -23,14 +23,18 @@ The FB-CPR networks on the DA-GET encoder, how they train across robots in Isaac
   - [Inference latency at 50 Hz](#inference-latency-at-50-hz)
 - [Open questions for cross-embodiment training](#open-questions-for-cross-embodiment-training)
 - [Attribution](#attribution)
+- [References](#references)
 
 This repo studies **cross-embodiment behavior foundation models**. It combines
 two references:
-- [BFM-Zero](https://lecar-lab.github.io/BFM-Zero/) (Li et al., 2025), a
-  promptable humanoid controller trained with FB-CPR (Tirinzoni et al., ICLR
-  2025) on forward-backward representations (Touati and Ollivier, NeurIPS
-  2021);
-- [GET-Zero](https://get-zero-paper.github.io/) (Patel and Song, ICRA 2025).
+- [BFM-Zero](https://lecar-lab.github.io/BFM-Zero/) (Li et al., ICLR 2026,
+  arXiv:2511.04131), a promptable humanoid controller trained with FB-CPR
+  (Tirinzoni et al., ICLR 2025, arXiv:2504.11054) on forward-backward
+  representations (Touati and Ollivier, NeurIPS 2021, arXiv:2103.07945);
+- [GET-Zero](https://get-zero-paper.github.io/) (Patel and Song, ICRA 2025,
+  arXiv:2407.15002).
+
+Full entries are in [References](#references).
 
 BFM-Zero's networks read one flat state vector of a single robot (the G1). Here
 every network reads per-DoF tokens from one shared `DaGetEncoder`. Its state-token
@@ -92,10 +96,12 @@ and [network definitions](https://github.com/LeCAR-Lab/BFM-Zero/blob/main/humano
 - **Padding and order.** Padded joints are masked everywhere and output zero
   actions. There are no joint positions, so permuting the joints permutes the
   actions and leaves `F` and `Q` unchanged (both are tested).
-- **Unchanged from BFM-Zero:**
+- **Unchanged from BFM-Zero** (`humanoidverse/agents/nn_models.py` and
+  `humanoidverse/agents/fb/model.py`):
   - output layouts (`[num_parallel, batch, out]`);
-  - `TruncatedNormal.sample(clip=…)`;
-  - orthogonal initialization (`init_weights`);
+  - `TruncatedNormal.sample(clip=…)`, DrQ-v2's truncated normal (Yarats et al.,
+    ICLR 2022) with TD3's clipped noise (Fujimoto et al., ICML 2018);
+  - orthogonal initialization (`init_weights`; Saxe et al., ICLR 2014);
   - latent sampling on the sphere;
   - goal, reward, weighted-reward, and tracking inference.
 
@@ -239,6 +245,26 @@ synthetic G1 data, and simulated Go1 standing data plus synthetic Go1 data. Repl
 sources with the datasets you choose; [Training data](data.md#recommended-training-datasets)
 lists candidates. `configs/rl/go1_h1_ground.json` is a small example without downloads.
 
+Values in `configs/rl/*.json` that come from others:
+
+- the recorded G1 source is Unitree Robotics' dataset
+  [`unitreerobotics/G1_WBT_Inspire_Pick_Up_Fruit`](https://huggingface.co/datasets/unitreerobotics/G1_WBT_Inspire_Pick_Up_Fruit)
+  (Apache-2.0);
+- the URDFs are Unitree's (G1, H1, Go1) and ANYbotics' (ANYmal D), BSD-3-Clause, fetched by
+  `scripts/download_urdfs.py` (see [THIRD_PARTY_NOTICES.md](../THIRD_PARTY_NOTICES.md));
+- the Go1 `nominal_pose` (hip 0, thigh 0.9, calf −1.8 rad on every leg) equals the `home`
+  keyframe of MuJoCo Menagerie's
+  [`unitree_go1/go1.xml`](https://github.com/google-deepmind/mujoco_menagerie/blob/main/unitree_go1/go1.xml)
+  (Unitree Robotics, BSD-3-Clause);
+- `action_scale` 1.25 is BFM-Zero's 0.25 × 5 (above), and the procedural robots of
+  `zero_shot_procedural.json` follow the generator of Ai et al. (CoRL 2025;
+  `model/morphology.py`).
+
+The G1, H1 and ANYmal nominal poses, the contact geometries, the G1 `actuator_defaults`
+(`kp` 80, `kd` 2), the episode counts and the seeds have no external source that we could
+find (the poses differ from the standing poses of unitree_rl_gym, Isaac Lab's asset
+configs and MuJoCo Menagerie).
+
 These keys of a robot's first expert source configure its worlds:
 
 | Key | Default | Meaning |
@@ -246,11 +272,11 @@ These keys of a robot's first expert source configure its worlds:
 | `contact_links` | required for floating robots | Feet |
 | `nominal_pose` | zero, clamped to the limits | Joint targets at zero action; set this to a standing pose |
 | `gain_scale` | 1.0 | PD gains: `K_p = 2 · gain_scale · τ^peak`, `K_d = 0.03 K_p` |
-| `action_scale` | 1.25 | Target offset in rad at `\|action\| = 1` (BFM-Zero: 0.25 × 5) |
+| `action_scale` | 1.25 | Target offset in rad at `\|action\| = 1` (BFM-Zero: `action_scale=0.25` on actions of range `normalize_action_to=5.0`, `humanoidverse/train.py`). A `{family: value}` mapping sets it per family, as URMA (per robot) and Ai et al. (per class) do |
 | `armature` | 0.01 | Rotor inertia per joint in kg m², one value or `{joint glob: value}`. URDFs have none, and without it G1 diverged in MuJoCo. The RL robot's graph gets the same value, so its physics tokens, the physics-replay labels and both simulators agree. Use real motor values where you have them |
 | `simulation_urdf` | `urdf` | Isaac Lab: URDF whose collision meshes resolve |
 | `ros_package_paths` | none | Isaac Lab: `[{"name": ..., "path": ...}]` for `package://` meshes |
-| `undesired_contact_links` | every link but the feet | Isaac Lab: regexes of penalized links (BFM-Zero's G1: pelvis, shoulders, hips) |
+| `undesired_contact_links` | every link but the feet | Isaac Lab: regexes of penalized links (BFM-Zero's G1: pelvis, shoulders, hips, `penalize_contacts_on` in `humanoidverse/config/robot/g1/g1_29dof_hard_waist.yaml`) |
 | `self_collisions` | true | Isaac Lab: enable self-collisions |
 | `explicit_actuators` | true | Isaac Lab: compute the PD torque at every physics step inside the torque-speed envelope (`envelope_actuator_cfg`, an `IdealPDActuator`), which also gives the physics replay exact torque labels ([limits](#actuator-torque-limits), [replay](#physics-losses-during-rl)); false uses PhysX's implicit PD with only a peak clip. Check stability at your physics step |
 | `contact_geometry` | sphere of 2 cm | MuJoCo only: foot radius, `sole_offset`, `foot_size` |
@@ -261,8 +287,15 @@ spot simulated states.
 
 ### What is the same as BFM-Zero
 
-Defaults come from BFM-Zero's published G1 configuration (`train.py` and Tables 1 and 4
-of the paper):
+Defaults come from BFM-Zero's published G1 configuration: `default_train_config` in
+[`humanoidverse/train.py`](https://github.com/LeCAR-Lab/BFM-Zero/blob/main/humanoidverse/train.py),
+the Hydra configs under `humanoidverse/config/` (`simulator/isaacsim.yaml`,
+`env/legged_motions.yaml`, `domain_rand/domain_rand.yaml`, `obs/bfm_zero_obs.yaml`,
+`rewards/reward_bfm_zero.yaml`), and Tables 1 and 4 (Appendix B) of the paper,
+arXiv:2511.04131v2 (in v1 the content of Table 4 is under Figure 11). Where the two
+differ, the code is followed: `train.py` runs 384M frames where Table 1 gives about
+192M, and the config's friction range is [0.5, 1.25] where Table 4 prints
+U([−0.5, 1.25]):
 
 | Setting | Value |
 |---|---|
@@ -275,11 +308,11 @@ of the paper):
 | Rollouts | z changes every 100 steps; half of the environments track expert motions for 250 steps |
 | Environment | 200 Hz physics, 50 Hz PD control, 500-step episodes, **no termination on falling** |
 | Fall starts | 30% of episodes start lying on the back or front, so the policy learns to get up |
-| Motion sampling | Priority `2^(2 · clip(EMD, 0.5, 2))` from each motion's tracking EMD, updated every evaluation, for episode starts and expert windows |
-| Randomization | Friction, link mass, base center of mass, nominal pose, pushes, sensor noise |
-| Auxiliary rewards | Joint limits −10, action rate −0.1, foot slip −2, undesired contact −1, feet orientation −0.4 (three torque penalties are added here, [below](#actuator-torque-limits)) |
+| Motion sampling | Priority `2^(2 · clip(EMD, 0.5, 2))` from each motion's tracking EMD (`prioritization_mode="exp"` in `train.py`; EMD of Rubner et al., IJCV 2000), updated every evaluation, for episode starts and expert windows |
+| Randomization | Friction U(0.5, 1.25), link mass ×U(0.95, 1.05), base center of mass ±0.02 m, nominal pose ±0.02 rad, pushes of up to 0.5 m/s and 0.5 rad/s every U(1, 3) s (`domain_rand.yaml`), sensor noise (`bfm_zero_obs.yaml`: joint position 0.01, joint velocity 0.5, gravity 0.05, angular velocity 0.2). Domain randomization: Tobin et al., IROS 2017; Peng et al., ICRA 2018 |
+| Auxiliary rewards | Joint limits −10, action rate −0.1, foot slip −2, undesired contact −1, feet orientation −0.4 (`aux_rewards_scaling` in `train.py`, Table 4; penalties defined in `humanoidverse/envs/legged_base_task/legged_robot_base.py` and `envs/legged_robot_motions/legged_robot_motions.py`, contact threshold 1 N, soft joint limit 0.95 as in legged_gym). Three torque penalties are added here, [below](#actuator-torque-limits) |
 | Self-collision | On in Isaac Lab |
-| Asymmetry | The actor sees no base linear velocity and has noisy sensors; critics also read the clean state |
+| Asymmetry | The actor sees no base linear velocity and has noisy sensors; critics also read the clean state (asymmetric actor-critic, Pinto et al., RSS 2018) |
 
 ### What differs from BFM-Zero
 
@@ -326,14 +359,16 @@ control step: on the test quadruped with full random actions, MuJoCo's peak clip
 exceeded the envelope by up to 10 N m (the full peak), and the per-physics-step clip by
 0 (`test_every_physics_step_stays_inside_the_envelope`). The explicit actuators also give
 the physics replay its exact torque labels ([below](#physics-losses-during-rl)). Explicit
-PD with stiff gains needs a small enough physics step; legged_gym (Rudin et al., CoRL 2021)
-computes PD torques explicitly at 200 Hz, and the MuJoCo tests (including the light G1
+PD with stiff gains needs a small enough physics step; legged_gym (Rudin et al., CoRL 2021,
+PMLR 164:91-100) computes PD torques explicitly at 200 Hz (`dt = 0.005`, `decimation = 4`),
+and the MuJoCo tests (including the light G1
 wrists) are stable at 200 Hz with the default rotor inertia. Check new robots before a
 long run.
 
 **2. `ActionMap` keeps the request inside the envelope at the control rate.**
 [`model/rl/actions.py`](../model/rl/actions.py) maps an action to a target as BFM-Zero
-does (`nominal + action_scale · a`, clipped to the joint limits) and then moves each
+does (`nominal + action_scale · a`, clipped to the joint limits; the PD convention of
+legged_gym's `_compute_torques`) and then moves each
 position-mode target so the effort the PD law requests at the current state,
 `K_p (a − q) − K_d qd`, stays within `τ^max(qd)` (`model.physics.envelope_targets`; the
 same `torque_limit` defines the motor feasibility labels of task D). The moved target is
@@ -385,8 +420,8 @@ updated before every update round by multiplicative dual ascent:
 A robot that violates a target gets a growing weight until it complies; one that
 complies easily gets a shrinking weight, so it is not held back. This is the Lagrangian
 relaxation of a constrained MDP (Altman 1999; Tessler et al., RCPO, ICLR 2019; Stooke et
-al., PID Lagrangian, ICML 2020), with the multipliers in log space so they stay positive
-and scale-free. The agent keeps one row of reward weights per robot
+al., PID Lagrangian, ICML 2020; see [References](#references)), with the multipliers in
+log space so they stay positive and scale-free (this repo's choice, as are the targets). The agent keeps one row of reward weights per robot
 (`DaGetFbCprAgent.set_reward_scales`), and checkpoints keep the multipliers.
 
 | Setting (`FbCprConfig`) | Default | Meaning |
@@ -562,7 +597,7 @@ python scripts/train_bfm.py --data_config configs/rl/go1_h1_ground.json \
 | `physics_replay/exact_episodes` | Those with exact torque labels (label worlds of MuJoCo, or Isaac Lab with explicit actuators) |
 | `train/frames_per_second`, `gradient_steps` | Throughput |
 | `rollout/<robot>/fallen_fraction`, `episode_length` | How much of the time each robot is down |
-| `eval/<robot>/tracking_mpjpe`, `tracking_emd`, `tracking_fallen` | Tracking: the paper's `mean_t ‖q_t − q_ref‖`, the EMD behind priorities, and worlds fallen at the end |
+| `eval/<robot>/tracking_mpjpe`, `tracking_emd`, `tracking_fallen` | Tracking: the paper's `E_mpjpe`, `mean_t ‖q_t − q_ref‖` over joint positions (BFM-Zero Appendix C), the EMD behind priorities (computed as an assignment, Peyré and Cuturi 2019, Prop. 2.1, with SciPy's `linear_sum_assignment`; BFM-Zero uses POT's `ot.emd2`), and worlds fallen at the end |
 | `eval/<robot>/goal_mpjpe` | Goal reaching toward each motion's last frame |
 | `eval/<robot>/getting_up_rate` | Worlds upright at the end after a lying start, without pushes or noise |
 
@@ -645,7 +680,10 @@ G1's `act (eager)` grew only from 7.9 to 12.1 ms between the small and large enc
 - The embodiment-only part of Physics Cross Attention is computed once
   (`build_physics_memory`), not every step.
 - On a GPU, the encoder and actor (and separately the state encoder and B) are recorded
-  once as CUDA Graphs (`torch.cuda.CUDAGraph`) and replayed each step.
+  once as CUDA Graphs (`torch.cuda.CUDAGraph`; NVIDIA
+  [CUDA Programming Guide, Section 4.2](https://docs.nvidia.com/cuda/cuda-programming-guide/04-special-topics/cuda-graphs.html)
+  and PyTorch's [CUDA semantics notes](https://docs.pytorch.org/docs/stable/notes/cuda.html),
+  which ask for the warm-up on a side stream) and replayed each step.
 - A graph cannot record a wait for the device, so the encoder runs with
   `validate_inputs=False` and the mass matrix is checked on the CPU before the copy.
   `tests/test_deployment.py` checks that the recorded functions make no such call.
@@ -682,4 +720,135 @@ What keeps `observation` small on the CPU:
 ## Attribution
 
 The B, D, truncated-normal, and FB-CPR training code is adapted from BFM-Zero (Meta's code, CC
-BY-NC 4.0); see [THIRD_PARTY_NOTICES.md](../THIRD_PARTY_NOTICES.md).
+BY-NC 4.0); see [THIRD_PARTY_NOTICES.md](../THIRD_PARTY_NOTICES.md). By source file of
+[LeCAR-Lab/BFM-Zero](https://github.com/LeCAR-Lab/BFM-Zero):
+
+| BFM-Zero file | Used in | What |
+|---|---|---|
+| `humanoidverse/agents/nn_models.py` | `model/modeling_bfm.py`, `model/rl/agent.py` | `BackwardMap` and `Discriminator` heads, `Actor` output, `ForwardMap` layout, `TruncatedNormal` (itself DrQ-v2's, MIT), `Norm`, `weight_init`, `EMA`, `_soft_update_params` |
+| `humanoidverse/agents/fb/model.py` | `model/modeling_bfm.py` | `sample_z`, `project_z`, `act`, goal, reward, weighted-reward and tracking inference |
+| `humanoidverse/agents/fb_cpr/model.py`, `fb_cpr_aux/model.py` | `model/modeling_bfm.py` | The networks the model holds (critic, discriminator, auxiliary critic) |
+| `humanoidverse/agents/fb/agent.py` | `model/rl/agent.py` | FB and orthonormality losses, `get_targets_uncertainty`, rollout z, tracking z |
+| `humanoidverse/agents/fb_cpr/agent.py` | `model/rl/agent.py` | z mixture, expert encoding, discriminator loss and gradient penalty, critic loss |
+| `humanoidverse/agents/fb_cpr_aux/agent.py` | `model/rl/agent.py` | Update order and relabeling, auxiliary critic, actor loss |
+| `humanoidverse/agents/misc/zbuffer.py` | `model/rl/agent.py` | z buffer |
+| `humanoidverse/train.py` | `model/rl/configuration_fb_cpr.py`, `model/rl/trainer.py`, `model/rl/evaluation.py` | Hyperparameters, online loop, EMD prioritization, 10 s motion chunks |
+| `humanoidverse/agents/evaluations/humanoidverse_isaac.py` | `model/rl/evaluation.py` | EMD between rollout and motion joint positions (`emd_numpy`) |
+| `humanoidverse/config/` (`simulator/isaacsim.yaml`, `env/legged_motions.yaml`, `domain_rand/domain_rand.yaml`, `obs/bfm_zero_obs.yaml`, `rewards/reward_bfm_zero.yaml`, `robot/g1/g1_29dof_hard_waist.yaml`) | `model/rl/envs.py`, `model/rl/trainer.py`, `model/rl/isaac_env.py` | Rates, episode length, terminations, randomization, sensor noise, soft limit, penalized links |
+| `humanoidverse/envs/legged_base_task/legged_robot_base.py`, `envs/legged_robot_motions/legged_robot_motions.py` | `model/rl/envs.py`, `model/rl/isaac_env.py`, `model/rl/actions.py` | Penalty definitions, PD target convention, lying-down starts |
+
+## References
+
+- Yitang Li, Zhengyi Luo, Tonghe Zhang, Cunxi Dai, Anssi Kanervisto, Andrea Tirinzoni,
+  Haoyang Weng, Kris Kitani, Mateusz Guzek, Ahmed Touati, Alessandro Lazaric, Matteo
+  Pirotta, Guanya Shi. BFM-Zero: A Promptable Behavioral Foundation Model for Humanoid
+  Control Using Unsupervised Reinforcement Learning. ICLR 2026.
+  [arXiv:2511.04131](https://arxiv.org/abs/2511.04131). Code:
+  <https://github.com/LeCAR-Lab/BFM-Zero> (CC BY-NC 4.0).
+- Andrea Tirinzoni, Ahmed Touati, Jesse Farebrother, Mateusz Guzek, Anssi Kanervisto,
+  Yingchen Xu, Alessandro Lazaric, Matteo Pirotta. Zero-Shot Whole-Body Humanoid Control
+  via Behavioral Foundation Models. ICLR 2025.
+  [arXiv:2504.11054](https://arxiv.org/abs/2504.11054).
+- Ahmed Touati, Yann Ollivier. Learning One Representation to Optimize All Rewards.
+  NeurIPS 2021, pp. 13–23. [arXiv:2103.07945](https://arxiv.org/abs/2103.07945).
+- Ahmed Touati, Jérémy Rapin, Yann Ollivier. Does Zero-Shot Reinforcement Learning
+  Exist? ICLR 2023. [arXiv:2209.14935](https://arxiv.org/abs/2209.14935).
+- Austin Patel, Shuran Song. GET-Zero: Graph Embodiment Transformer for Zero-Shot
+  Embodiment Generalization. ICRA 2025, pp. 14262–14269.
+  [DOI 10.1109/ICRA55743.2025.11127922](https://doi.org/10.1109/ICRA55743.2025.11127922),
+  [arXiv:2407.15002](https://arxiv.org/abs/2407.15002).
+- Scott Fujimoto, Herke van Hoof, David Meger. Addressing Function Approximation Error in
+  Actor-Critic Methods. ICML 2018, PMLR 80:1587–1596.
+  [arXiv:1802.09477](https://arxiv.org/abs/1802.09477).
+- Denis Yarats, Rob Fergus, Alessandro Lazaric, Lerrel Pinto. Mastering Visual Continuous
+  Control: Improved Data-Augmented Reinforcement Learning. ICLR 2022.
+  [arXiv:2107.09645](https://arxiv.org/abs/2107.09645). Code:
+  <https://github.com/facebookresearch/drqv2> (`utils.py`, MIT).
+- Timothy P. Lillicrap, Jonathan J. Hunt, Alexander Pritzel, Nicolas Heess, Tom Erez,
+  Yuval Tassa, David Silver, Daan Wierstra. Continuous Control with Deep Reinforcement
+  Learning. ICLR 2016. [arXiv:1509.02971](https://arxiv.org/abs/1509.02971).
+- Ian J. Goodfellow, Jean Pouget-Abadie, Mehdi Mirza, Bing Xu, David Warde-Farley,
+  Sherjil Ozair, Aaron Courville, Yoshua Bengio. Generative Adversarial Nets. NIPS 2014.
+  [arXiv:1406.2661](https://arxiv.org/abs/1406.2661).
+- Jonathan Ho, Stefano Ermon. Generative Adversarial Imitation Learning. NIPS 2016.
+  [arXiv:1606.03476](https://arxiv.org/abs/1606.03476).
+- Ishaan Gulrajani, Faruk Ahmed, Martin Arjovsky, Vincent Dumoulin, Aaron Courville.
+  Improved Training of Wasserstein GANs. NIPS 2017.
+  [arXiv:1704.00028](https://arxiv.org/abs/1704.00028).
+- Diederik P. Kingma, Jimmy Ba. Adam: A Method for Stochastic Optimization. ICLR 2015.
+  [arXiv:1412.6980](https://arxiv.org/abs/1412.6980).
+- Andrew M. Saxe, James L. McClelland, Surya Ganguli. Exact Solutions to the Nonlinear
+  Dynamics of Learning in Deep Linear Neural Networks. ICLR 2014.
+  [arXiv:1312.6120](https://arxiv.org/abs/1312.6120).
+- Lerrel Pinto, Marcin Andrychowicz, Peter Welinder, Wojciech Zaremba, Pieter Abbeel.
+  Asymmetric Actor Critic for Image-Based Robot Learning. RSS 2018.
+  [DOI 10.15607/RSS.2018.XIV.008](https://doi.org/10.15607/RSS.2018.XIV.008).
+- Eitan Altman. Constrained Markov Decision Processes. Chapman & Hall/CRC, 1999.
+  [DOI 10.1201/9781315140223](https://doi.org/10.1201/9781315140223).
+- Chen Tessler, Daniel J. Mankowitz, Shie Mannor. Reward Constrained Policy Optimization.
+  ICLR 2019. [arXiv:1805.11074](https://arxiv.org/abs/1805.11074).
+- Adam Stooke, Joshua Achiam, Pieter Abbeel. Responsive Safety in Reinforcement Learning
+  by PID Lagrangian Methods. ICML 2020, PMLR 119:9133–9143.
+  [arXiv:2007.03964](https://arxiv.org/abs/2007.03964).
+- Josh Tobin, Rachel Fong, Alex Ray, Jonas Schneider, Wojciech Zaremba, Pieter Abbeel.
+  Domain Randomization for Transferring Deep Neural Networks from Simulation to the Real
+  World. IROS 2017, pp. 23–30.
+  [DOI 10.1109/IROS.2017.8202133](https://doi.org/10.1109/IROS.2017.8202133).
+- Xue Bin Peng, Marcin Andrychowicz, Wojciech Zaremba, Pieter Abbeel. Sim-to-Real
+  Transfer of Robotic Control with Dynamics Randomization. ICRA 2018, pp. 3803–3810.
+  [DOI 10.1109/ICRA.2018.8460528](https://doi.org/10.1109/ICRA.2018.8460528).
+- Nikita Rudin, David Hoeller, Philipp Reist, Marco Hutter. Learning to Walk in Minutes
+  Using Massively Parallel Deep Reinforcement Learning. CoRL 2021, PMLR 164:91–100.
+  [arXiv:2109.11978](https://arxiv.org/abs/2109.11978). Code (legged_gym):
+  <https://github.com/leggedrobotics/legged_gym> (BSD-3-Clause).
+- Nico Bohlinger, Grzegorz Czechmanowski, Maciej Piotr Krupka, Piotr Kicki, Krzysztof
+  Walas, Jan Peters, Davide Tateo. One Policy to Run Them All: an End-to-end Learning
+  Approach to Multi-Embodiment Locomotion. CoRL 2024, PMLR 270:3356–3378.
+  [arXiv:2409.06366](https://arxiv.org/abs/2409.06366).
+- Bo Ai, Liu Dai, Nico Bohlinger, Dichen Li, Tongzhou Mu, Zhanxin Wu, K. Fay, Henrik I.
+  Christensen, Jan Peters, Hao Su. Towards Embodiment Scaling Laws in Robot Locomotion.
+  CoRL 2025. [arXiv:2505.05753](https://arxiv.org/abs/2505.05753).
+- Emanuel Todorov, Tom Erez, Yuval Tassa. MuJoCo: A Physics Engine for Model-Based
+  Control. IROS 2012, pp. 5026–5033.
+  [DOI 10.1109/IROS.2012.6386109](https://doi.org/10.1109/IROS.2012.6386109).
+- Mayank Mittal, Pascal Roth, James Tigue, Antoine Richard, Octi Zhang, et al. (105
+  authors). Isaac Lab: A GPU-Accelerated Simulation Framework for Multi-Modal Robot
+  Learning. 2025. [arXiv:2511.04831](https://arxiv.org/abs/2511.04831). Code:
+  <https://github.com/isaac-sim/IsaacLab> (BSD-3-Clause; full author list in its
+  `CITATION.cff`).
+- Mayank Mittal, Calvin Yu, Qinxi Yu, Jingzhou Liu, Nikita Rudin, David Hoeller, Jia Lin
+  Yuan, Ritvik Singh, Yunrong Guo, Hammad Mazhar, Ajay Mandlekar, Buck Babich, Gavriel
+  State, Marco Hutter, Animesh Garg. Orbit: A Unified Simulation Framework for
+  Interactive Robot Learning Environments. IEEE RA-L 8(6):3740–3747, 2023.
+  [DOI 10.1109/LRA.2023.3270034](https://doi.org/10.1109/LRA.2023.3270034).
+- Miles Macklin. Warp: A High-performance Python Framework for GPU Simulation and
+  Graphics. NVIDIA GTC, 2022. <https://github.com/NVIDIA/warp> (Apache-2.0).
+- Yossi Rubner, Carlo Tomasi, Leonidas J. Guibas. The Earth Mover's Distance as a Metric
+  for Image Retrieval. IJCV 40(2):99–121, 2000.
+  [DOI 10.1023/A:1026543900054](https://doi.org/10.1023/A:1026543900054).
+- Gabriel Peyré, Marco Cuturi. Computational Optimal Transport. Foundations and Trends in
+  Machine Learning 11(5–6):355–607, 2019.
+  [DOI 10.1561/2200000073](https://doi.org/10.1561/2200000073),
+  [arXiv:1803.00567](https://arxiv.org/abs/1803.00567).
+- David F. Crouse. On Implementing 2D Rectangular Assignment Algorithms. IEEE
+  Transactions on Aerospace and Electronic Systems 52(4):1679–1696, 2016.
+  [DOI 10.1109/TAES.2016.140952](https://doi.org/10.1109/TAES.2016.140952).
+- Pauli Virtanen et al. SciPy 1.0: Fundamental Algorithms for Scientific Computing in
+  Python. Nature Methods 17:261–272, 2020.
+  [DOI 10.1038/s41592-019-0686-2](https://doi.org/10.1038/s41592-019-0686-2).
+- Rémi Flamary et al. (22 authors). POT: Python Optimal Transport. JMLR 22(78):1–8, 2021.
+  <https://jmlr.org/papers/v22/20-451.html>.
+- Ashish Vaswani, Noam Shazeer, Niki Parmar, Jakob Uszkoreit, Llion Jones, Aidan N. Gomez,
+  Łukasz Kaiser, Illia Polosukhin. Attention Is All You Need. NIPS 2017.
+  [arXiv:1706.03762](https://arxiv.org/abs/1706.03762).
+- Jimmy Lei Ba, Jamie Ryan Kiros, Geoffrey E. Hinton. Layer Normalization. 2016.
+  [arXiv:1607.06450](https://arxiv.org/abs/1607.06450).
+- Dan Hendrycks, Kevin Gimpel. Gaussian Error Linear Units (GELUs). 2016.
+  [arXiv:1606.08415](https://arxiv.org/abs/1606.08415).
+- Diganta Misra. Mish: A Self Regularized Non-Monotonic Activation Function. BMVC 2020.
+  [arXiv:1908.08681](https://arxiv.org/abs/1908.08681).
+- NVIDIA. CUDA Programming Guide, Section 4.2 "CUDA Graphs".
+  <https://docs.nvidia.com/cuda/cuda-programming-guide/04-special-topics/cuda-graphs.html>.
+- PyTorch. CUDA semantics: CUDA Graphs. <https://docs.pytorch.org/docs/stable/notes/cuda.html>.
+- MuJoCo Menagerie, `unitree_go1/go1.xml` (Unitree Robotics, BSD-3-Clause).
+  <https://github.com/google-deepmind/mujoco_menagerie/tree/main/unitree_go1>.

@@ -6,16 +6,19 @@ Tools, from probing work in NLP and representation learning:
   ``encoder.layers[i]`` capture the joint states after each block; ``final`` is the
   encoder output. One probe per layer, on frozen features, as Alain & Bengio [1] ("we
   take the features of each layer separately and we fit a linear classifier").
-* **Linear probe.** Closed-form ridge regression, ``min ||y - Xw - b||^2 + alpha ||w||^2``
-  with an unpenalized intercept. ``alpha`` is chosen on a validation split from
-  scikit-learn ``RidgeCV``'s default grid ``(0.1, 1.0, 10.0)`` (documented default,
-  scikit-learn 1.9); a choice at the edge of the grid is flagged.
+* **Linear probe.** Closed-form ridge regression (Hoerl and Kennard [7]),
+  ``min ||y - Xw - b||^2 + alpha ||w||^2`` with an unpenalized intercept. ``alpha`` is
+  chosen on a validation split from scikit-learn ``RidgeCV``'s default grid
+  ``(0.1, 1.0, 10.0)`` (documented default, scikit-learn 1.9 [8]); a choice at the edge
+  of the grid is flagged.
 * **MLP probe.** One hidden layer of 1000 ReLU units, as the 1000-dimensional default
   of Hewitt & Liang [2] and the "single 1000D hidden layer with a ReLU activation" of
   Zhang & Bowman [3]. Training follows Hewitt & Liang's code
-  (``control-tasks/regimen.py``, Apache-2.0, adapted): Adam at learning rate 0.001,
+  (``control-tasks/regimen.py``, Apache-2.0, adapted): Adam [9] at learning rate 0.001,
   ``ReduceLROnPlateau(factor=0.5, patience=0)`` on the validation loss, keep the best
-  parameters (improvement > 0.001), stop when 4 evaluations pass without one, at most
+  parameters (improvement > 0.001), stop at the fifth evaluation in a row without one
+  (their test ``min_dev_loss_eval_index < eval_index - 4``, "for 5 straight epochs" in
+  its docstring; the paper says "when 4 such epochs occur in a row"), at most
   40 epochs (their configs: ``epochs: 40``), batches of 20 examples (their
   ``batch_size: 20`` sentences; here 20 robot frames, a frame's joints being the
   analog of a sentence's words). Targets are standardized with training statistics for
@@ -40,9 +43,9 @@ Tools, from probing work in NLP and representation learning:
   non-encoder parameter, train the heads on training robots only, and evaluate on
   held-out robots, against the same procedure on a random encoder.
 
-Head training uses the Hugging Face ``Trainer`` defaults that pretraining used (AdamW,
-betas (0.9, 0.999), eps 1e-8, weight decay 0, gradient clipping at norm 1, linear decay
-after warmup) and the learning rate, warmup and batch size of ``docs/training.md``
+Head training uses the Hugging Face ``Trainer`` defaults [10] that pretraining used
+(AdamW [11], betas (0.9, 0.999), eps 1e-8, weight decay 0, gradient clipping at norm 1,
+linear decay after warmup) and the learning rate, warmup and batch size of ``docs/training.md``
 (5e-4, 100, 64). ``HeadTrainingSettings.from_checkpoint`` reads the run's own
 ``training_args.bin`` instead when it is there.
 
@@ -66,18 +69,34 @@ References:
     [1] G. Alain, Y. Bengio. Understanding intermediate layers using linear classifier
         probes. ICLR 2017 (workshop track). arXiv:1610.01644.
     [2] J. Hewitt, P. Liang. Designing and Interpreting Probes with Control Tasks.
-        EMNLP-IJCNLP 2019. DOI 10.18653/v1/D19-1275. Code:
-        https://github.com/john-hewitt/control-tasks (Apache-2.0).
-    [3] K. Zhang, S. R. Bowman. Language Modeling Teaches You More than Translation
+        EMNLP-IJCNLP 2019, pp. 2733-2743. DOI 10.18653/v1/D19-1275. Code:
+        https://github.com/john-hewitt/control-tasks (Apache-2.0; its LICENSE names
+        no copyright holder).
+    [3] K. W. Zhang, S. R. Bowman. Language Modeling Teaches You More than Translation
         Does: Lessons Learned Through Auxiliary Syntactic Task Analysis. BlackboxNLP
-        2018. DOI 10.18653/v1/W18-5448 (MLP details in arXiv:1809.10040).
+        2018, pp. 359-361. DOI 10.18653/v1/W18-5448 (MLP details in arXiv:1809.10040,
+        titled "Language Modeling Teaches You More Syntax than Translation Does").
     [4] A. Conneau, G. Kruszewski, G. Lample, L. Barrault, M. Baroni. What you can cram
         into a single $&!#* vector: Probing sentence embeddings for linguistic
-        properties. ACL 2018. DOI 10.18653/v1/P18-1198.
-    [5] B. Ai et al. Towards Embodiment Scaling Laws in Robot Locomotion. CoRL 2025.
-        arXiv:2505.05753 (20% held-out fraction).
+        properties. ACL 2018, pp. 2126-2136. DOI 10.18653/v1/P18-1198.
+    [5] B. Ai, L. Dai, N. Bohlinger, D. Li, T. Mu, Z. Wu, K. Fay, H. I. Christensen,
+        J. Peters, H. Su. Towards Embodiment Scaling Laws in Robot Locomotion. CoRL
+        2025, PMLR 305:3483-3515. arXiv:2505.05753 (20% held-out fraction).
     [6] B. Liétard, M. Abdou, A. Søgaard. Do Language Models Know the Way to Rome?
-        BlackboxNLP 2021. DOI 10.18653/v1/2021.blackboxnlp-1.40.
+        BlackboxNLP 2021, pp. 510-517. DOI 10.18653/v1/2021.blackboxnlp-1.40.
+    [7] A. E. Hoerl, R. W. Kennard. Ridge Regression: Biased Estimation for
+        Nonorthogonal Problems. Technometrics 12(1):55-67, 1970.
+        DOI 10.1080/00401706.1970.10488634.
+    [8] F. Pedregosa, G. Varoquaux, A. Gramfort, V. Michel, B. Thirion, O. Grisel,
+        M. Blondel, P. Prettenhofer, R. Weiss, V. Dubourg, J. Vanderplas, A. Passos,
+        D. Cournapeau, M. Brucher, M. Perrot, E. Duchesnay. Scikit-learn: Machine
+        Learning in Python. JMLR 12:2825-2830, 2011.
+    [9] D. P. Kingma, J. Ba. Adam: A Method for Stochastic Optimization. ICLR 2015.
+        arXiv:1412.6980.
+    [10] T. Wolf et al. Transformers: State-of-the-Art Natural Language Processing.
+        EMNLP 2020 System Demonstrations, pp. 38-45. DOI 10.18653/v1/2020.emnlp-demos.6.
+    [11] I. Loshchilov, F. Hutter. Decoupled Weight Decay Regularization. ICLR 2019.
+        arXiv:1711.05101.
 """
 
 from __future__ import annotations
@@ -97,7 +116,8 @@ from model.physics_schema import feature_names, feature_scales
 # scikit-learn RidgeCV default alphas.
 RIDGE_PENALTIES = (0.1, 1.0, 10.0)
 # Hewitt & Liang: probe hidden size 1000 (also Zhang & Bowman's 1000D layer), Adam lr 0.001,
-# LR halved on a plateau, early stop after 4 evaluations without improvement > 0.001, 40 epochs,
+# LR halved on a plateau, early stop once the best evaluation is more than 4 evaluations old
+# (regimen.py: ``min_dev_loss_eval_index < eval_index - 4``; improvement > 0.001), 40 epochs,
 # batches of 20 examples.
 MLP_HIDDEN_SIZE = 1000
 MLP_LEARNING_RATE = 1e-3
@@ -505,7 +525,9 @@ class MlpSettings:
         learning_rate (float): Adam learning rate (0.001, their ``regimen.py``).
         max_epochs (int): Epoch limit (40, their configs).
         batch_examples (int): Examples (frames) per batch (20, their configs).
-        patience (int): Evaluations without improvement before stopping (4).
+        patience (int): Stop once the best evaluation is more than this many
+            evaluations old, that is at the (patience + 1)-th evaluation without
+            improvement (4, as ``regimen.py``'s ``eval_index - 4`` test).
         min_improvement (float): Required decrease of the validation loss (0.001).
         weight_decay (float): Adam weight decay (0, their configs' default).
     """

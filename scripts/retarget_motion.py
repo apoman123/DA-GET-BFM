@@ -3,8 +3,9 @@
 The motion is a dataset in the repository's table format (``model/conversion/common.py``:
 ``data/chunk-000/*.parquet`` and ``meta/info.json``, as ``scripts/convert_dataset.py``
 writes it), read with the ``huggingface`` data source. Every episode is retargeted with
-``model.rl.retarget.retarget`` (keypoints and inverse kinematics after Peng et al.,
-RSS 2020) and written in the same format for the target robot, with a ``source.json``
+``model.rl.retarget.retarget`` (keypoints and inverse kinematics after Peng, Coumans,
+Zhang, Lee, Tan and Levine, RSS 2020, DOI 10.15607/RSS.2020.XVI.064; damped least
+squares after Wampler 1986 and Sugihara 2011, cited in that module) and written in the same format for the target robot, with a ``source.json``
 that a data config can use as it is, for example as expert motions of
 ``scripts/train_bfm.py`` or as prompts for ``DaGetBfmModel.tracking_inference`` and
 ``goal_inference``.

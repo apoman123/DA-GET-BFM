@@ -15,6 +15,28 @@ Rigid body and actuator features depend only on the embodiment and are
 computed once per robot. Dynamics features are split into tiers by what they
 depend on (``model.physics_schema.FEATURE_UPDATE_TIERS``), and
 ``PhysicsFeatureCache`` recomputes each tier only when needed at control time.
+
+References:
+
+* ``M``, ``c`` and ``g`` come from ``model.dynamics`` (recursive Newton-Euler; see its
+  references). The joint damping and friction are the URDF ``<dynamics>`` values (ROS
+  URDF joint specification, http://wiki.ros.org/urdf/XML/joint). The reflected rotor
+  inertia ``I^rotor`` is MuJoCo's joint ``armature`` (Todorov, Erez & Tassa, IROS 2012,
+  DOI 10.1109/IROS.2012.6386109; Wensing et al., IEEE T-RO 33(3):509-522, 2017, DOI
+  10.1109/TRO.2016.2640183).
+* The two rotation columns of ``T^parent`` are the 6D rotation representation of
+  Zhou et al. (CVPR 2019, DOI 10.1109/CVPR.2019.00589).
+* Rotor thrust ``k_f w^2`` and drag moment ``k_m w^2`` follow the motor model of RotorS
+  (Furrer et al., in *Robot Operating System (ROS): The Complete Reference (Volume
+  1)*, Springer 2016, pp. 595-625, DOI 10.1007/978-3-319-26054-9_23).
+* The PD drive ``K_p (a - q) - K_d qd`` is recomputed and clipped at every physics
+  step, as legged_gym does with its torque limits (Rudin et al., CoRL 2021, PMLR
+  164:91-100, https://github.com/leggedrobotics/legged_gym). The
+  speed-dependent envelope ``min(tau^peak, P^max / |qd|)``, the margins and the
+  defaults of ``ActuatorDefaults`` are this repository's model, not taken from a source.
+* ``froude_scale_base_features``: dynamic similarity (Alexander & Jayes, J. Zool.
+  201:135-152, 1983, DOI 10.1111/j.1469-7998.1983.tb04266.x) with standard gravity
+  ``g = 9.80665 m/s^2`` (3rd CGPM 1901, Declaration 2, DOI 10.59161/CGPM1901DECL2E).
 """
 
 from __future__ import annotations
@@ -335,7 +357,8 @@ def froude_scale_base_features(features: torch.Tensor, length: torch.Tensor | fl
     The base-feature layout puts the angular velocity (rad/s) and the linear velocity
     divided by the robot's size (1/s) in ``columns``; both become dimensionless when
     multiplied by ``sqrt(L / g)``, giving ``omega sqrt(L/g)`` and the Froude-like
-    ``v / sqrt(g L)`` (Alexander & Jayes 1983; proposal A3).
+    ``v / sqrt(g L)`` (Alexander & Jayes, J. Zool. 201:135-152, 1983; proposal A3), with
+    ``g = 9.80665 m/s^2``.
 
     Args:
         features (torch.Tensor): ``[..., F]`` base features.

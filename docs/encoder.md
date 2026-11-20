@@ -18,13 +18,15 @@ How a URDF becomes one token per DoF, how the graph and the physics enter attent
   - [8. Batching different robots](#8-batching-different-robots)
 - [Physics pretraining auxiliary losses](#physics-pretraining-auxiliary-losses)
 - [Configuration reference](#configuration-reference)
+- [References](#references)
 
 ## Why one token per DoF
 
 A policy that controls joints should see the robot the way its actions are
-defined: one entry per actuated joint. GET-Zero represents a robot as "an
-embodiment graph composed of joints which is readily accessible from URDF files
-as a practical representation when joint-level actions matter." Each joint is
+defined: one entry per actuated joint. GET-Zero (Patel and Song, ICRA 2025)
+represents a robot as "an embodiment graph composed of joints which is readily
+accessible from URDF files as a practical representation when joint-level actions
+matter." Each joint is
 a node and a token, and the kinematic tree decides which tokens attend to each
 other more strongly.
 
@@ -63,7 +65,7 @@ ratios (`mechanicalReduction`). `EmbodimentGraph.from_urdf` in
 | URDF element | Treatment |
 |---|---|
 | `revolute`, `continuous`, `prismatic` joints | One node and one token each. Rotors are `continuous` joints. |
-| `fixed` joints | Collapsed. Their child links are merged into the parent body: poses are composed and inertia is combined with the parallel-axis theorem. Feet, IMU frames, sensor mounts, and flanges therefore add no tokens, but their frames stay available (`link_poses`) for contacts and end effectors. |
+| `fixed` joints | Collapsed. Their child links are merged into the parent body: poses are composed and inertia is combined with the parallel-axis (Steiner's) theorem (Lynch and Park 2017, Eq. 8.27). Feet, IMU frames, sensor mounts, and flanges therefore add no tokens, but their frames stay available (`link_poses`) for contacts and end effectors. |
 | `mimic` joints | Not independent DoFs, so frozen at their offset by default. `include_mimic_joints=True` keeps them as tokens. |
 | `floating` and `planar` joints | The base. By default (`multi_dof_joints="skip"`) the links below them form the root body, and a skipped `floating` joint marks the graph as floating-base. With `"expand"`, they become chains of 1-DoF passive virtual joints (6 for floating, 3 for planar). |
 | `frozen_joints={name: q}` | 1-DoF joints held rigid at a position and merged like fixed links. Use this when a dataset records only part of a robot, for example the arms of a humanoid whose legs are locked. |
@@ -117,7 +119,7 @@ observation token. All poses are relative to the parent joint.
 | Preset | Size | Features |
 |---|---|---|
 | `JointFeatureConfig()` | 6 | Joint origin `x, y, z` and rotation `roll, pitch, yaw`. This matches GET-Zero. |
-| `JointFeatureConfig.cross_embodiment()` | 31 | Origin, rotation as continuous 6D, joint axis, one-hot joint type, position limits, effort and velocity limits, damping and friction, and the mass, center of mass, and inertia tensor of the body the joint moves. |
+| `JointFeatureConfig.cross_embodiment()` | 31 | Origin, rotation as continuous 6D (Zhou et al., CVPR 2019), joint axis, one-hot joint type, position limits, effort and velocity limits, damping and friction, and the mass, center of mass, and inertia tensor of the body the joint moves. |
 
 With Physics Cross Attention enabled, the full physical description goes to the
 physics tokens instead (section 6), so the GET-Zero preset is usually enough in
@@ -146,14 +148,15 @@ oldest first. Padded joints get all-zero tokens.
 
 `DaGetEncoder` (`model/modeling_da_get.py`) runs:
 
-1. A LayerNorm over each raw token, as in GET-Zero, because token features have
-   very different scales.
+1. A LayerNorm (Ba et al. 2016) over each raw token, as in the GET-Zero code,
+   because token features have very different scales.
 2. A linear projection to `hidden_size`.
-3. `num_hidden_layers` pre-norm transformer layers. Each layer runs, in order:
+3. `num_hidden_layers` pre-norm transformer layers (Vaswani et al. 2017; pre-norm:
+   Xiong et al., ICML 2020, also used by GET-Zero). Each layer runs, in order:
    - graph self-attention;
    - Physics Cross Attention (optional);
    - cross-attention to external context tokens (optional);
-   - a GELU feed-forward block.
+   - a GELU (Hendrycks and Gimpel 2016) feed-forward block.
 4. A final LayerNorm. Padded joints are set to zero.
 
 Each self-attention layer adds a learned per-head bias to the attention logits:
@@ -172,7 +175,8 @@ A_{ij}
 + b_{\mathrm{mass}}(\widetilde M_{ij}(q)).
 $$
 
-The graph terms come from GET-Zero; this repository adds the mass term.
+The graph terms come from GET-Zero, whose SPD term follows Graphormer's spatial
+encoding (Ying et al., NeurIPS 2021); this repository adds the mass term.
 
 - `spatial`, `parent`, and `child` are embedding tables with one scalar per
   head, in every layer.
@@ -222,7 +226,8 @@ schema):
 | $k_{f,i}$ propeller thrust coefficient (thrust $k_{f,i}\omega_i^2$ along $a_i$, signed) | N s²/rad² | 0 (rotors only) |
 | $k_{m,i}$ propeller drag coefficient (drag moment $k_{m,i}\omega_i^2$) | N m s²/rad² | 0 (rotors only) |
 
-`k_f` and `k_m` extend the actuator features so multirotors can be described.
+`k_f` and `k_m` extend the actuator features so multirotors can be described; the
+thrust and drag model is that of RotorS (Furrer et al. 2016).
 Every other joint has zeros there. Speed, power, gear ratio, and control mode
 remain in `ActuatorSpec` for simulation and labels, but are not encoder features.
 The defaults are assumptions.
@@ -250,7 +255,8 @@ old sizes (25, 6, 7) are rejected.
 
 Each group goes through its own tokenizer (`PhysicsFeatureTokenizer`). The
 tokenizer first maps every feature to `asinh(x / s)` with a per-feature scale
-`s`, which is linear for small values and logarithmic for large ones, so a
+`s` (the inverse hyperbolic sine transformation of Burbidge, Magee and Robb 1988),
+which is linear for small values and logarithmic for large ones, so a
 20 g finger link and a 10 kg thigh are both well conditioned. A two-layer MLP
 then gives one token per joint, and a learned group embedding is added. The
 three groups are concatenated into a memory of `3J` tokens:
@@ -371,8 +377,8 @@ These encoder pretraining losses are separate from the BFM's
 Select an encoder architecture with `DaGetConfig.from_size(token_size, "tiny")`.
 The same names work with `--preset` in `scripts/train_physics_da_get.py`.
 Keyword arguments override individual preset dimensions. `da_get_zero` remains
-available as the paper architecture with width 512, eight layers, and a 1024-wide
-feed-forward block.
+available as GET-Zero's released architecture (`get_zero/distill/cfg/model/Base.yaml`
+in its code) with width 512, eight layers, and a 1024-wide feed-forward block.
 
 | Size | Width | Layers | Heads | Feed-forward width |
 |---|---:|---:|---:|---:|
@@ -421,3 +427,44 @@ feed-forward block.
 | `sibling_edges` | `True` | Add undirected edges between joints sharing a parent body |
 | `frozen_joints` | `None` | Joints held rigid at given positions |
 | `floating_base` | `None` (auto) | Root body moves freely |
+
+## References
+
+- Austin Patel and Shuran Song. *GET-Zero: Graph Embodiment Transformer for Zero-shot
+  Embodiment Generalization.* ICRA 2025, pp. 14262-14269.
+  [DOI 10.1109/ICRA55743.2025.11127922](https://doi.org/10.1109/ICRA55743.2025.11127922),
+  [arXiv:2407.15002](https://arxiv.org/abs/2407.15002),
+  [code](https://github.com/real-stanford/get_zero) (the model configuration referred
+  to above is from commit `279652d`).
+- Chengxuan Ying, Tianle Cai, Shengjie Luo, Shuxin Zheng, Guolin Ke, Di He, Yanming
+  Shen, and Tie-Yan Liu. *Do Transformers Really Perform Badly for Graph
+  Representation?* NeurIPS 2021. [arXiv:2106.05234](https://arxiv.org/abs/2106.05234).
+- Ashish Vaswani, Noam Shazeer, Niki Parmar, Jakob Uszkoreit, Llion Jones, Aidan N.
+  Gomez, Łukasz Kaiser, and Illia Polosukhin. *Attention Is All You Need.* NeurIPS
+  2017. [arXiv:1706.03762](https://arxiv.org/abs/1706.03762).
+- Ruibin Xiong, Yunchang Yang, Di He, Kai Zheng, Shuxin Zheng, Chen Xing, Huishuai
+  Zhang, Yanyan Lan, Liwei Wang, and Tie-Yan Liu. *On Layer Normalization in the
+  Transformer Architecture.* ICML 2020, PMLR 119:10524-10533.
+  [arXiv:2002.04745](https://arxiv.org/abs/2002.04745).
+- Jimmy Lei Ba, Jamie Ryan Kiros, and Geoffrey E. Hinton. *Layer Normalization.*
+  [arXiv:1607.06450](https://arxiv.org/abs/1607.06450), 2016.
+- Dan Hendrycks and Kevin Gimpel. *Gaussian Error Linear Units (GELUs).*
+  [arXiv:1606.08415](https://arxiv.org/abs/1606.08415), 2016.
+- Yi Zhou, Connelly Barnes, Jingwan Lu, Jimei Yang, and Hao Li. *On the Continuity of
+  Rotation Representations in Neural Networks.* CVPR 2019, pp. 5738-5746.
+  [DOI 10.1109/CVPR.2019.00589](https://doi.org/10.1109/CVPR.2019.00589).
+- John B. Burbidge, Lonnie Magee, and A. Leslie Robb. *Alternative Transformations to
+  Handle Extreme Values of the Dependent Variable.* Journal of the American
+  Statistical Association 83(401):123-127, 1988.
+  [DOI 10.1080/01621459.1988.10478575](https://doi.org/10.1080/01621459.1988.10478575).
+- Kevin M. Lynch and Frank C. Park. *Modern Robotics: Mechanics, Planning, and
+  Control.* Cambridge University Press, 2017.
+  [DOI 10.1017/9781316661239](https://doi.org/10.1017/9781316661239).
+- Fadri Furrer, Michael Burri, Markus Achtelik, and Roland Siegwart. *RotorS—A
+  Modular Gazebo MAV Simulator Framework.* In *Robot Operating System (ROS): The
+  Complete Reference (Volume 1)*, Springer, 2016, pp. 595-625.
+  [DOI 10.1007/978-3-319-26054-9_23](https://doi.org/10.1007/978-3-319-26054-9_23).
+- Zheng Xiong, Jacob Beck, and Shimon Whiteson. *Universal Morphology Control via
+  Contextual Modulation.* ICML 2023, PMLR 202:38286-38300
+  ([ModuMorph](https://proceedings.mlr.press/v202/xiong23a.html)).
+- ROS URDF XML specification (Open Robotics): <http://wiki.ros.org/urdf/XML>.

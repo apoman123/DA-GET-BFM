@@ -3,17 +3,21 @@
 Proposal v4, Sec. 5.3 item 4: change one physics token and compare the model's change
 of the response operator with the analytic change of ``G`` from
 ``model.dynamics.constrained_response`` (Featherstone, *Rigid Body Dynamics
-Algorithms*, Springer 2008, on constrained dynamics, as cited there).
+Algorithms*, Springer 2008, DOI 10.1007/978-1-4899-7560-7, on constrained dynamics,
+as cited there).
 
 For one frame of one robot:
 
 1. The body moved by joint ``j`` gets its mass and its inertia about the center of
    mass scaled by ``s`` (a uniform density change, which keeps the center of mass).
    Mass and inertia are scaled together as in ``model.training.sources.randomize_robot``
-   and as MetaMorph's density variation (Gupta et al., ICLR 2022, arXiv:2203.11931).
-   The default ``s = 1.2`` is the upper bound of both this repo's training mass
+   and as a change of limb density does in MuJoCo, which derives a geom's mass and
+   inertia from its density. MetaMorph (Gupta, Fan, Ganguli and Fei-Fei, ICLR 2022,
+   arXiv:2203.11931) varies limb density; that the inertia follows is MuJoCo's rule,
+   not a statement of the paper. The default ``s = 1.2`` is the upper bound of both this repo's training mass
    randomization (``DEFAULT_RANDOMIZATION["mass"] = [0.8, 1.2]``) and MetaMorph's
-   density range (Table 2), so the perturbed robot stays in the training distribution.
+   density range ("[0.8, 1.2]x limb density", Table 2), so the perturbed robot stays in
+   the training distribution.
 2. Every model input that depends on that mass is recomputed for both robots: the
    rigid-body features, the token hardware features (the ``child_inertial`` columns
    when present), the mass matrix ``M(q)`` and the dynamics features (``M_ii``,

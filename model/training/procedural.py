@@ -2,7 +2,11 @@
 
 The source generates robots, writes their URDFs, and hands each one to an existing
 simulator source (``synthetic_source`` or ``mujoco_source`` of
-``model.training.sources``). The results are concatenated, so it returns what every
+``model.training.sources``; MuJoCo is Todorov, Erez and Tassa, "MuJoCo: A physics
+engine for model-based control", IROS 2012, pp. 5026-5033, DOI
+10.1109/IROS.2012.6386109). The generator follows GenBot-1K (Ai et al., CoRL 2025,
+arXiv:2505.05753) and GenLoco (Feng et al., CoRL 2022, arXiv:2209.05309); see
+``model.morphology`` for every value. The results are concatenated, so it returns what every
 source returns: embodiment records and trajectories whose ``embodiment`` indices
 point into those records.
 

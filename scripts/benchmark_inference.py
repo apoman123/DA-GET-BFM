@@ -25,6 +25,12 @@ Run on the deployment GPU::
 
 Networks are randomly initialized: latency does not depend on the weights. The exit
 status is 1 when a ``control step`` row is over budget at its 99th percentile.
+
+The robot models are third-party URDFs fetched by ``scripts/download_urdfs.py``: G1, H1
+and Go1 from Unitree Robotics (https://github.com/unitreerobotics/unitree_ros,
+BSD-3-Clause) and ANYmal D from ANYbotics (https://github.com/ANYbotics/anymal_d_simple_description,
+BSD-3-Clause); see ``THIRD_PARTY_NOTICES.md``. CUDA Graphs: NVIDIA, *CUDA Programming
+Guide*, Section 4.2 (https://docs.nvidia.com/cuda/cuda-programming-guide/04-special-topics/cuda-graphs.html).
 """
 
 from __future__ import annotations

@@ -4,7 +4,9 @@ Written against Isaac Lab 3.0.0 (commit 4cfdfcf) with its PhysX backend, and tes
 through a fake of its API (``tests/test_isaac_env.py``), because Isaac Lab needs an NVIDIA GPU.
 
 One simulation holds every robot. Each robot's worlds live under ``/World/robot<r>_<i>`` on
-a shared grid, one ``Articulation`` per robot, as in Isaac Lab's articulation tutorial.
+a shared grid, one ``Articulation`` per robot, as in Isaac Lab's articulation tutorial
+(``scripts/tutorials/01_assets/run_articulation.py``,
+https://isaac-sim.github.io/IsaacLab/main/source/tutorials/01_assets/run_articulation.html).
 
 Actuators are explicit by default (``IsaacRobotConfig.explicit_actuators``): an
 ``IdealPDActuator`` subclass (``envelope_actuator_cfg``) computes the PD torque at every
@@ -21,8 +23,22 @@ With implicit actuators (``explicit_actuators=False``) PhysX solves the PD law i
 the constant peak clip applies, and the reported ``applied_torque`` is the explicit PD
 formula, which Isaac Lab keeps only as telemetry: it is not the torque PhysX applied, so no
 start-of-step labels are recorded. Explicit PD with stiff gains needs a small enough physics
-step (legged_gym, Rudin et al., CoRL 2021, computes PD torques explicitly at 200 Hz); check
+step (legged_gym, Rudin et al., CoRL 2021, PMLR 164:91-100, computes PD torques explicitly
+at 200 Hz: ``dt = 0.005``, ``decimation = 4``, ``LeggedRobot._compute_torques``); check
 stability for your robots before training.
+
+References: Isaac Lab (Mittal et al., "Isaac Lab: A GPU-Accelerated Simulation Framework
+for Multi-Modal Robot Learning", arXiv:2511.04831, 2025, the citation its
+``CITATION.cff`` asks for; earlier Orbit, Mittal et al., IEEE RA-L 8(6):3740-3747, 2023,
+DOI 10.1109/LRA.2023.3270034; BSD-3-Clause); NVIDIA Warp (Macklin, "Warp: A
+High-performance Python Framework for GPU Simulation and Graphics", NVIDIA GTC 2022,
+https://github.com/NVIDIA/warp, Apache-2.0). The penalties, their 1 N contact threshold
+and the penalized G1 links follow BFM-Zero (https://github.com/LeCAR-Lab/BFM-Zero,
+``humanoidverse/envs/legged_base_task/legged_robot_base.py``,
+``envs/legged_robot_motions/legged_robot_motions.py`` and ``penalize_contacts_on`` in
+``config/robot/g1/g1_29dof_hard_waist.yaml``; CC BY-NC 4.0). ``matrix_to_xyzw`` is
+Shepperd's method (Shepperd, J. Guidance and Control 1(3):223-224, 1978, DOI
+10.2514/3.55767b).
 """
 
 from __future__ import annotations
@@ -47,7 +63,10 @@ def _warp():
 
 
 def matrix_to_xyzw(rotation: np.ndarray) -> np.ndarray:
-    """Convert rotation matrices ``[N, 3, 3]`` to Isaac Lab 3's x, y, z, w quaternions ``[N, 4]``."""
+    """Convert rotation matrices ``[N, 3, 3]`` to Isaac Lab 3's x, y, z, w quaternions ``[N, 4]``.
+
+    Shepperd's method (1978): the candidate from the largest of the diagonal and the trace.
+    """
     m = rotation
     trace = m[:, 0, 0] + m[:, 1, 1] + m[:, 2, 2]
     candidates = np.stack(
@@ -80,7 +99,8 @@ class IsaacRobotConfig:
         urdf (str): URDF with resolvable collision meshes.
         ros_package_paths (list[dict[str, str]]): ``{"name", "path"}`` for ``package://`` meshes.
         undesired_contact_links (list[str]): Regexes of links whose contact is penalized; by
-            default every link but the feet (BFM-Zero's G1: pelvis, shoulders, hips).
+            default every link but the feet (BFM-Zero's G1: pelvis, shoulders, hips,
+            ``penalize_contacts_on``).
         self_collisions (bool): Enable self-collisions.
         explicit_actuators (bool): Compute the PD torque at every physics step with the
             torque-speed envelope (``envelope_actuator_cfg``) instead of inside PhysX
@@ -358,25 +378,31 @@ class IsaacEmbodimentEnv(EmbodimentEnv):
         return self._net_forces()[:, self.foot_sensors].norm(dim=-1) > 1.0
 
     def foot_contacts(self) -> torch.Tensor:
-        """Return bool ``[N, C]``: feet with a contact force above 1 N."""
+        """Return bool ``[N, C]``: feet with a contact force above 1 N (BFM-Zero's threshold)."""
         return self._foot_contacts().detach().cpu()
 
     def _slippage(self) -> np.ndarray:
-        """Return the summed speed of feet in contact (BFM-Zero's ``penalty_slippage``)."""
+        """Return the summed speed of feet in contact (BFM-Zero's ``_reward_penalty_slippage``)."""
         if self.foot_bodies.numel() == 0:
             return np.zeros(self.num_envs)
         speed = self.articulation.data.body_link_lin_vel_w.torch[:, self.foot_bodies].norm(dim=-1)
         return (speed * self._foot_contacts()).sum(dim=1).detach().cpu().double().numpy()
 
     def _undesired_contact(self) -> np.ndarray:
-        """Return which worlds have a contact above 1 N on a penalized link, with the floor or with itself."""
+        """Return which worlds have a contact above 1 N on a penalized link, with the floor or with itself.
+
+        BFM-Zero's ``_reward_penalty_undesired_contact`` (any force component above 1 N).
+        """
         if self.undesired_sensors.numel() == 0:
             return np.zeros(self.num_envs, dtype=bool)
         forces = self._net_forces()[:, self.undesired_sensors]
         return (forces.abs() > 1.0).any(dim=-1).any(dim=-1).detach().cpu().numpy()
 
     def _feet_orientation(self) -> np.ndarray:
-        """Return the summed ``|g_xy|`` in the frame of each flat foot in contact (BFM-Zero's ``penalty_feet_ori``)."""
+        """Return the summed ``|g_xy|`` in the frame of each flat foot in contact.
+
+        BFM-Zero's ``_reward_penalty_feet_ori``.
+        """
         if not self.flat_feet:
             return np.zeros(self.num_envs)
         quaternion = self.articulation.data.body_link_quat_w.torch[:, self.foot_bodies]
@@ -522,6 +548,8 @@ def build_isaac_group(robots: list[tuple[EmbodimentRecord, EnvConfig, IsaacRobot
             ros_package_paths=settings.ros_package_paths,
             activate_contact_sensors=True,
             articulation_props=[
+                # Solver iterations of Isaac Lab's quadruped assets (UNITREE_GO1_CFG in
+                # isaaclab_assets/robots/unitree.py); its H1 and G1 configs use more.
                 PhysxArticulationCfg(enabled_self_collisions=settings.self_collisions, solver_position_iteration_count=4, solver_velocity_iteration_count=0)
             ],
             joint_drive=sim_utils.UrdfConverterCfg.JointDriveCfg(gains=sim_utils.UrdfConverterCfg.JointDriveCfg.PDGainsCfg(stiffness=0.0, damping=0.0)),

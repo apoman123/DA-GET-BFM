@@ -1,4 +1,15 @@
-"""Configuration for the GET-conditioned behavior foundation model (FB-CPR networks)."""
+"""Configuration for the GET-conditioned behavior foundation model (FB-CPR networks).
+
+Values marked "BFM-Zero" in ``BfmConfig`` (and the defaults ``z_dim`` 256, ``norm_z``,
+``backward_norm`` and ``num_parallel`` 2) are those of BFM-Zero's default training
+configuration, ``humanoidverse/train.py`` of https://github.com/LeCAR-Lab/BFM-Zero
+(commit 05ad611, CC BY-NC 4.0): Li et al., "BFM-Zero: A Promptable Behavioral
+Foundation Model for Humanoid Control Using Unsupervised Reinforcement Learning",
+ICLR 2026, arXiv:2511.04131, which builds on FB-CPR (Tirinzoni et al., "Zero-Shot Whole-Body
+Humanoid Control via Behavioral Foundation Models", ICLR 2025, arXiv:2504.11054). The
+per-DoF attention sizes (``ACTOR_FORWARD_SIZES``, ``BACKWARD_SIZES``) are this
+repository's.
+"""
 
 from dataclasses import dataclass
 

@@ -28,6 +28,10 @@ Two kinds of chunks, chosen per step by what the environment reports:
 
 In both kinds the contacts come from the simulator (no detection), the commanded targets
 give exact action features, and a transition that a push interrupts gets no effect label.
+
+The simulators are MuJoCo (Todorov, Erez & Tassa, IROS 2012, DOI 10.1109/IROS.2012.6386109)
+and Isaac Lab with PhysX (Mittal et al., arXiv:2511.04831, 2025); the replay itself is
+this repo's.
 """
 
 from __future__ import annotations

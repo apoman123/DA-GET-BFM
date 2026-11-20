@@ -1,4 +1,16 @@
-"""Hugging Face ``Trainer`` that logs every auxiliary loss separately."""
+"""Hugging Face ``Trainer`` that logs every auxiliary loss separately.
+
+References:
+    * ``transformers.Trainer``: Wolf et al., "Transformers: State-of-the-Art Natural
+      Language Processing", EMNLP 2020 System Demonstrations, pp. 38-45, DOI
+      10.18653/v1/2020.emnlp-demos.6. The subclass overrides ``_get_train_sampler``,
+      ``compute_loss`` and ``log``; no Trainer code is copied.
+    * ``torch.utils.data.WeightedRandomSampler``: PyTorch, Paszke et al., NeurIPS 2019,
+      arXiv:1912.01703.
+    * Temperature sampling of the weights (``model.training.sampling``): Conneau et al.,
+      ACL 2020, DOI 10.18653/v1/2020.acl-main.747 (alpha = 0.3); Arivazhagan et al.,
+      arXiv:1907.05019, 2019 (T = 5).
+"""
 
 from __future__ import annotations
 

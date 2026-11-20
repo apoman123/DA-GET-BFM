@@ -4,6 +4,12 @@ Writes ``<output>/data/chunk-000/file-000.parquet``, ``<output>/meta/info.json``
 and ``<output>/source.json`` (a data-config source you can paste into a data
 config, or pass to ``scripts/make_data_config.py --dataset <output>``).
 
+The datasets belong to their creators and keep their licenses (MIPO AGPL-3.0;
+GrandTour CC BY-SA 4.0 data on its website, MIT on the card; NeuroBEM none stated;
+LocoMuJoCo CC BY-NC-ND 4.0; AMASS non-commercial research terms; LAFAN1
+CC BY-NC-ND 4.0). Creators, papers and licenses are listed in
+``model/conversion/datasets.py`` and ``docs/data.md#references``.
+
 Examples::
 
     uv sync --extra convert --extra validation

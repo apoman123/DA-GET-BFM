@@ -3,30 +3,43 @@
 Each ``convert_*`` function downloads (or reads) the source data, converts it to
 ``model.conversion.common`` episodes, writes them, and returns a data-config
 source that the training pipeline can use directly. Conventions were checked
-against the actual files on 2026-11-07:
+against the actual files on 2026-11-07; creators and licenses on 2026-11-20 (full
+entries in ``docs/data.md#references``):
 
-* **MIPO-Go1** (``Open-IO/mipo-go1-odometry``, HDF5, AGPL-3.0): 400 Hz joints,
-  measured torques, body IMU (orientation x, y, z, w; gyro; accelerometer
-  with gravity), raw foot-force counts. Joint ``FL0, FL1, FL2`` are hip,
-  thigh, calf.
-* **GrandTour** (``leggedrobotics/grand_tour_dataset``, zarr in tar): 400 Hz
-  ANYmal D state estimator with measured joint efforts, pose (x, y, z, w
-  quaternion in ``odom``), twist in the base frame, and per-foot contact state
-  (0 open, 1 contact, 2 slipping).
-* **NeuroBEM** (UZH, CSV inside ``processed_data.zip``): 400 Hz Vicon state,
-  body-frame twist and accelerations, and four motor speeds. No geometry or
-  propeller coefficients are published, so they are identified from the data
+* **MIPO-Go1** (``Open-IO/mipo-go1-odometry``, HDF5, card license AGPL-3.0): 400 Hz
+  joints, measured torques, body IMU (orientation x, y, z, w; gyro; accelerometer
+  with gravity), raw foot-force counts. Joint ``FL0, FL1, FL2`` are hip, thigh,
+  calf. The recordings are from Cerberus 2.0 (https://github.com/ShuoYangRobotics/Cerberus2.0,
+  AGPL-3.0) and the paper Yang, Zhang, Bokser & Manchester, "Multi-IMU Proprioceptive
+  Odometry for Legged Robots", IROS 2023, pp. 774-779, DOI 10.1109/IROS55552.2023.10342061.
+* **GrandTour** (``leggedrobotics/grand_tour_dataset``, zarr in tar; card license MIT,
+  website: data CC BY-SA 4.0, software MIT): 400 Hz ANYmal D state estimator with
+  measured joint efforts, pose (x, y, z, w quaternion in ``odom``), twist in the base
+  frame, and per-foot contact state (0 open, 1 contact, 2 slipping). Tuna, Frey, Fu,
+  Patterson, Xu, Fallon, Cadena & Hutter, arXiv:2602.18164, 2026.
+* **NeuroBEM** (UZH, CSV inside ``processed_data.zip``; no data license stated): 400 Hz
+  Vicon state, body-frame twist and accelerations, and four motor speeds. Bauersfeld,
+  Kaufmann, Foehn, Sun & Scaramuzza, "NeuroBEM: Hybrid Aerodynamic Quadrotor Model",
+  RSS 2021, DOI 10.15607/RSS.2021.XVII.042, arXiv:2106.08015. No rotor geometry or
+  propeller coefficients are given with the data, so they are identified from the data
   and a URDF is generated.
-* **LocoMuJoCo** (``robfiras/loco-mujoco-datasets``, npz, CC BY-NC-ND 4.0):
-  MuJoCo ``qpos``/``qvel`` with a free root (position, w-x-y-z quaternion,
-  world linear velocity, body angular velocity) and joint names.
-* **AMASS retargeted to G1** (``ember-lab-berkeley/AMASS_Retargeted_for_G1``,
-  npz): named joint positions; body 0 is the pelvis with w-x-y-z quaternions.
-  Stored joint velocities do not match the positions, so velocities are left
-  to finite differencing.
-* **LAFAN1 retargeted to Unitree** (``lvhaidong/LAFAN1_Retargeting_Dataset``,
-  CSV, 30 Hz): root x, y, z and an x, y, z, w quaternion, then joints in the
-  order of the dataset README.
+* **LocoMuJoCo** (``robfiras/loco-mujoco-datasets``, npz, card license CC BY-NC-ND 4.0;
+  code MIT): MuJoCo ``qpos``/``qvel`` with a free root (position, w-x-y-z quaternion,
+  world linear velocity, body angular velocity) and joint names. Al-Hafez, Zhao,
+  Peters & Tateo, arXiv:2311.02496, 2023.
+* **AMASS retargeted to G1** (``ember-lab-berkeley/AMASS_Retargeted_for_G1``, npz, card
+  license CC BY 4.0; retargeting taken from ``fleaven/Retargeted_AMASS_for_robotics`` by
+  Kun Zhao, which keeps the AMASS license terms): named joint positions; body 0 is the
+  pelvis with w-x-y-z quaternions. Stored joint velocities do not match the positions,
+  so velocities are left to finite differencing. AMASS: Mahmood, Ghorbani, Troje,
+  Pons-Moll & Black, ICCV 2019, pp. 5441-5450, DOI 10.1109/ICCV.2019.00554
+  (non-commercial research license, https://amass.is.tue.mpg.de/license.html).
+* **LAFAN1 retargeted to Unitree** (``lvhaidong/LAFAN1_Retargeting_Dataset``, a copy of
+  Unitree's ``unitreerobotics/LAFAN1_Retargeting_Dataset``; CSV, 30 Hz; LICENSE file
+  BSD-3-Clause, Unitree Robotics): root x, y, z and an x, y, z, w quaternion, then
+  joints in the order of the dataset README. LAFAN1 (Ubisoft La Forge, CC BY-NC-ND 4.0):
+  Harvey, Yurick, Nowrouzezahrai & Pal, "Robust Motion In-betweening", ACM TOG 39(4),
+  Art. 60, 2020, DOI 10.1145/3386569.3392480.
 """
 
 from __future__ import annotations
@@ -230,8 +243,8 @@ def convert_grandtour(
 # ------------------------------------------------------------------------ NeuroBEM
 
 NEUROBEM_URL = "https://download.ifi.uzh.ch/rpg/NeuroBEM/processed_data.zip"
-NEUROBEM_MASS = 0.772
-NEUROBEM_INERTIA = (0.0025, 0.0021, 0.0043)
+NEUROBEM_MASS = 0.772  # kg, dataset Readme (the paper says 752 g)
+NEUROBEM_INERTIA = (0.0025, 0.0021, 0.0043)  # kg m^2, diagonal, dataset Readme
 NEUROBEM_ROTORS = ("back_right", "front_right", "back_left", "front_left")  # mot 1..4
 ROTOR_SIGNS = {"back_right": (-1, -1), "front_right": (1, -1), "back_left": (-1, 1), "front_left": (1, 1)}
 
@@ -258,7 +271,9 @@ def identify_quadrotor(
     """Identify thrust and drag coefficients and the rotor layout from flight data.
 
     Model: thrust ``k_f w_i^2`` along body z; roll and pitch moments from rotor
-    positions ``(s_x a, s_y b)``; yaw moment ``sum spin_i k_m w_i^2``.
+    positions ``(s_x a, s_y b)``; yaw moment ``sum spin_i k_m w_i^2`` (the quadratic
+    rotor model, Mahony, Kumar & Corke, IEEE Robot. Autom. Mag. 19(3):20-32, 2012, DOI
+    10.1109/MRA.2012.2206474). The coefficients are least-squares fits.
 
     Args:
         data (list[np.ndarray]): Per-flight arrays with columns as in NeuroBEM:
@@ -354,10 +369,19 @@ def convert_neurobem(
     The thrust coefficient is fitted from the measured specific force (the fit
     is good, R^2 about 0.96). The rotor positions and the drag coefficient are
     also fitted from the angular dynamics, but on NeuroBEM these fits are poor
-    (R^2 below 0.2), so the published frame size is used instead: an Armattan
-    Chameleon 6-inch frame, ``arm_length`` from the center to each motor in an X
-    layout, and ``k_m = drag_ratio * k_f``. Fit qualities are saved in
-    ``meta/info.json``.
+    (R^2 below 0.2), so assumed values are used instead: ``arm_length`` from the
+    center to each motor in a symmetric X layout, and ``k_m = drag_ratio * k_f``.
+    The paper gives the frame (an Armattan Chameleon 6-inch frame) but neither value;
+    0.13 m and 0.016 m are this repository's assumptions. For comparison, the
+    simulator in NeuroBEM's released code (``code/simulator/include/params.h``) uses
+    propeller offsets of 0.078 m and 0.1 m from the center of gravity (0.127 m) and
+    quadratic thrust and torque coefficients whose ratio is 0.0122 m. Fit qualities
+    are saved in ``meta/info.json``.
+
+    ``NEUROBEM_MASS`` and ``NEUROBEM_INERTIA`` are the values of the dataset Readme
+    (https://rpg.ifi.uzh.ch/neuro_bem/Readme.html: 0.772 kg, diagonal inertia
+    [0.0025, 0.0021, 0.0043]); the paper (Sec. IV-B) gives 752 g, as does the
+    released simulator. The 33 N maximum static thrust is from the paper (Sec. IV-B).
 
     Args:
         output (str | Path): Output folder; ``neurobem_quadrotor.urdf`` is written
@@ -370,8 +394,9 @@ def convert_neurobem(
         rotor_inertia (float): Rotor inertia about its axis (not published).
         motor_time_constant (float): Sets the rotor speed gain ``kd``.
         arm_length (float): Center-to-motor distance in m used when the
-            moment fits are poor.
-        drag_ratio (float): ``k_m / k_f`` in m used when the yaw fit is poor.
+            moment fits are poor (assumed, not published).
+        drag_ratio (float): ``k_m / k_f`` in m used when the yaw fit is poor
+            (assumed, not published).
         min_fit_r2 (float): Fits below this R^2 fall back to the defaults.
 
     Returns:
@@ -404,7 +429,7 @@ def convert_neurobem(
         model["k_m"] = drag_ratio * model["k_f"]
         model["used"]["k_m"] = f"k_f * {drag_ratio} m (fit R^2 too low)"
     rotors = [(name, ROTOR_SIGNS[name][0] * model["arm_x"], ROTOR_SIGNS[name][1] * model["arm_y"]) for name in NEUROBEM_ROTORS]
-    # The paper gives about 33 N of static thrust in total.
+    # The paper gives about 33 N of maximum static thrust in total (Bauersfeld et al. 2021, Sec. IV-B).
     max_speed = max(
         float(max(np.abs(table[:, 20:24]).max() for _, table in tables)) * 1.05,
         float(np.sqrt(33.0 / 4 / model["k_f"])),

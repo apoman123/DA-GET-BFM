@@ -22,7 +22,8 @@ lists the candidate values, used here unchanged as discrete sets:
 * knee joint-limit scaling factor {0.2, 0.6, 1.0}.
 
 Tables 4, 5 and 7 give the base links, joint limits and nominal angles. The authors'
-generator (github.com/BoAi01/embodiment-scaling-laws, BSD-3-Clause, commit 62e43ce,
+generator (github.com/BoAi01/embodiment-scaling-laws, commit 62e43ce, BSD-3-Clause,
+``LICENCE``: "Copyright (c) 2022-2024, The Berkeley Humanoid Project Developers";
 ``generation/embodiment_generation/main_color.py`` and ``gen_urdf_color.py``) fixes
 the details the paper leaves open, and the joint offsets, link shapes, link masses
 and variation schedule below are taken from it:
@@ -38,27 +39,42 @@ Where the code and the paper differ, this module follows the code (the code prod
 the dataset) and says so:
 
 * the paper scales the humanoid foot "by length"; the code scales all three box sides;
-* Table 4 lists a quadruped hip mass of 1.152 kg; the code uses 0.678 kg;
-* the paper scales joint limits about the nominal angle; the code scales them about the
-  range center and then moves the nominal angle onto the limit if it falls outside.
-  Here the paper's definition is used, so the nominal angle always stays inside.
+* Table 4 lists a quadruped hip mass of 1.152 kg; the code uses 0.678 kg.
+
+Joint limits are scaled about the nominal angle, as in the paper (Appendix B.2) and in
+the code that trains on the robots (``lock_joint_factor * limit + (1 -
+lock_joint_factor) * nominal`` in ``exts/embodiment_scaling_laws/.../locomotion_env.py``);
+the range-center scaling in ``gen_urdf_color.py`` is switched off there
+(``APPLY_SCALE_IN_URDF = False``).
+
+One difference from the code is not a choice of the paper's or of this module's
+design, and is documented here rather than changed: GenBot-1K's humanoid divides the
+calf length among the knees (``applied_calf_length = calf_length / knee_nums[side]`` in
+``gen_urdf_color.py``), while here every humanoid calf segment has the full calf length,
+as the quadruped and hexapod code do, so humanoids with two or three knees have longer
+legs than GenBot-1K's.
 
 Two simplifications are deliberate. "Scaling factor for all link sizes" scales every
-length uniformly, including joint offsets that GenBot-1K's code hard-codes (as
-GenLoco's size factor does). The quadruped's lower calf (three fixed links in the
-code) is lumped into one straight segment of the same span, 0.0907 m.
+length uniformly, including joint offsets that GenBot-1K's code hard-codes (as GenLoco
+describes its size factor, which "uniformly scales the size of each body part"; their
+code leaves the 0.081 m hip lateral offset out of it). The quadruped's lower calf
+(three fixed links in the code) is lumped into one straight segment of the same span,
+0.0907 m.
 
 **Mass variation: GenLoco.** Feng, Zhang, Li, Peng, Basireddy, Yue, Song, Yang, Liu,
 Sreenath and Levine, "GenLoco: Generalized Locomotion Controllers for Quadrupedal
 Robots", CoRL 2022, PMLR 205:1893-1903 (arXiv:2209.05309). Table 1 (checked): size
 factor in [0.8, 1.2], base density in [400, 1200] kg/m^3, link masses in
 [0.5, 1.5] x nominal, thigh length = calf length x [0.75, 1.25], and PD gains scaled
-by robot mass / nominal mass (12.458 kg, the A1, Appendix A). GenBot-1K holds masses
-fixed within a class (its Limitations section), so the link-mass factor is GenLoco's.
-GenLoco's base density is A1's 798 kg/m^3 x [0.5, 1.5] (``a1_density +-
-a1_density / 2`` in ``motion_imitation/utilities/quadruped_generator.py`` of
-github.com/HybridRobotics/GenLoco). Here the same relative rule applies to every link:
-mass = nominal density x volume x factor in [0.5, 1.5]. The nominal density of each
+by robot mass / nominal mass (12.458 kg, the A1, Sec. 3.1 and Appendix A). Table 1
+also multiplies the gains by a random factor in [0.7, 1.3]; ``pd_gains`` here does
+not. GenBot-1K holds masses fixed within a class (its Limitations section), so the
+link-mass factor is GenLoco's. GenLoco's base density is A1's 798 kg/m^3 x [0.5, 1.5]
+(``a1_density +- a1_density / 2`` in ``motion_imitation/utilities/quadruped_generator.py``
+of github.com/HybridRobotics/GenLoco, Apache-2.0; the variable itself is computed from
+half-extents, about 6385, while the physical density is 798 kg/m^3). Here the same
+relative rule applies to every link: mass = nominal density x volume x factor in
+[0.5, 1.5]. The nominal density of each
 link is its GenBot-1K mass over its nominal shape volume. The absolute [400, 1200]
 kg/m^3 range is available through ``ranges["base_density"]``. It is not the default
 because GenLoco pairs it with its own base box, and on GenBot-1K's Go2-sized trunk it
@@ -74,9 +90,10 @@ density, so its inertia follows from its shape and mass. ``check_physical_consis
 verifies the result with the pseudo-inertia test of Wensing, Kim and Slotine, "Linear
 Matrix Inequalities for Physically Consistent Inertial Parameter Identification: A
 Statistical Perspective on the Mass Distribution", IEEE RA-L 3(1):60-67, 2018,
-DOI 10.1109/LRA.2017.2729659 (Theorem 3: the parameters are physically consistent if
-and only if the 4x4 pseudo-inertia is positive definite; Proposition 1: equivalently
-m > 0 and the principal moments are positive and satisfy the triangle inequalities).
+DOI 10.1109/LRA.2017.2729659, arXiv:1701.04395 (Theorem 3: the parameters are
+physically consistent if and only if the 4x4 pseudo-inertia is positive definite;
+Corollary 1 with Proposition 1: equivalently m > 0 and the inertia about the center of
+mass is positive definite and satisfies the triangle inequalities).
 
 **Peak torque: a measurement in this repository.** No paper gives a rule (GenBot-1K
 fixes torques per class, Table 5). The static standing torque of each joint is
@@ -423,9 +440,9 @@ def check_physical_consistency(
 
     Wensing, Kim and Slotine (IEEE RA-L 3(1):60-67, 2018, Theorem 3): the parameters
     are physically consistent if and only if the pseudo-inertia is positive definite.
-    Equivalently (their Proposition 1), the mass is positive, the inertia about the
-    center of mass is symmetric positive definite, and its principal moments satisfy
-    the triangle inequalities ``J1 + J2 > J3`` (and permutations).
+    Equivalently (their Corollary 1 and Proposition 1), the mass is positive, the
+    inertia about the center of mass is symmetric positive definite, and its principal
+    moments satisfy the triangle inequalities ``J1 + J2 > J3`` (and permutations).
 
     Args:
         mass (float): Mass in kg.

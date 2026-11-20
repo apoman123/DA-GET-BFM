@@ -56,6 +56,9 @@
 - **Peng et al. 2020**:論文沒有寫尺寸比例,程式碼用手設常數。因此自動的特徵長度比例標為 [H]。
 - **L2-SP**:α 由交叉驗證決定(設為必要參數);β = 0.01 是論文報告「一致被選到」的值。
 - **Talos**:URDF 的 `mechanicalReduction` 是負值(反向裝的 actuator)。parser 改為取絕對值,Talos 因此可以作為 L4 機器人。
+- **Talos 授權**:`talos_reduced.urdf` 檔案本身標示 PAL Robotics, S.L. 的 CC BY-NC-ND 3.0(所在的 Gepetto/example-robot-data repository 是 BSD-3-Clause),先前誤記為 BSD-2-Clause,已更正。檔案只下載使用、不修改、不隨 repo 散布。
+- **BFM-Zero**:arXiv:2511.04131 已被 ICLR 2026 接受,引用已更新。
+- **所有引用**:每個模組的 docstring 都在使用處引用來源;各主題文件有完整作者的 References;`docs/references.md` 有各部分來源對照;`THIRD_PARTY_NOTICES.md` 列出程式碼、機器人模型、資料集、字型與工具的作者與授權。
 - **真實機器人的 URDF 質量與限位並不左右對稱**(Go1、H1 差約 1%,G1 約 3%,ANYmal D 約 10%),所以 D3 鏡像只用在對稱的程序化機器人上。
 
 ## E. 尚未完成、需要 GPU 或額外資料的部分

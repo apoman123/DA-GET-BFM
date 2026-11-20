@@ -10,11 +10,23 @@ Python-Markdown (tables, fenced code, table of contents), and typeset with
 WeasyPrint. Neither package is a project dependency: install them where you run
 this script (``pip install markdown weasyprint``). CJK text needs a Noto Sans
 CJK TC (or similar) font installed on the system.
+
+Tools and fonts by others (see ``THIRD_PARTY_NOTICES.md``):
+
+* Python-Markdown, by Manfred Stienstra, Yuri Takhteyev and the Python Markdown
+  Project (maintainer Waylan Limberg), BSD-3-Clause, https://github.com/Python-Markdown/markdown.
+* WeasyPrint, by Simon Sapin and contributors (CourtBouillon), BSD-3-Clause,
+  https://github.com/Kozea/WeasyPrint.
+* The PDF embeds subsets of Noto Sans CJK TC and Noto Sans Mono CJK TC (Adobe,
+  2014-2021; Noto is a trademark of Google; SIL Open Font License 1.1,
+  https://github.com/notofonts/noto-cjk) and DejaVu Sans (DejaVu fonts team, based on
+  Bitstream Vera, Bitstream Inc. 2003, with Arev glyphs by Tavmjong Bah 2006).
 """
 
 from __future__ import annotations
 
 import argparse
+import re
 from pathlib import Path
 
 STYLE = """
@@ -84,6 +96,13 @@ def render(markdown_files: list[Path], output: Path) -> None:
     toc.convert(source)
     if "<hr />" in body:
         body = body.replace("<hr />", f'<div class="toc"><strong>目錄</strong>{toc.toc}</div>', 1)
+    # WeasyPrint ignores <ol start>, so the reference numbers would restart under each
+    # heading; start the list-item counter explicitly instead.
+    body = re.sub(
+        r'<ol start="(\d+)">',
+        lambda match: f'<ol start="{match.group(1)}" style="counter-reset: list-item {int(match.group(1)) - 1}">',
+        body,
+    )
     html = f'<!doctype html><html lang="zh-Hant"><head><meta charset="utf-8"><title>DA-GET-BFM Proposal v4</title><style>{STYLE}</style></head><body>{body}</body></html>'
     output.parent.mkdir(parents=True, exist_ok=True)
     HTML(string=html, base_url=str(markdown_files[0].parent)).write_pdf(output)

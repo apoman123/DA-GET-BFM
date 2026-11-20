@@ -230,12 +230,12 @@ Operator 與 response 的 relative error;只在 exact data 上算的 FD/ID 誤�
 
 ## 8. References
 
-† 表示只核對到摘要或書目、內文未讀到。[2]–[4] 引自 README,這次沒有重新查核。
+† 表示只核對到摘要或書目、內文未讀到。
 
 **專案基礎**
 
 1. A. Patel, S. Song. GET-Zero: Graph Embodiment Transformer for Zero-Shot Embodiment Generalization. ICRA 2025, pp. 14262–14269. DOI 10.1109/ICRA55743.2025.11127922; arXiv:2407.15002.
-2. Y. Li et al. BFM-Zero: A Promptable Behavioral Foundation Model for Humanoid Control Using Unsupervised Reinforcement Learning. arXiv:2511.04131, 2025.
+2. Y. Li et al. BFM-Zero: A Promptable Behavioral Foundation Model for Humanoid Control Using Unsupervised Reinforcement Learning. ICLR 2026. arXiv:2511.04131.
 3. A. Tirinzoni et al. Zero-Shot Whole-Body Humanoid Control via Behavioral Foundation Models. ICLR 2025. arXiv:2504.11054.
 4. A. Touati, Y. Ollivier. Learning One Representation to Optimize All Rewards. NeurIPS 2021.
 
@@ -244,7 +244,7 @@ Operator 與 response 的 relative error;只在 exact data 上算的 FD/ID 誤�
 5. R. Featherstone. Rigid Body Dynamics Algorithms. Springer, 2008. DOI 10.1007/978-1-4899-7560-7.
 6. F. E. Udwadia, R. E. Kalaba. A new perspective on constrained motion. Proc. R. Soc. Lond. A 439(1906):407–410, 1992. DOI 10.1098/rspa.1992.0158.
 7. M. Mistry, J. Buchli, S. Schaal. Inverse dynamics control of floating base systems using orthogonal decomposition. ICRA 2010, pp. 3406–3412. DOI 10.1109/ROBOT.2010.5509646.
-8. F. Aghili. A unified approach for inverse and direct dynamics of constrained multibody systems based on linear projection operator. IEEE T-RO 21(5):834–849, 2005. DOI 10.1109/TRO.2005.851380. †
+8. F. Aghili. A unified approach for inverse and direct dynamics of constrained multibody systems based on linear projection operator: applications to control and simulation. IEEE T-RO 21(5):834–849, 2005. DOI 10.1109/TRO.2005.851380. †
 9. D. E. Orin, A. Goswami, S.-H. Lee. Centroidal dynamics of a humanoid robot. Autonomous Robots 35(2–3):161–176, 2013. DOI 10.1007/s10514-013-9341-4. †
 10. D. E. Orin, A. Goswami. Centroidal Momentum Matrix of a humanoid robot: Structure and properties. IROS 2008, pp. 653–659. DOI 10.1109/IROS.2008.4650772. †
 11. H. Dai, A. Valenzuela, R. Tedrake. Whole-body motion planning with centroidal dynamics and full kinematics. Humanoids 2014, pp. 295–302. DOI 10.1109/HUMANOIDS.2014.7041375.
@@ -258,7 +258,7 @@ Operator 與 response 的 relative error;只在 exact data 上算的 FD/ID 誤�
 16. M. Lutter, C. Ritter, J. Peters. Deep Lagrangian Networks: Using Physics as Model Prior for Deep Learning. ICLR 2019. arXiv:1907.04490.
 17. M. Watter, J. T. Springenberg, J. Boedecker, M. Riedmiller. Embed to Control: A Locally Linear Latent Dynamics Model for Control from Raw Images. NIPS 2015. arXiv:1506.07365.
 18. S. Greydanus, M. Dzamba, J. Yosinski. Hamiltonian Neural Networks. NeurIPS 2019. arXiv:1906.01563.
-19. M. Cranmer et al. Lagrangian Neural Networks. ICLR 2020 DeepDiffEq Workshop. arXiv:2003.04630.
+19. M. Cranmer, S. Greydanus, S. Hoyer, P. Battaglia, D. Spergel, S. Ho. Lagrangian Neural Networks. ICLR 2020 DeepDiffEq Workshop. arXiv:2003.04630.
 
 **足式機器人學習**
 
@@ -268,7 +268,7 @@ Operator 與 response 的 relative error;只在 exact data 上算的 FD/ID 誤�
 23. J. Lee, J. Hwangbo, L. Wellhausen, V. Koltun, M. Hutter. Learning quadrupedal locomotion over challenging terrain. Science Robotics 5(47):eabc5986, 2020. DOI 10.1126/scirobotics.abc5986.
 24. J. Hwangbo et al. Learning agile and dynamic motor skills for legged robots. Science Robotics 4(26):eaau5872, 2019. DOI 10.1126/scirobotics.aau5872.
 25. X. B. Peng, M. Andrychowicz, W. Zaremba, P. Abbeel. Sim-to-Real Transfer of Robotic Control with Dynamics Randomization. ICRA 2018, pp. 3803–3810. DOI 10.1109/ICRA.2018.8460528.
-26. J. Tobin et al. Domain Randomization for Transferring Deep Neural Networks from Simulation to the Real World. IROS 2017, pp. 23–30. DOI 10.1109/IROS.2017.8202133.
+26. J. Tobin, R. Fong, A. Ray, J. Schneider, W. Zaremba, P. Abbeel. Domain Randomization for Transferring Deep Neural Networks from Simulation to the Real World. IROS 2017, pp. 23–30. DOI 10.1109/IROS.2017.8202133.
 27. M. Jaderberg et al. Reinforcement Learning with Unsupervised Auxiliary Tasks. ICLR 2017. arXiv:1611.05397.
 28. X. B. Peng, E. Coumans, T. Zhang, T.-W. Lee, J. Tan, S. Levine. Learning Agile Robotic Locomotion Skills by Imitating Animals. RSS 2020. DOI 10.15607/RSS.2020.XVI.064.
 
@@ -302,10 +302,10 @@ Operator 與 response 的 relative error;只在 exact data 上算的 FD/ID 誤�
 
 49. A. Kendall, Y. Gal, R. Cipolla. Multi-Task Learning Using Uncertainty to Weigh Losses for Scene Geometry and Semantics. CVPR 2018, pp. 7482–7491. DOI 10.1109/CVPR.2018.00781.
 50. Z. Chen, V. Badrinarayanan, C.-Y. Lee, A. Rabinovich. GradNorm: Gradient Normalization for Adaptive Loss Balancing in Deep Multitask Networks. ICML 2018, PMLR 80:794–803.
-51. G. Lample, A. Conneau. Cross-lingual Language Model Pretraining. arXiv:1901.07291, 2019.
+51. G. Lample, A. Conneau. Cross-lingual Language Model Pretraining. NeurIPS 2019. arXiv:1901.07291.
 52. A. Conneau et al. Unsupervised Cross-lingual Representation Learning at Scale. ACL 2020, pp. 8440–8451. DOI 10.18653/v1/2020.acl-main.747.
 53. N. Arivazhagan et al. Massively Multilingual Neural Machine Translation in the Wild: Findings and Challenges. arXiv:1907.05019, 2019.
-54. Octo Model Team. Octo: An Open-Source Generalist Robot Policy. RSS 2024. DOI 10.15607/RSS.2024.XX.090.
+54. Octo Model Team, D. Ghosh et al. Octo: An Open-Source Generalist Robot Policy. RSS 2024. DOI 10.15607/RSS.2024.XX.090.
 
 **Masked modeling**
 
@@ -315,7 +315,7 @@ Operator 與 response 的 relative error;只在 exact data 上算的 FD/ID 誤�
 
 **Adaptation**
 
-58. Y. Sun et al. Test-Time Training with Self-Supervision for Generalization under Distribution Shifts. ICML 2020, PMLR 119:9229–9248.
+58. Y. Sun, X. Wang, Z. Liu, J. Miller, A. Efros, M. Hardt. Test-Time Training with Self-Supervision for Generalization under Distribution Shifts. ICML 2020, PMLR 119:9229–9248.
 59. N. Hansen et al. Self-Supervised Policy Adaptation during Deployment. ICLR 2021. arXiv:2007.04309.
 60. E. Hu et al. LoRA: Low-Rank Adaptation of Large Language Models. ICLR 2022. arXiv:2106.09685.
 61. X. Li, Y. Grandvalet, F. Davoine. Explicit Inductive Bias for Transfer Learning with Convolutional Networks. ICML 2018, PMLR 80:2825–2834.
@@ -324,6 +324,6 @@ Operator 與 response 的 relative error;只在 exact data 上算的 FD/ID 誤�
 **最佳化與評估**
 
 63. I. Loshchilov, F. Hutter. Decoupled Weight Decay Regularization. ICLR 2019. arXiv:1711.05101.
-64. P. Henderson et al. Deep Reinforcement Learning that Matters. AAAI 2018. DOI 10.1609/aaai.v32i1.11694.
-65. R. Agarwal et al. Deep Reinforcement Learning at the Edge of the Statistical Precipice. NeurIPS 2021. arXiv:2108.13264.
+64. P. Henderson, R. Islam, P. Bachman, J. Pineau, D. Precup, D. Meger. Deep Reinforcement Learning that Matters. AAAI 2018. DOI 10.1609/aaai.v32i1.11694.
+65. R. Agarwal, M. Schwarzer, P. S. Castro, A. Courville, M. G. Bellemare. Deep Reinforcement Learning at the Edge of the Statistical Precipice. NeurIPS 2021. arXiv:2108.13264.
 66. J. Kaplan et al. Scaling Laws for Neural Language Models. arXiv:2001.08361, 2020.

@@ -7,11 +7,17 @@ sensor. The pretrained model is frozen, LoRA is injected into the encoder's atte
 optional regularizer toward the pretrained model:
 
 * ``none`` (default): only the self-supervised physics losses, as PAD (Hansen et al.,
-  ICLR 2021) and TTT (Sun et al., ICML 2020) adapt at test time;
-* ``l2sp``: L2-SP (Li, Grandvalet and Davoine, ICML 2018); ``--l2sp-alpha`` is required
-  and ``--l2sp-beta`` defaults to their 0.01;
-* ``lwf``: Learning without Forgetting (Li and Hoiem, TPAMI 2018) against the frozen
-  original model on the new robot's data, with their T = 2 and lambda_o = 1.
+  ICLR 2021, arXiv:2007.04309) and TTT (Sun et al., ICML 2020, PMLR 119:9229-9248,
+  arXiv:1909.13231) adapt at test time;
+* ``l2sp``: L2-SP (Li, Grandvalet and Davoine, ICML 2018, PMLR 80:2825-2834,
+  arXiv:1802.01483); ``--l2sp-alpha`` is required and ``--l2sp-beta`` defaults to their
+  0.01 (Sec. 4.2);
+* ``lwf``: Learning without Forgetting (Li and Hoiem, IEEE TPAMI 40(12):2935-2947, 2018,
+  DOI 10.1109/TPAMI.2017.2773081) against the frozen original model on the new robot's
+  data, with their T = 2 and lambda_o = 1.
+
+LoRA itself is Hu et al., ICLR 2022, arXiv:2106.09685; ``model.adaptation`` cites every
+value it takes from these papers with its section.
 
 Training stops early on the new robot's held-out episodes (the evaluation split of
 ``build_physics_datasets``): the evaluation loss is computed every ``--eval-every``
@@ -28,11 +34,14 @@ with ``adaptation_log.json`` (losses before and after, the curve, the settings) 
 data config used.
 
 Defaults: the batch size 64 is the one of the documented pretraining runs
-(``docs/development.md``, ``scripts/train_physics_da_get.py`` example); AdamW with
-weight decay 0 is the Hugging Face ``Trainer`` default that pretraining uses. The LoRA
-rank, the learning rate, the step budget and the evaluation interval have no cited
-values and must be given; ``--lora-alpha`` defaults to the rank (Hu et al. "set alpha
-to the first r we try and do not tune it").
+(``docs/development.md``, ``scripts/train_physics_da_get.py`` example); AdamW
+(Loshchilov and Hutter, "Decoupled Weight Decay Regularization", ICLR 2019,
+arXiv:1711.05101) with weight decay 0 is the Hugging Face ``Trainer`` default that
+pretraining uses (Wolf et al., "Transformers: State-of-the-Art Natural Language
+Processing", EMNLP 2020 System Demonstrations, pp. 38-45, DOI
+10.18653/v1/2020.emnlp-demos.6). The LoRA rank, the learning rate, the step budget and the evaluation interval have no cited
+values and must be given; ``--lora-alpha`` defaults to the rank (Hu et al., Sec. 4.1:
+"we simply set alpha to the first r we try and do not tune it").
 
 Example::
 

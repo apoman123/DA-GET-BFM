@@ -10,8 +10,11 @@ updated by multiplicative dual ascent before every update round:
 
 The weight grows while a robot violates its target and decays while it satisfies it, so
 the constraint ends up just active, as in constrained RL with Lagrangian relaxation
-(Altman, *Constrained Markov Decision Processes*, 1999; Tessler et al., RCPO, ICLR 2019;
-Stooke et al., PID Lagrangian, ICML 2020). The targets are physical and normalized by
+(Altman, *Constrained Markov Decision Processes*, Chapman & Hall/CRC, 1999, DOI
+10.1201/9781315140223; Tessler, Mankowitz & Mannor, "Reward Constrained Policy
+Optimization", ICLR 2019, arXiv:1805.11074; Stooke, Achiam & Abbeel, "Responsive Safety
+in Reinforcement Learning by PID Lagrangian Methods", ICML 2020, PMLR 119:9133-9143,
+arXiv:2007.03964). The update in log space and the targets are this repo's. The targets are physical and normalized by
 each robot's own limits, so the same targets fit every robot, and robots of different
 strength get different weights.
 

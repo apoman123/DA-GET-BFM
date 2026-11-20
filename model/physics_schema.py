@@ -3,8 +3,12 @@
 Every feature has a symbol, an SI unit, the frame it is expressed in, and a
 scale ``s``. The physics tokenizer maps a raw value ``x`` to ``asinh(x / s)``,
 which is linear for ``|x| << s`` and logarithmic above, so a 20 g finger link
-and a 10 kg thigh both land in a useful range. Features with ``scale=None``
-(unit vectors, rotation columns, one-hot flags) are passed through unchanged.
+and a 10 kg thigh both land in a useful range (the inverse hyperbolic sine
+transformation of Burbidge, Magee & Robb, J. Am. Stat. Assoc. 83(401):123-127, 1988,
+DOI 10.1080/01621459.1988.10478575; the scales ``s`` are this repository's choice).
+Features with ``scale=None`` (unit vectors, rotation columns, one-hot flags) are
+passed through unchanged. The rotation columns ``R6d`` are the 6D rotation
+representation of Zhou et al. (CVPR 2019, DOI 10.1109/CVPR.2019.00589).
 
 Frames:
 
@@ -25,7 +29,9 @@ quantity of a prismatic joint differs). With ``DaGetConfig.dimensionless_physics
 the encoder divides every feature by the unit ``m^a L^b T^c`` built from the
 robot's total mass ``m``, characteristic length ``L`` and time ``T = sqrt(L / g)``
 (dynamic similarity: Alexander & Jayes, J. Zool. 201:135-152, 1983, DOI
-10.1111/j.1469-7998.1983.tb04266.x; Buckingham, Phys. Rev. 4:345, 1914). The asinh
+10.1111/j.1469-7998.1983.tb04266.x; Buckingham, Phys. Rev. 4(4):345-376, 1914, DOI
+10.1103/PhysRev.4.345). ``g`` is standard gravity, ``STANDARD_GRAVITY`` = 9.80665 m/s^2
+(3rd CGPM 1901, Declaration 2, DOI 10.59161/CGPM1901DECL2E). The asinh
 scales of dimensionless features are the SI scales divided by the same unit of a
 reference robot (``REFERENCE_MASS``, ``REFERENCE_LENGTH``), so a robot of that size
 is tokenized exactly as with SI inputs.
@@ -42,7 +48,7 @@ from dataclasses import dataclass
 
 JOINT_TYPE_NAMES = ("revolute", "continuous", "prismatic")
 ACTUATOR_MODES = ("torque", "position", "velocity", "passive", "thrust")
-STANDARD_GRAVITY = 9.80665
+STANDARD_GRAVITY = 9.80665  # m/s^2, conventional value of g_n (3rd CGPM 1901, Declaration 2)
 # Median total mass and characteristic length of the four robots measured at their
 # standing poses (Go1 13.1 kg / 0.31 m, G1 35.1 kg / 0.77 m, ANYmal D 57.0 kg /
 # 0.55 m, H1 59.3 kg / 1.00 m; docs/zero_shot.md, evidence R9).

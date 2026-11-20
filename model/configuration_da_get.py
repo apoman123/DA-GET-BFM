@@ -1,4 +1,16 @@
-"""Configuration for the graph embodiment transformer encoder."""
+"""Configuration for the graph embodiment transformer encoder.
+
+The field names (``hidden_size``, ``num_hidden_layers``, ``num_attention_heads``,
+``intermediate_size``, ``hidden_dropout_prob``) and the ``configuration_*`` /
+``modeling_*`` / ``tokenization_*`` file names follow the conventions of Hugging Face
+Transformers (Wolf et al., "Transformers: State-of-the-Art Natural Language
+Processing", EMNLP 2020 System Demonstrations, pp. 38-45, DOI
+10.18653/v1/2020.emnlp-demos.6; ``BertConfig``); no code is copied. ``da_get_zero``
+takes its values from GET-Zero's released model configuration (Patel & Song, ICRA 2025,
+arXiv:2407.15002; ``get_zero/distill/cfg/model/Base.yaml`` in
+https://github.com/real-stanford/get_zero, commit 279652d). The ``ENCODER_SIZES``
+presets are this repository's choice.
+"""
 
 from dataclasses import dataclass
 
@@ -34,8 +46,9 @@ class DaGetConfig:
         use_parent_child_encoding (bool): Whether to embed directed ancestry.
         use_mass_encoding (bool): Whether to project the normalized mass matrix.
         use_input_layer_norm (bool): Whether to layer-normalize each raw joint
-            token over its features before the input projection, as GET-Zero
-            does because token features have very different scales.
+            token over its features before the input projection, as the GET-Zero
+            code does (``enable_input_layer_norm``) because token features have very
+            different scales.
         use_physics_cross_attention (bool): Whether observation tokens attend to
             rigid-body, actuator, and dynamics tokens ("Physics Cross
             Attention"). The encoder then requires physics features.
@@ -118,8 +131,9 @@ class DaGetConfig:
     def da_get_zero(cls, input_size: int, **overrides: object) -> "DaGetConfig":
         """Return the GET-Zero LEAP Hand architecture for a token width.
 
-        The paper's model uses 8 layers, 16 heads, width 512, feed-forward
-        width 1024, dropout 0.1, and input layer normalization.
+        GET-Zero's released model configuration (``get_zero/distill/cfg/model/Base.yaml``,
+        commit 279652d; the paper does not list these values) uses 8 layers, 16 heads,
+        width 512, feed-forward width 1024, dropout 0.1, and input layer normalization.
 
         Args:
             input_size (int): Raw joint token width, for example

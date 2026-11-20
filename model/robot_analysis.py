@@ -15,6 +15,23 @@
 
 A URDF with a ``floating`` joint is always floating-base. The result is a
 starting point: check the printed report, and override anything that is wrong.
+
+References and assumptions:
+
+* Propeller model and drag ratio: thrust ``k_f w^2`` and a drag moment ``k_m / k_f``
+  times the thrust, as in RotorS (Furrer et al., in *Robot Operating System (ROS): The
+  Complete Reference (Volume 1)*, Springer 2016, pp. 595-625, DOI
+  10.1007/978-3-319-26054-9_23). The default ``drag_ratio`` 0.016 m is the
+  ``moment_constant`` of its Firefly, Hummingbird and Pelican models
+  (``rotors_description/urdf/*.xacro`` of https://github.com/ethz-asl/rotors_simulator,
+  Apache-2.0). The thrust-to-weight ratio 2.5, the 0.03 s rotor time constant (RotorS
+  uses 0.0125 s up and 0.025 s down), the 1000 rad/s fallback speed and the
+  continuous-to-peak ratio 0.7 are assumptions of this repository.
+* ``suggested_position_gains``: ``K_d / K_p = 0.025`` s is the ratio of Unitree's Go2
+  gains in unitree_rl_gym (``K_p`` 20, ``K_d`` 0.5; its G1 and H1 leg gains have ratios
+  0.013-0.05; https://github.com/unitreerobotics/unitree_rl_gym, BSD-3-Clause,
+  ``legged_gym/envs/*/*_config.py``). ``K_p = effort / 1 rad`` is an assumption.
+* ``g = 9.80665 m/s^2`` (3rd CGPM 1901, Declaration 2).
 """
 
 from __future__ import annotations
@@ -98,8 +115,9 @@ def analyze_robot(
         thrust_to_weight (float): Multirotor total thrust at full speed over weight.
         max_rotor_speed (float | None): Rotor speed limit in rad/s; the URDF
             velocity limit, or 1000 rad/s, when None.
-        drag_ratio (float): Propeller ``k_m / k_f`` in m.
-        motor_time_constant (float): Rotor speed loop time constant in s.
+        drag_ratio (float): Propeller ``k_m / k_f`` in m; the default is RotorS's
+            ``moment_constant``.
+        motor_time_constant (float): Rotor speed loop time constant in s (assumed).
 
     Returns:
         RobotProfile: Inferred settings and the reasoning behind them.
@@ -228,7 +246,8 @@ def suggested_position_gains(graph: EmbodimentGraph, stiffness_angle: float = 1.
 
     ``K_p = effort / stiffness_angle`` (peak torque at ``stiffness_angle`` rad of
     error) and ``K_d = damping_ratio * K_p``, close to the gains Unitree uses
-    on its legged robots. Replace them with the robot's real gains when known.
+    on its legged robots (unitree_rl_gym: Go2 ``K_p`` 20, ``K_d`` 0.5; see the module
+    docstring). Replace them with the robot's real gains when known.
 
     Args:
         graph (EmbodimentGraph): Robot.

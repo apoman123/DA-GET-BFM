@@ -1,6 +1,7 @@
 """Online off-policy training loop of the cross-embodiment FB-CPR agent.
 
-Mirrors BFM-Zero's ``Workspace.train_online``: parallel environments act with their latent
+Mirrors BFM-Zero's ``Workspace.train_online`` (``humanoidverse/train.py`` of
+https://github.com/LeCAR-Lab/BFM-Zero, CC BY-NC 4.0): parallel environments act with their latent
 and fill a replay buffer, random actions seed it, a fixed number of gradient steps runs per
 collected batch, and periodic evaluations set the motion priorities. Each robot has its own
 environments, replay buffer and expert motions, and every update draws an equal share of
@@ -41,7 +42,12 @@ from model.training.sources import SOURCE_TYPES
 
 @dataclass
 class ObservationNoise:
-    """Additive uniform sensor noise on the policy's observations (BFM-Zero's values)."""
+    """Additive uniform sensor noise on the policy's observations (BFM-Zero's values).
+
+    ``noise_scales`` of BFM-Zero's ``humanoidverse/config/obs/bfm_zero_obs.yaml``; Table 4 of
+    arXiv:2511.04131v2 gives the same ranges (angular velocity as ``omega / 4`` within
+    ``±0.05``).
+    """
 
     enabled: bool = True
     joint_position: float = 0.01
@@ -52,7 +58,14 @@ class ObservationNoise:
 
 @dataclass
 class TrainingArguments:
-    """Run settings; defaults are BFM-Zero's unless noted.
+    """Run settings.
+
+    BFM-Zero's values (``default_train_config`` in ``humanoidverse/train.py``) are the
+    defaults of ``num_env_steps``, ``online_parallel_envs``, ``buffer_size``,
+    ``num_seed_steps``, ``update_agent_every``, ``num_agent_updates``, ``log_every``,
+    ``eval_every``, ``checkpoint_every``, ``max_episode_steps``,
+    ``fall_start_probability``, ``terminate_on_fall`` and ``observe_base_linear_velocity``;
+    the other defaults are this repo's.
 
     Attributes:
         data_config (str): JSON with the robots' sources (see ``docs/bfm.md``).
@@ -61,7 +74,8 @@ class TrainingArguments:
         encoder_checkpoint (str | None): Pretrained encoder; a new one is used if None.
         encoder_size (str): Tiny, small, medium, or large architecture for a new encoder;
             an existing checkpoint supplies its own architecture.
-        num_env_steps (int): Total environment frames (BFM-Zero: 384M).
+        num_env_steps (int): Total environment frames (BFM-Zero's ``train.py``: 384M; its
+            paper's Table 1 gives about 192M).
         online_parallel_envs (int): Environments over all robots.
         buffer_size (int): Stored transitions over all robots.
         buffer_device (str): Device of the replay buffers.
@@ -162,8 +176,11 @@ def action_scale(value: float | dict, family: str) -> float:
     """Return the action scale of a robot: a number, or a per-family mapping (proposal G1).
 
     URMA and Ai et al. use residual position targets ``q_nominal + sigma a`` with
-    ``sigma`` set per robot or per class (Bohlinger et al., CoRL 2024; Ai et al.,
-    CoRL 2025). A mapping gives ``sigma`` per family, with ``default`` for the rest
+    ``sigma`` set per robot or per class (Bohlinger et al., "One Policy to Run Them All",
+    CoRL 2024, PMLR 270:3356-3378, arXiv:2409.06366, Appendix A and Table 1: per robot;
+    Ai et al., "Towards Embodiment Scaling Laws in Robot Locomotion", CoRL 2025,
+    arXiv:2505.05753, Appendix A.1: 0.3 for quadrupeds and hexapods, 0.75 for
+    humanoids). A mapping gives ``sigma`` per family, with ``default`` for the rest
     and the repo's 1.25 rad if neither matches.
 
     Args:

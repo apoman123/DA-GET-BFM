@@ -6,7 +6,7 @@
   "L1 categories are MetaMorph's six (Gupta et al., ICLR 2022, Fig. 6; ranges Table 2) plus size. MetaMorph's density and gear ranges coincide with this repo's training randomization, so they are not out of distribution for synthetic-trained models; see the per-entry notes.",
   "L1-L3 entries are generator specifications. Procedural entries (L2, L3) are model.morphology.generate_robot(family, seed, ranges) calls; each gives one robot, and more robots per entry come from more seeds (counts are not fixed here). parameter_variation entries (L1) have no generator in the tree yet: a tool must write the modified URDF.",
   "L2/L3 values are Ai et al. Table 6 (knee joints {0,1,2,3}, foot size {1.0, 2.0}), written as model.morphology range overrides (lists of candidates).",
-  "L4 is missing LocoMuJoCo's other humanoids (proposal v4): they ship MJCF only, and this pipeline needs URDF.",
+  "L4 is missing LocoMuJoCo's other humanoids (proposal v4; LocoMuJoCo: Al-Hafez, Zhao, Peters and Tateo, \"LocoMuJoCo: A Comprehensive Imitation Learning Benchmark for Locomotion\", arXiv:2311.02496, 2023; github.com/robfiras/loco-mujoco, MIT): they ship MJCF only, and this pipeline needs URDF.",
   "Procedural training sources (model/training/procedural.py) must not generate hexapods and must restrict ranges so no L2 robot can appear (for example knee_joints [1] and foot_scale [1.0] for quadrupeds and humanoids); SplitManifest.check_training_config flags sources that can.",
   "No entry has expert-motion sources yet, so scripts/evaluate_zero_shot.py needs per-level data configs with motions (--level-data-config)."
  ],
@@ -23,21 +23,21 @@
    "family": "quadruped",
    "split": "test",
    "urdf": "../../assets/urdf/go1.urdf",
-   "notes": "configs/data/synthetic_unitree.json, ground_contact.json, g1_hub_plus_synthetic.json; configs/rl/*"
+   "notes": "URDF from unitreerobotics/unitree_ros (BSD-3-Clause, Copyright (c) 2016-2022 HangZhou YuShu TECHNOLOGY CO.,LTD. (\"Unitree Robotics\")), fetched by scripts/download_urdfs.py. Used in configs/data/synthetic_unitree.json, ground_contact.json, g1_hub_plus_synthetic.json; configs/rl/*"
   },
   {
    "name": "anymal_d",
    "family": "quadruped",
    "split": "test",
    "urdf": "../../assets/urdf/anymal_d.urdf",
-   "notes": "configs/data/ground_contact.json"
+   "notes": "URDF from ANYbotics/anymal_d_simple_description (BSD-3-Clause, Copyright 2023, ANYbotics AG), fetched by scripts/download_urdfs.py. Used in configs/data/ground_contact.json"
   },
   {
    "name": "g1_29dof",
    "family": "humanoid",
    "split": "test",
    "urdf": "../../assets/urdf/g1_29dof.urdf",
-   "notes": "configs/data/synthetic_unitree.json, ground_contact.json, g1_wbt_floating.json, g1_hub_plus_synthetic.json; configs/rl/g1_go1_real_and_synthetic.json"
+   "notes": "URDF from unitreerobotics/unitree_ros (BSD-3-Clause, Copyright (c) 2016-2022 HangZhou YuShu TECHNOLOGY CO.,LTD. (\"Unitree Robotics\")), fetched by scripts/download_urdfs.py. Used in configs/data/synthetic_unitree.json, ground_contact.json, g1_wbt_floating.json, g1_hub_plus_synthetic.json; configs/rl/g1_go1_real_and_synthetic.json"
   },
   {
    "name": "quadrotor_x",
@@ -192,7 +192,7 @@
      },
      "source": "Gupta et al., ICLR 2022, Table 2"
     },
-    "notes": "UNIMAL capsule limbs; for URDF robots the analog is a per-link length change, which is [H]."
+    "notes": "UNIMAL limbs: the paper describes them as cylinders (limb radius [0.03, 0.05] and height [0.15, 0.45], Table 2); the authors' code (github.com/agrimgupta92/metamorph, metamorph/envs/assets/unimal.xml) uses capsule geoms. For URDF robots the analog is a per-link length change, which is [H]."
    },
    {
     "name": "go1/joint_angle",
@@ -207,7 +207,7 @@
      },
      "source": "Gupta et al., ICLR 2022, Table 2"
     },
-    "notes": "Change of the joint range with at least 50% overlap, as MetaMorph."
+    "notes": "Change of the joint range with at least 50% overlap with the original range, as MetaMorph (Gupta et al., ICLR 2022, Appendix A.2; the 13 candidate ranges are in Table 2)."
    },
    {
     "name": "go1/size",
@@ -325,7 +325,7 @@
      },
      "source": "Gupta et al., ICLR 2022, Table 2"
     },
-    "notes": "UNIMAL capsule limbs; for URDF robots the analog is a per-link length change, which is [H]."
+    "notes": "UNIMAL limbs: the paper describes them as cylinders (limb radius [0.03, 0.05] and height [0.15, 0.45], Table 2); the authors' code (github.com/agrimgupta92/metamorph, metamorph/envs/assets/unimal.xml) uses capsule geoms. For URDF robots the analog is a per-link length change, which is [H]."
    },
    {
     "name": "anymal_d/joint_angle",
@@ -340,7 +340,7 @@
      },
      "source": "Gupta et al., ICLR 2022, Table 2"
     },
-    "notes": "Change of the joint range with at least 50% overlap, as MetaMorph."
+    "notes": "Change of the joint range with at least 50% overlap with the original range, as MetaMorph (Gupta et al., ICLR 2022, Appendix A.2; the 13 candidate ranges are in Table 2)."
    },
    {
     "name": "anymal_d/size",
@@ -458,7 +458,7 @@
      },
      "source": "Gupta et al., ICLR 2022, Table 2"
     },
-    "notes": "UNIMAL capsule limbs; for URDF robots the analog is a per-link length change, which is [H]."
+    "notes": "UNIMAL limbs: the paper describes them as cylinders (limb radius [0.03, 0.05] and height [0.15, 0.45], Table 2); the authors' code (github.com/agrimgupta92/metamorph, metamorph/envs/assets/unimal.xml) uses capsule geoms. For URDF robots the analog is a per-link length change, which is [H]."
    },
    {
     "name": "g1_29dof/joint_angle",
@@ -473,7 +473,7 @@
      },
      "source": "Gupta et al., ICLR 2022, Table 2"
     },
-    "notes": "Change of the joint range with at least 50% overlap, as MetaMorph."
+    "notes": "Change of the joint range with at least 50% overlap with the original range, as MetaMorph (Gupta et al., ICLR 2022, Appendix A.2; the 13 candidate ranges are in Table 2)."
    },
    {
     "name": "g1_29dof/size",
@@ -766,7 +766,7 @@
      "license": "BSD-3-Clause",
      "in_download_script": true
     },
-    "notes": "Real robot of Ai et al. Parsed with model.embodiment on 2026-11-19: 12 joints, 16.09 kg, characteristic length 0.321 m. Fetched by scripts/download_urdfs.py."
+    "notes": "License: unitree_ros LICENSE, BSD-3-Clause, Copyright (c) 2016-2022 HangZhou YuShu TECHNOLOGY CO.,LTD. (\"Unitree Robotics\"). Real robot of Ai et al. Parsed with model.embodiment on 2026-11-19: 12 joints, 16.09 kg, characteristic length 0.321 m. Fetched by scripts/download_urdfs.py."
    },
    {
     "name": "h1",
@@ -779,7 +779,7 @@
      "license": "BSD-3-Clause",
      "in_download_script": true
     },
-    "notes": "CONFLICT: H1 is a training robot of configs/data/synthetic_unitree.json, ground_contact.json and configs/rl/go1_h1_ground.json. It is zero-shot only if the training config excludes it (check with SplitManifest.check_training_config)."
+    "notes": "License: unitree_ros LICENSE, BSD-3-Clause, Copyright (c) 2016-2022 HangZhou YuShu TECHNOLOGY CO.,LTD. (\"Unitree Robotics\"). CONFLICT: H1 is a training robot of configs/data/synthetic_unitree.json, ground_contact.json and configs/rl/go1_h1_ground.json. It is zero-shot only if the training config excludes it (check with SplitManifest.check_training_config)."
    },
    {
     "name": "talos",
@@ -789,10 +789,10 @@
     "download": {
      "url": "https://raw.githubusercontent.com/Gepetto/example-robot-data/master/robots/talos_data/robots/talos_reduced.urdf",
      "repository": "Gepetto/example-robot-data",
-     "license": "BSD-2-Clause",
+     "license": "CC-BY-NC-ND-3.0",
      "in_download_script": true
     },
-    "notes": "The robot URMA did not transfer to. Its transmissions have negative mechanicalReduction (a reversed actuator); model.urdf.parse_urdf takes the magnitude since 2026-11-19. Parsed with a floating base: 32 joints, 90.27 kg, characteristic length 0.98 m. Fetched by scripts/download_urdfs.py."
+    "notes": "License: talos_reduced.urdf states 'Copyright (c) 2016, PAL Robotics, S.L.' and the Creative Commons Attribution-NonCommercial-NoDerivs 3.0 Unported License (http://creativecommons.org/licenses/by-nc-nd/3.0/); it is distributed in Gepetto/example-robot-data, a BSD-3-Clause repository (Copyright (C) 2018-2020 LAAS-CNRS, University of Edinburgh, INRIA) whose LICENSE applies 'unless otherwise stated in individual files'. A robot URMA did not transfer to: trained on its other 15 robots, 'the policy is not able to do any initial transfer to the Unitree H1 or the Talos' (Bohlinger, Czechmanowski, Krupka, Kicki, Walas, Peters and Tateo, CoRL 2024, PMLR 270:3356-3378, arXiv:2409.06366, Appendix I). Its transmissions have negative mechanicalReduction (a reversed actuator); model.urdf.parse_urdf takes the magnitude since 2026-11-19. Parsed with a floating base: 32 joints, 90.27 kg, characteristic length 0.98 m. Fetched by scripts/download_urdfs.py."
    }
   ]
  }

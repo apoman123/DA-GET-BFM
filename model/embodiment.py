@@ -1,8 +1,8 @@
 """Build GET-Zero embodiment graphs from URDF files, with one token per DoF.
 
-The embodiment graph follows GET-Zero (Patel and Song, ICRA 2025): every
-degree of freedom is a node, links are directed parent-to-child edges, and
-undirected edges join joints that start independent serial chains on the same
+The embodiment graph follows GET-Zero (Patel and Song, ICRA 2025, arXiv:2407.15002):
+every degree of freedom is a node, links are directed parent-to-child edges, and
+undirected edges join joints "at the start of independent serial chains" on the same
 body. The graph is general enough for hands, arms, quadrupeds, bipeds, and
 humanoids:
 
@@ -22,6 +22,32 @@ Per-joint hardware features are the GET-Zero "fixed local" observations: the
 joint position and rotation relative to the parent joint frame, read from URDF.
 ``JointFeatureConfig.cross_embodiment()`` adds the axis, joint type, limits, and
 child-body inertia, which matter once robots no longer share joint axes.
+
+References:
+
+* GET-Zero: Patel & Song, "GET-Zero: Graph Embodiment Transformer for Zero-shot
+  Embodiment Generalization", ICRA 2025, pp. 14262-14269, DOI
+  10.1109/ICRA55743.2025.11127922, arXiv:2407.15002. The graph rules, the fixed
+  local features and their default switches (``includeJointOrigin`` and
+  ``includeJointRot`` on, the others off, in ``get_zero/distill/cfg/tokenization/
+  Default.yaml``), the [-1, 1] joint-position scaling and the forward-kinematics
+  self-modeling target follow the paper and its code
+  (https://github.com/real-stanford/get_zero, commit 279652d, which has no license
+  file). No GET-Zero code is copied here.
+* The URDF tags, units and frames are those of the ROS URDF XML specification
+  (http://wiki.ros.org/urdf/XML); see ``model.urdf``.
+* ``rot6d`` is the 6D rotation representation of Zhou et al., CVPR 2019, DOI
+  10.1109/CVPR.2019.00589.
+* Merging links uses Steiner's (parallel-axis) theorem, and ``mass_matrix`` the
+  Jacobian form ``M(q) = sum_k J_k^T G_k J_k`` of the joint-space inertia (Lynch &
+  Park, *Modern Robotics*, Cambridge University Press 2017, DOI 10.1017/9781316661239,
+  Eqs. (8.27) and (8.57)).
+* ``armature`` is the joint-space rotor inertia of MuJoCo's joint ``armature``
+  (Todorov, Erez & Tassa, IROS 2012, DOI 10.1109/IROS.2012.6386109) and Isaac Lab's
+  actuator ``armature`` (Mittal et al., "Isaac Lab: A GPU-Accelerated Simulation
+  Framework for Multi-Modal Robot Learning", arXiv:2511.04831, 2025).
+* The default joint order is meant to match MuJoCo and Pinocchio (Carpentier et al.,
+  IEEE/SICE SII 2019, DOI 10.1109/SII.2019.8700380).
 """
 
 from __future__ import annotations
@@ -61,7 +87,8 @@ class JointFeatureConfig:
         joint_rotation (bool): Joint rotation in the parent joint frame (3 for
             ``rpy``, 6 for ``rot6d``).
         rotation_representation (str): ``"rpy"`` as in GET-Zero, or ``"rot6d"``,
-            the first two rotation-matrix columns, which has no wrap-around.
+            the first two rotation-matrix columns, which has no wrap-around (Zhou et
+            al., CVPR 2019).
         joint_axis (bool): Unit motion axis in the joint frame (3).
         joint_type (bool): One-hot revolute, continuous, prismatic (3).
         joint_limits (bool): Lower and upper position limits (2); continuous
@@ -195,7 +222,7 @@ class _Body:
 
 
 def _center_inertia(body) -> tuple[torch.Tensor, torch.Tensor]:
-    """Return the center of mass and the inertia about it of an accumulated body."""
+    """Return the center of mass and the inertia about it of an accumulated body (Steiner's theorem)."""
     if body.mass <= 0:
         return torch.zeros(3, dtype=torch.float64), torch.zeros((3, 3), dtype=torch.float64)
     com = body.first_moment / body.mass
@@ -625,6 +652,9 @@ class EmbodimentGraph:
     def normalize_joint_positions(self, positions: torch.Tensor) -> torch.Tensor:
         """Scale joint positions to [-1, 1] by their limits, as GET-Zero does.
 
+        GET-Zero applies Isaac Gym's ``unscale`` to the joint positions
+        (``get_zero/rl/tasks/leap_hand_rot.py``).
+
         Args:
             positions (torch.Tensor): Joint positions ``[..., J]``.
 
@@ -755,7 +785,7 @@ class EmbodimentGraph:
         angular = torch.where(prismatic[:, None], torch.zeros_like(axes), axes)
         linear, angular = linear * mask, angular * mask
         mass = self.body_mass.to(dtype=dtype, device=device)
-        # Sum over bodies k of m_k Jv_k^T Jv_k + Jw_k^T I_k Jw_k, as two matmuls
+        # Sum over bodies k of m_k Jv_k^T Jv_k + Jw_k^T I_k Jw_k (Lynch & Park 2017, Eq. 8.57), as two matmuls
         # over the flattened (body, xyz) dimension.
         joints = self.num_joints
         flat_linear = linear.transpose(-3, -2).reshape(*linear.shape[:-3], joints, -1)

@@ -25,6 +25,9 @@ Sources:
   frames still need about half the weight from the ground. MIPO has no base velocity, so
   the foot-speed evidence and the slip check are unavailable there.
 
+The metrics are the standard precision, recall and F1 of the inferred foot contacts. The
+MIPO data and its paper are cited in ``docs/data.md#references``.
+
 Usage::
 
     uv run python scripts/evaluate_contact_detection.py --data_config configs/data/ground_contact.json

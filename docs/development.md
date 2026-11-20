@@ -86,7 +86,7 @@ DA-GET-BFM/
 │   ├── retarget_motion.py            # G3: keypoint retargeting between robots
 │   ├── generate_morphologies.py      # D1: write a suite of procedural robots
 │   ├── build_proposal_pdf.py         # render docs/proposal/*.md to the PDF
-│   └── download_urdfs.py             # fetch Unitree and ANYmal D URDFs into assets/urdf
+│   └── download_urdfs.py             # fetch the Unitree, ANYbotics and PAL Robotics URDFs into assets/urdf
 ├── assets/robots/quadrotor_x.urdf    # X quadrotor for synthetic flight
 ├── configs/data/              # example data configs
 ├── configs/rl/                # example RL training configs
@@ -94,10 +94,11 @@ DA-GET-BFM/
 ├── configs/splits/            # zero-shot split manifest L0-L4
 ├── tests/                     # unit tests (see below)
 ├── .github/workflows/ci.yml   # continuous integration
-├── docs/                      # documentation by topic (docs/proposal/: the research proposal)
-├── raw/                       # source material (the GET-Zero project page)
+├── docs/                      # documentation by topic, references (docs/references.md),
+│                              # the research proposal (docs/proposal/)
+├── raw/                       # source material (the GET-Zero project page by Patel and Song)
 ├── graphify-out/              # knowledge graph of the code and paper
-├── THIRD_PARTY_NOTICES.md     # attribution for adapted code
+├── THIRD_PARTY_NOTICES.md     # authors and licenses of adapted code, robot models, fonts, tools
 ├── pyproject.toml
 └── uv.lock
 ```
@@ -237,8 +238,8 @@ The suite has 197 tests (the MuJoCo and HDF5 tests are skipped without the
   - `save_pretrained`/`from_pretrained`;
   - a Trainer run with per-task logging.
   - the training script recording train and eval curves in TensorBoard.
-- `test_docs.py`: every relative link and `#anchor` in the README, `docs/` and
-  `model/README.md` resolves (GitHub heading slugs).
+- `test_docs.py`: every relative link and `#anchor` in the README, `THIRD_PARTY_NOTICES.md`,
+  `docs/` and `model/README.md` resolves (GitHub heading slugs).
 
 Checks outside the test suite:
 
@@ -356,6 +357,10 @@ a pipeline check, not a conclusive ablation.
   for feasibility labels to be trustworthy.
 - **The URDF must have inertials.** Joints that move massless bodies give a
   zero mass-matrix diagonal.
+- **The Isaac Lab adapter is unverified on a real simulator.** It is written against
+  Isaac Lab 3 and tested with a fake of its API only; rotor robots are not supported in
+  RL ([first run](bfm.md#first-run-on-a-gpu-machine),
+  [differences from BFM-Zero](bfm.md#what-differs-from-bfm-zero)).
 
 ## Continuous integration
 
@@ -380,8 +385,9 @@ no deployment (CD) stage: the project publishes no package or service.
 
 ## Knowledge graph
 
-`graphify-out/` holds a [graphify](https://github.com/safishamsi/graphify)
-knowledge graph of the code and the GET-Zero paper page:
+`graphify-out/` holds a [graphify](https://github.com/Graphify-Labs/graphify) knowledge
+graph (graphify by Safi, GitHub user safishamsi, now Graphify Labs; Apache-2.0) of the code
+and of the GET-Zero project page by Patel and Song (`raw/`, kept verbatim with attribution):
 
 - `graph.html`: an interactive view.
 - `GRAPH_REPORT.md`: the central nodes, communities, and surprising links.

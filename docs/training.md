@@ -7,6 +7,7 @@ The seven auxiliary tasks that train the encoder, where their labels come from (
 ## Contents
 
 - [Physics pretraining](#physics-pretraining)
+  - [How the encoder learns dynamics without torque labels](#how-the-encoder-learns-dynamics-without-torque-labels)
   - [Where the labels come from](#where-the-labels-come-from)
   - [Shared notation and loss reduction](#shared-notation-and-loss-reduction)
   - [A. Forward kinematics](#a-forward-kinematics)
@@ -20,12 +21,15 @@ The seven auxiliary tasks that train the encoder, where their labels come from (
 - [Training with the Hugging Face Trainer](#training-with-the-hugging-face-trainer)
   - [Watching training in TensorBoard](#watching-training-in-tensorboard)
   - [Data config](#data-config)
+  - [Values taken from papers in the shipped configs](#values-taken-from-papers-in-the-shipped-configs)
+- [References](#references)
 
 ## Physics pretraining
 
 `DaGetForPhysicsPretraining` (`model/pretraining.py`) is a Hugging Face
-`PreTrainedModel`, so `save_pretrained`, `from_pretrained`, and `push_to_hub`
-all work. It wraps the encoder with seven heads. $N_e$ is the number of valid
+`PreTrainedModel` ([Transformers](#references), Wolf et al., EMNLP 2020), so
+`save_pretrained`, `from_pretrained`, and `push_to_hub` all work. It wraps the GET-Zero
+encoder (Patel and Song, ICRA 2025) with seven heads. $N_e$ is the number of valid
 joints of a sample's robot. Every per-joint loss is averaged per robot first,
 so a 29-DoF humanoid does not outweigh a 4-rotor drone. No task uses an
 estimated torque ([why](dynamics.md#why-training-uses-no-estimated-torque)).
@@ -39,6 +43,39 @@ estimated torque ([why](dynamics.md#why-training-uses-no-estimated-torque)).
 | **R⁻¹. Inverse response** | $[H_i;E(\delta\ddot q_i/s_i^R,\delta a_{\mathrm{base}})]$ with graph mixing | $\delta\tau$ | $\frac{1}{N_e}\sum_i[(P(\widehat{\delta\tau}-\delta\tau))_i/\tau_i^{\mathrm{peak}}]^2$ |
 | **D. Motor feasibility** | $[H_i;E(a_i^{\mathrm{proposal}})]$ | Peak and continuous feasibility flags; peak torque, continuous torque, power, speed, and joint-position margins | $\lambda_f\operatorname{BCEWithLogits}+\lambda_m\operatorname{Huber}$ |
 | **E. Action effect** | $[H_i;E(a_i)]$ with graph mixing | At end-effector frames, in the base frame at $t$: $\Delta p$, $R_{t+1}$, $v_{t+1}$, $\omega_{t+1}$ | $\lambda_p\lVert\widehat{\Delta p}-\Delta p\rVert^2+\lambda_R d_{SO(3)}(\hat R,R)^2+\lambda_v\lVert\hat v-v\rVert^2+\lambda_\omega\lVert\hat\omega-\omega\rVert^2$ |
+
+### How the encoder learns dynamics without torque labels
+
+Joint torques cannot be estimated reliably from recorded motion: on real robots
+the estimate is 43–97% off (Unitree Go1, MIPO data) and 47–72% off (ANYmal D, GrandTour
+data), mostly from sources no estimator removes ([measurements](dynamics.md#how-accurate-is-it)). Training therefore never estimates a torque. The
+encoder still learns each robot's own dynamics from three sources
+([details](training.md#physics-pretraining)):
+
+1. **Exact inputs.** `M(q)` (attention bias and `M_ii`), `c`, `g`, friction and
+   the rigid-body and actuator features are computed from the model, never
+   measured.
+2. **The contact-constrained response, on every dataset.** For any recorded
+   state, the collator draws a torque change `δτ` and labels it with the exact
+   acceleration change `δν̇ = G(q) δτ`,
+   `G = [M⁻¹ − M⁻¹Jᵀ(J M⁻¹ Jᵀ)⁻¹J M⁻¹] Sᵀ` with the contacts holding
+   ([`constrained_response`](../model/dynamics.py); the constrained dynamics of Featherstone,
+   2008, and Udwadia and Kalaba, 1992, see [References](#references)). `G` depends only on the
+   configuration, the inertia and which feet are down: not on the applied
+   torque, the contact forces or differentiated accelerations. Tasks R and R⁻¹
+   learn it in both directions.
+3. **Exact torques where they exist.** Simulated sources (synthetic, MuJoCo
+   ground) record the applied torque together with the acceleration it produced;
+   only they train forward and inverse dynamics with full torques. Torque-sensor
+   data is off by default (`measured_torque_weight: 0`).
+
+Kinematic tasks (forward kinematics, action effect, motor feasibility) run on
+every dataset as before. During RL, the policy's own rollouts add response,
+effect and feasibility labels with the simulator's exact contacts, and a few
+label worlds per robot add exact forward and inverse dynamics labels on the
+states the policy visits, walking included: torque and acceleration are read at
+the start of each control step, so they belong to one instant
+([physics replay](bfm.md#physics-losses-during-rl)).
 
 ### Where the labels come from
 
@@ -134,7 +171,9 @@ frame. Forward kinematics on the URDF supplies position $p_i^{\mathrm{root}}$
 and orientation $R_i\in SO(3)$ in the root frame. The position label
 $p_i=p_i^{\mathrm{root}}/L_e$ normalizes robot size. The head predicts
 $\hat p_i$ and $\hat R_i$; six output numbers are converted to the rotation
-matrix $\hat R_i$.
+matrix $\hat R_i$ by Gram-Schmidt (the continuous 6D representation of Zhou et al.,
+CVPR 2019). $d_{SO(3)}$ is the rotation angle of $\hat R^\top R$ (Lynch and Park, 2017,
+Sec. 3.2.3.3).
 
 $$
 \ell_i^{\mathrm{FK}}=
@@ -236,7 +275,8 @@ torque *change* needs no torque at all: at any state,
 $\delta\dot\nu=G(q)\,\delta\tau$ with
 $G=[M^{-1}-M^{-1}J^\top(JM^{-1}J^\top)^{-1}JM^{-1}]S^\top$, where $J$ is the
 Jacobian of the contacts that hold
-([derivation](dynamics.md#the-contact-constrained-response)). $G$ is each robot's
+([derivation](dynamics.md#the-contact-constrained-response); constrained rigid-body
+dynamics, Featherstone 2008). $G$ is each robot's
 own constrained inverse inertia: how hard each joint is to accelerate, how the
 joints and the base couple, and how the feet on the ground change that. It depends
 on $q$, the inertia (with rotor inertia) and the contact set only, so it is an
@@ -384,8 +424,9 @@ transition point. $\lambda_f,\lambda_m$ weight flags and margins.
 $m^{\mathrm{actuated}}$ excludes passive and padded joints.
 For logit $x$ and binary label $y$, the binary cross-entropy term is
 $\operatorname{BCEWithLogits}(x,y)=\log(1+e^x)-yx$.
-For residual $r$, the Huber term is $r^2/2$ when $|r|\le\delta$, and
-$\delta(|r|-\delta/2)$ otherwise.
+For residual $r$, the Huber term (Huber, 1964) is $r^2/2$ when $|r|\le\delta$, and
+$\delta(|r|-\delta/2)$ otherwise. Both are the PyTorch losses
+(`binary_cross_entropy_with_logits`, `huber_loss`; Paszke et al., NeurIPS 2019).
 Power, speed, and mode remain in the actuator spec for label generation,
 although they are not encoder actuator features. This loss predicts
 feasibility but does not enforce a runtime action constraint.
@@ -465,7 +506,7 @@ uv run python scripts/train_physics_da_get.py \
 Several data configs can be merged into one by listing all their sources, for
 example to pretrain on legged, humanoid, and flying robots together. Every
 `TrainingArguments` flag works, including multi-GPU runs through
-`accelerate launch`. The script adds model flags:
+`accelerate launch` ([Accelerate](#references)). The script adds model flags:
 - `--preset tiny|small|medium|large|da_get_zero`, plus width, depth, and head overrides;
 - `--physics_cross_attention false` for an ablation;
 - `--physics_layers 0,2`, `--mass_encoding`, `--mixing_layers`;
@@ -486,7 +527,8 @@ embeddings = model.encode(**batch)          # [B, J, hidden]; or model.encoder d
 
 ### Watching training in TensorBoard
 
-The script records every run in TensorBoard, under
+The script records every run in [TensorBoard](https://github.com/tensorflow/tensorboard)
+(Apache-2.0), under
 `<output_dir>/runs/<date>_<host>/`. While it trains, or afterwards:
 
 ```bash
@@ -542,7 +584,7 @@ A data config is JSON. Relative paths start from the config file.
 | `history_size` | 3 | Observation history of the tokens |
 | `joint_features` | `da_get_zero` | Hardware features of the tokens (`cross_embodiment`, or `JointFeatureConfig` fields) |
 | `eval_fraction`, `seed` | 0.05, 0 | Episodes held out; split and proposal seed |
-| `measured_torque_weight` | 0.0 | Loss weight of FD/ID labels from torque sensors. Simulated torques always weigh 1. Off by default: sensor torques (Unitree's current-based estimate, for example) are themselves approximate |
+| `measured_torque_weight` | 0.0 | Loss weight of FD/ID labels from torque sensors. Simulated torques always weigh 1. Off by default: sensor torques (Unitree's estimated output torque `tauEst`, for example) are themselves approximate |
 | `max_contact_residual` | 0.5 | Response labels of frames whose *inferred* contacts leave more than this fraction of the weight in the base wrench unexplained are dropped |
 | `contact_margin_steps` | 2 | Frames before and after a contact change without response labels |
 | `max_contact_slip` | 0.1 | Frames where a foot in contact moves faster than this (m/s) get no response labels; `null` turns the check off. Needs the base linear velocity |
@@ -583,9 +625,9 @@ nominal, as on a real robot whose true masses are unknown.
 
 | Mode | What is simulated |
 |---|---|
-| `fixed` | Base bolted down; gravity tilted per episode; PD with gravity feed-forward tracks random joint targets. |
+| `fixed` | Base bolted down; gravity tilted per episode; PD with gravity feed-forward (Takegaki and Arimoto, 1981) tracks random joint targets. |
 | `floating` | The base is free and hangs from a harness that holds the whole-body center of mass against gravity, with no moment. Base rotation and base-limb coupling are fully dynamic. PD gains use the free-base effective inertia. |
-| `flight` | A multirotor flies under its own rotor thrust: a geometric controller tracks random waypoints and maps thrust and moments to rotor speeds through the actual rotor layout (any rotor count). It needs every actuated joint to be a `thrust` rotor. |
+| `flight` | A multirotor flies under its own rotor thrust: a geometric controller (Lee, Leok and McClamroch, CDC 2010) tracks random waypoints and maps thrust and moments to rotor speeds through the actual rotor layout (any rotor count). It needs every actuated joint to be a `thrust` rotor. |
 
 Commands are clipped to the torque-speed envelope before they are applied, so
 labels always use the executed torque, never an unexecuted proposal. Each state
@@ -599,7 +641,8 @@ simulate ground contact; use the
 datasets for that.
 
 **`"type": "huggingface"`** reads any Hub dataset (`repo_id`) or local folder
-or file (`path`) in the LeRobot parquet layout, or any parquet, CSV, or JSON
+or file (`path`) with Hugging Face `datasets` (Lhoest et al., EMNLP 2021) in the
+LeRobot parquet layout ([LeRobot](data.md#references)), or any parquet, CSV, or JSON
 table with one vector column per signal. Any column key can be a list of
 columns that are concatenated in order.
 
@@ -622,3 +665,144 @@ Processed features and labels are cached in `.cache/physics_data/<hash>.pt`.
 The hash covers the config and the URDF contents, so the analytic dynamics run
 once per dataset rather than once per epoch. Episodes, not frames, are split
 between train and eval.
+
+### Values taken from papers in the shipped configs
+
+JSON has no comments, so the sources of the numbers in `configs/data/*.json` are listed
+here. Datasets and robot models are cited in [Training data](data.md#references).
+
+| Config | Value | Source |
+|---|---|---|
+| `zero_shot.json` | `control_dt` 0.02 s | BFM-Zero controls at 50 Hz (Li et al., arXiv:2511.04131, Sec. 3); its motion library blends frames at the control step (`model/training/resampling.py`) |
+| `zero_shot.json` | `history_size` 25 | 0.5 s at 50 Hz, the history length of RMA ("k = 50 which corresponds to 0.5s" at 100 Hz; Kumar et al., RSS 2021) |
+| `zero_shot.json` | `sampling_alpha` 0.3 (0.2 is the alternative) | XLM-R samples languages with α = 0.3 (Conneau et al., ACL 2020); Arivazhagan et al. (2019) use temperature T = 5, i.e. α = 0.2 |
+| `zero_shot.json` | `spec_noise` ranges | This repository's `DEFAULT_RANDOMIZATION` ranges (`model/training/sources.py`), not a paper's |
+| `zero_shot.json` | procedural `count` 100 per family | Ai et al. (CoRL 2025): "for quadrupeds and hexapods, performance saturates around 100 training embodiments" |
+| `zero_shot.json` | procedural morphology ranges | GenLoco (Feng et al., CoRL 2022) and Ai et al. (CoRL 2025), see `model/morphology.py` and [the zero-shot references](zero_shot.md#references) |
+| every `synthetic` and `mujoco` source | `randomization` defaults | Dynamics randomization (Peng et al., ICRA 2018); the ranges are this repository's |
+| `ground_contact.json`, `zero_shot.json` | `nominal_pose`, `contact_geometry` | Set in this repository; no source is given |
+| `g1_wbt_floating.json`, `g1_hub_plus_synthetic.json` | `actuator_defaults` (`kp` 80, `kd` 2; `kp` 60, `kd` 1.5) | Set in this repository; no source is given |
+| `quadrotor_flight.json` | rotor coefficients and limits | Set in this repository for `assets/robots/quadrotor_x.urdf`; no source is given |
+
+## References
+
+Checked against the publisher, proceedings, arXiv or repository on 2026-11-20.
+
+**Models and training software**
+- Austin Patel and Shuran Song. *GET-Zero: Graph Embodiment Transformer for Zero-Shot
+  Embodiment Generalization.* ICRA 2025, pp. 14262–14269. DOI
+  [10.1109/ICRA55743.2025.11127922](https://doi.org/10.1109/ICRA55743.2025.11127922),
+  arXiv:2407.15002 (observation tokens `o_vl`, `o_vg`, `o_fl`).
+- Thomas Wolf, Lysandre Debut, Victor Sanh, Julien Chaumond, Clement Delangue, Anthony
+  Moi, Pierric Cistac, Tim Rault, Remi Louf, Morgan Funtowicz, Joe Davison, Sam Shleifer,
+  Patrick von Platen, Clara Ma, Yacine Jernite, Julien Plu, Canwen Xu, Teven Le Scao,
+  Sylvain Gugger, Mariama Drame, Quentin Lhoest, and Alexander Rush. *Transformers:
+  State-of-the-Art Natural Language Processing.* EMNLP 2020 System Demonstrations, pp.
+  38–45. DOI [10.18653/v1/2020.emnlp-demos.6](https://doi.org/10.18653/v1/2020.emnlp-demos.6)
+  (`PreTrainedModel`, `Trainer`).
+- Adam Paszke, Sam Gross, Francisco Massa, Adam Lerer, James Bradbury, Gregory Chanan,
+  Trevor Killeen, Zeming Lin, Natalia Gimelshein, Luca Antiga, Alban Desmaison, Andreas
+  Köpf, Edward Yang, Zachary DeVito, Martin Raison, Alykhan Tejani, Sasank Chilamkurthy,
+  Benoit Steiner, Lu Fang, Junjie Bai, and Soumith Chintala. *PyTorch: An Imperative
+  Style, High-Performance Deep Learning Library.* NeurIPS 2019 (Advances in Neural
+  Information Processing Systems 32), arXiv:1912.01703 (`WeightedRandomSampler`, losses).
+- Quentin Lhoest et al. *Datasets: A Community Library for Natural Language Processing.*
+  EMNLP 2021 System Demonstrations, pp. 175–184. DOI
+  [10.18653/v1/2021.emnlp-demo.21](https://doi.org/10.18653/v1/2021.emnlp-demo.21) (all 32
+  authors in [Training data](data.md#references)).
+- Sylvain Gugger, Lysandre Debut, Thomas Wolf, Philipp Schmid, Zachary Mueller, Sourab
+  Mangrulkar, Marc Sun, and Benjamin Bossan. *Accelerate: Training and inference at scale
+  made simple, efficient and adaptable.* 2022. <https://github.com/huggingface/accelerate>
+  (Apache-2.0).
+- Charles R. Harris, K. Jarrod Millman, Stéfan J. van der Walt, Ralf Gommers, Pauli
+  Virtanen, David Cournapeau, Eric Wieser, Julian Taylor, Sebastian Berg, Nathaniel J.
+  Smith, Robert Kern, Matti Picus, Stephan Hoyer, Marten H. van Kerkwijk, Matthew Brett,
+  Allan Haldane, Jaime Fernández del Río, Mark Wiebe, Pearu Peterson, Pierre
+  Gérard-Marchant, Kevin Sheppard, Tyler Reddy, Warren Weckesser, Hameer Abbasi,
+  Christoph Gohlke, and Travis E. Oliphant. *Array programming with NumPy.* Nature
+  585(7825):357–362, 2020. DOI
+  [10.1038/s41586-020-2649-2](https://doi.org/10.1038/s41586-020-2649-2) (finite
+  differences equal `numpy.gradient`, unwrapping equals `numpy.unwrap`).
+
+**Losses, rotations and dynamics**
+- Yi Zhou, Connelly Barnes, Jingwan Lu, Jimei Yang, and Hao Li. *On the Continuity of
+  Rotation Representations in Neural Networks.* CVPR 2019, pp. 5738–5746. DOI
+  [10.1109/CVPR.2019.00589](https://doi.org/10.1109/CVPR.2019.00589).
+- Kevin M. Lynch and Frank C. Park. *Modern Robotics: Mechanics, Planning, and Control.*
+  Cambridge University Press, 2017. DOI
+  [10.1017/9781316661239](https://doi.org/10.1017/9781316661239) (Rodrigues' formula,
+  Prop. 3.11; SO(3) logarithm and rotation angle, Sec. 3.2.3.3; quaternions, App. B.3;
+  friction pyramid, Sec. 12.2.1).
+- Ken Shoemake. *Animating rotation with quaternion curves.* SIGGRAPH 1985, Computer
+  Graphics 19(3):245–254. DOI [10.1145/325165.325242](https://doi.org/10.1145/325165.325242)
+  (slerp, used when resampling base orientations).
+- Peter J. Huber. *Robust Estimation of a Location Parameter.* The Annals of
+  Mathematical Statistics 35(1):73–101, 1964. DOI
+  [10.1214/aoms/1177703732](https://doi.org/10.1214/aoms/1177703732).
+- Roy Featherstone. *Rigid Body Dynamics Algorithms.* Springer, 2008. DOI
+  [10.1007/978-1-4899-7560-7](https://doi.org/10.1007/978-1-4899-7560-7).
+- Firdaus E. Udwadia and Robert E. Kalaba. *A New Perspective on Constrained Motion.*
+  Proceedings of the Royal Society of London A 439(1906):407–410, 1992. DOI
+  [10.1098/rspa.1992.0158](https://doi.org/10.1098/rspa.1992.0158) (constrained response).
+- J. Y. S. Luh, M. W. Walker, and R. P. C. Paul. *On-Line Computational Scheme for
+  Mechanical Manipulators.* J. Dyn. Syst. Meas. Control 102(2):69–76, 1980. DOI
+  [10.1115/1.3149599](https://doi.org/10.1115/1.3149599) (recursive Newton-Euler).
+- R. McN. Alexander and A. S. Jayes. *A dynamic similarity hypothesis for the gaits of
+  quadrupedal mammals.* Journal of Zoology 201(1):135–152, 1983. DOI
+  [10.1111/j.1469-7998.1983.tb04266.x](https://doi.org/10.1111/j.1469-7998.1983.tb04266.x)
+  (Froude scaling of `dimensionless_inputs` and the physics normalization).
+
+**Synthetic data and contact inference**
+- Xue Bin Peng, Marcin Andrychowicz, Wojciech Zaremba, and Pieter Abbeel. *Sim-to-Real
+  Transfer of Robotic Control with Dynamics Randomization.* ICRA 2018, pp. 3803–3810. DOI
+  [10.1109/ICRA.2018.8460528](https://doi.org/10.1109/ICRA.2018.8460528).
+- Morikazu Takegaki and Suguru Arimoto. *A New Feedback Method for Dynamic Control of
+  Manipulators.* J. Dyn. Syst. Meas. Control 103(2):119–125, 1981. DOI
+  [10.1115/1.3139651](https://doi.org/10.1115/1.3139651) (PD with gravity compensation).
+- Taeyoung Lee, Melvin Leok, and N. Harris McClamroch. *Geometric tracking control of a
+  quadrotor UAV on SE(3).* CDC 2010, pp. 5420–5425. DOI
+  [10.1109/CDC.2010.5717652](https://doi.org/10.1109/CDC.2010.5717652).
+- Robert Mahony, Vijay Kumar, and Peter Corke. *Multirotor Aerial Vehicles: Modeling,
+  Estimation, and Control of Quadrotor.* IEEE Robotics & Automation Magazine
+  19(3):20–32, 2012. DOI [10.1109/MRA.2012.2206474](https://doi.org/10.1109/MRA.2012.2206474)
+  (rotor thrust and drag model).
+- Gilbert Feng, Hongbo Zhang, Zhongyu Li, Xue Bin Peng, Bhuvan Basireddy, Linzhu Yue,
+  Zhitao Song, Lizhi Yang, Yunhui Liu, Koushil Sreenath, and Sergey Levine. *GenLoco:
+  Generalized Locomotion Controllers for Quadrupedal Robots.* CoRL 2022, PMLR
+  205:1893–1903 (mass-proportional PD gains, Sec. 3.1).
+- Marco Camurri, Maurice Fallon, Stephane Bazeille, Andreea Radulescu, Victor Barasuol,
+  Darwin G. Caldwell, and Claudio Semini. *Probabilistic Contact Estimation and Impact
+  Detection for State Estimation of Quadruped Robots.* IEEE RA-L 2(2):1023–1030, 2017. DOI
+  [10.1109/LRA.2017.2652491](https://doi.org/10.1109/LRA.2017.2652491).
+- Gerardo Bledt, Patrick M. Wensing, Sam Ingersoll, and Sangbae Kim. *Contact Model
+  Fusion for Event-Based Locomotion in Unstructured Terrains.* ICRA 2018, pp. 4399–4406.
+  DOI [10.1109/ICRA.2018.8460904](https://doi.org/10.1109/ICRA.2018.8460904).
+- Michael Bloesch, Marco Hutter, Mark Hoepflinger, Stefan Leutenegger, Christian Gehring,
+  C. David Remy, and Roland Siegwart. *State Estimation for Legged Robots - Consistent
+  Fusion of Leg Kinematics and IMU.* RSS 2012. DOI
+  [10.15607/RSS.2012.VIII.003](https://doi.org/10.15607/RSS.2012.VIII.003).
+- Amir Beck and Marc Teboulle. *A Fast Iterative Shrinkage-Thresholding Algorithm for
+  Linear Inverse Problems.* SIAM J. Imaging Sciences 2(1):183–202, 2009. DOI
+  [10.1137/080716542](https://doi.org/10.1137/080716542) (FISTA, the contact-force solver).
+
+**Values in the shipped configs**
+- Yitang Li, Zhengyi Luo, Tonghe Zhang, Cunxi Dai, Anssi Kanervisto, Andrea Tirinzoni,
+  Haoyang Weng, Kris Kitani, Mateusz Guzek, Ahmed Touati, Alessandro Lazaric, Matteo
+  Pirotta, and Guanya Shi. *BFM-Zero: A Promptable Behavioral Foundation Model for
+  Humanoid Control Using Unsupervised Reinforcement Learning.* ICLR 2026, arXiv:2511.04131.
+  Code: <https://github.com/LeCAR-Lab/BFM-Zero>.
+- Ashish Kumar, Zipeng Fu, Deepak Pathak, and Jitendra Malik. *RMA: Rapid Motor
+  Adaptation for Legged Robots.* RSS 2021. DOI
+  [10.15607/RSS.2021.XVII.011](https://doi.org/10.15607/RSS.2021.XVII.011),
+  arXiv:2107.04034.
+- Alexis Conneau, Kartikay Khandelwal, Naman Goyal, Vishrav Chaudhary, Guillaume Wenzek,
+  Francisco Guzmán, Edouard Grave, Myle Ott, Luke Zettlemoyer, and Veselin Stoyanov.
+  *Unsupervised Cross-lingual Representation Learning at Scale.* ACL 2020, pp.
+  8440–8451. DOI [10.18653/v1/2020.acl-main.747](https://doi.org/10.18653/v1/2020.acl-main.747).
+- Naveen Arivazhagan, Ankur Bapna, Orhan Firat, Dmitry Lepikhin, Melvin Johnson, Maxim
+  Krikun, Mia Xu Chen, Yuan Cao, George Foster, Colin Cherry, Wolfgang Macherey, Zhifeng
+  Chen, and Yonghui Wu. *Massively Multilingual Neural Machine Translation in the Wild:
+  Findings and Challenges.* arXiv:1907.05019, 2019.
+- Bo Ai, Liu Dai, Nico Bohlinger, Dichen Li, Tongzhou Mu, Zhanxin Wu, K. Fay, Henrik I.
+  Christensen, Jan Peters, and Hao Su. *Towards Embodiment Scaling Laws in Robot
+  Locomotion.* CoRL 2025, PMLR 305:3483–3515, arXiv:2505.05753.

@@ -22,12 +22,15 @@ and how inaccurate those estimates are.
 - [Estimating joint torques without torque sensors (analysis only)](#estimating-joint-torques-without-torque-sensors-analysis-only)
   - [How accurate is it?](#how-accurate-is-it)
   - [Why the estimate is inaccurate](#why-the-estimate-is-inaccurate)
+- [References](#references)
 
 ## Rigid-body dynamics
 
-`model/dynamics.py` implements the recursive Newton-Euler algorithm (RNEA),
-batched over any leading dimensions, for fixed and floating bases (Featherstone,
-*Rigid Body Dynamics Algorithms*, Springer 2008). With generalized velocity
+`model/dynamics.py` implements the recursive Newton-Euler algorithm (RNEA) in its
+vector form (Luh, Walker and Paul 1980), batched over any leading dimensions, for fixed
+and floating bases (Featherstone, *Rigid Body Dynamics Algorithms*, Springer 2008).
+`floating_mass_matrix` builds `M_full` column by column from RNEA with zero velocity
+and unit accelerations (Walker and Orin 1982). With generalized velocity
 `ν = (v_base, ω_base, qd)` in the base frame:
 
 ```text
@@ -78,7 +81,10 @@ appears at the joint as `I_rotor N²`. On light, highly geared joints this
 Actuator Design in the MIT Cheetah*, IEEE T-RO 2017). URDF has no field for it.
 
 `EmbodimentGraph.armature` (`[J]`, kg m² or kg) holds it per joint, in the
-joint-space model MuJoCo and Isaac Lab use:
+joint-space model MuJoCo and Isaac Lab use (MuJoCo's joint
+[`armature`](https://mujoco.readthedocs.io/en/stable/XMLreference.html#body-joint-armature),
+"the inertia of the spinning body multiplied by the square of the gear ratio"; Isaac
+Lab's actuator `armature`, "directly added to the corresponding joint-space inertia"):
 
 - `graph.mass_matrix(q)` adds `armature_j` to `M_jj`;
 - `recursive_newton_euler` adds `armature_j q̈_j` to the joint effort, so
@@ -116,6 +122,9 @@ depend only on the state, so they cancel from the difference:
 M δν̇ = Sᵀ δτ + Jᵀ δλ,     J δν̇ = 0
 ⟹  δν̇ = [ M⁻¹ − M⁻¹ Jᵀ (J M⁻¹ Jᵀ)⁻¹ J M⁻¹ ] Sᵀ δτ = G(q) δτ
 ```
+
+This is the explicit equation of constrained motion (Udwadia and Kalaba 1992) applied
+to a torque change; see also Featherstone (2008, ch. 8, Closed Loop Systems).
 
 `constrained_response(graph, q, contact_links, active, surface)` returns `G` as a
 `[..., 6+J, J]` tensor: the first six rows are the base linear and angular
@@ -180,7 +189,9 @@ on `P δτ` only, exactly like task C.
   and no recorded support wrench (for example arms recorded on a humanoid whose legs
   are not in the data) gets no response labels. Declare such data as
   `"floating_base": false` if the torso is held still, or give `contact_links`.
-- **Rigid contacts.** MuJoCo's default contacts are soft (`solimp` 0.9–0.95), which
+- **Rigid contacts.** MuJoCo's default contacts are soft (`solimp` 0.9–0.95; default
+  `"0.9 0.95 0.001 0.5 2"` in the
+  [MuJoCo XML reference](https://mujoco.readthedocs.io/en/stable/XMLreference.html)), which
   lets the feet sink and accelerate. The MJCF built by `build_mjcf` (offline ground
   simulation and RL environments) therefore uses stiff contacts, `solimp` 0.99–0.999
   (`STIFF_SOLIMP`, `contact_solimp=None` restores MuJoCo's default). Against a
@@ -201,7 +212,9 @@ on `P δτ` only, exactly like task C.
 
 A wrong contact set gives a badly wrong response label, so data without foot sensors
 needs a reliable inference and a way to know when it is unsure
-([`model/training/contacts.py`](../model/training/contacts.py)). Two methods
+([`model/training/contacts.py`](../model/training/contacts.py)); probabilistic contact
+estimation from kinematics and dynamics is established for legged robots (Camurri et
+al. 2017; Bledt et al. 2018). Two methods
 (`contact_detection` in the data config or per source):
 
 - **`height`**: a foot is down when it is within `contact_height_tolerance` (3 cm) of
@@ -216,13 +229,15 @@ needs a reliable inference and a way to know when it is unsure
   2. a **dynamics likelihood**: the base wrench the motion needs (floating-base RNEA)
      must come from pushing-only forces inside friction pyramids (μ = 0.8) at the
      subset's feet (flat feet: at four sole corners), solved as nonnegative least
-     squares; the cost is `(residual / 0.15 m g)² / 2`;
+     squares (Lawson and Hanson) with FISTA (Beck and Teboulle 2009); the cost is
+     `(residual / 0.15 m g)² / 2`;
   3. a **minimum load**: every chosen foot must carry at least 5% of the weight. A
      foot that carries nothing is, for dynamics, a foot in the air; without this term
      every foot fits a flight phase;
   4. without a base velocity, the **velocity consistency** of the subset: feet that
      stand still in the world all move alike relative to the base (the cue of legged
-     odometry), so the spread of the subset's foot velocities is penalized.
+     odometry, Bloesch et al. 2012), so the spread of the subset's foot velocities is
+     penalized.
 
   The **confidence** of a frame is how much more the second-best subset costs. Only
   frames above `min_contact_confidence` (default 3) keep response labels. A foot on a
@@ -294,7 +309,7 @@ For the model it was mostly noise, not a feature.
 | Previous-action token features of data without commands | The token's "requested torque" column was the same estimate |
 | FD / ID labels (weight 0.3, projected) | Labels with the same error; on real data the motion-determined part was still 37–92% off |
 | Shortcut | Task C's target `τ̂_t` and the input `τ̂_{t−1}` came from one estimator; at 50 Hz they are nearly equal, so the head could copy the input, errors included |
-| Train/deploy mismatch | Isaac Lab's `applied_torque` (computed PD effort), Unitree's current-based estimate and the inverse-dynamics estimate are three different quantities under one feature |
+| Train/deploy mismatch | Isaac Lab's `applied_torque` (computed PD effort), Unitree's estimated output torque (`tauEst`) and the inverse-dynamics estimate are three different quantities under one feature |
 
 ### What replaces it
 
@@ -318,7 +333,7 @@ No. At run time the policy reads joint positions and velocities, the IMU, the ro
 model, and its own previous target with the effort the known PD law requests for it
 (`K_p (a − q) − K_d qd`, computed, not measured). Simulation and robot compute every
 input the same way. The PD gains on the robot must equal the training gains. See
-[What a robot needs at run time](../README.md#what-a-robot-needs-at-run-time).
+[What a robot needs at run time](physics_features.md#what-a-robot-needs-at-run-time).
 
 ## Estimating joint torques without torque sensors (analysis only)
 
@@ -371,7 +386,8 @@ correlation in parentheses:
 
 Two more checks:
 
-- **Real ANYmal D (GrandTour).** The first 6 episodes of one mission
+- **Real ANYmal D ([GrandTour](https://doi.org/10.1177/02783649261480737), Tuna et al.,
+  IJRR 2026).** The first 6 episodes of one mission
   (outdoor walking) were converted with `scripts/convert_dataset.py
   grandtour`. Torques were then estimated without `torque_key` and compared
   with the measured joint torques (RMS 27 N m):
@@ -406,7 +422,7 @@ The estimate is `τ = M(q) q̈ + c + g − Jᵀλ`, and every term carries error
 | Twice-differentiated accelerations | Noise grows like `1/dt²`; smoothing adds lag and misses impacts shorter than a sample | Real data: the motion-determined part is still 37–92% off |
 | Clocks and base estimate | IMU and joint clocks are not synchronized; base orientation and acceleration carry estimator error | Same |
 | URDF mismatch | CAD inertias miss batteries and cables; no rotor inertia, gearbox friction, backlash or elasticity | A cross-validated per-joint actuator model (scale, offset, rotor inertia, viscous and Coulomb friction) removes only 1–7 points (compare Hwangbo et al., Science Robotics 2019, who learn actuator dynamics because they resist modelling) |
-| The "measured" torque | Unitree computes it from motor current times a torque constant, which is nonlinear and temperature dependent | — |
+| The "measured" torque | It is not a torque-sensor reading: Unitree reports an estimated output torque (`tauEst`, "current estimated output torque" in the SDK's [`comm.h`](https://github.com/unitreerobotics/unitree_legged_sdk/blob/go1/include/unitree_legged_sdk/comm.h)), and does not document how it is estimated | — |
 
 The error split shows it:
 
@@ -420,3 +436,63 @@ In simulation the error is almost all internal forces, which the projection remo
 On real robots it is mostly measurement and model error, which no projection or
 actuator fit removes. Hence the design: never estimate, and supervise dynamics with
 quantities that need no torque.
+
+## References
+
+- J. Y. S. Luh, M. W. Walker, and R. P. C. Paul. *On-Line Computational Scheme for
+  Mechanical Manipulators.* Journal of Dynamic Systems, Measurement, and Control
+  102(2):69-76, 1980. [DOI 10.1115/1.3149599](https://doi.org/10.1115/1.3149599).
+- M. W. Walker and D. E. Orin. *Efficient Dynamic Computer Simulation of Robotic
+  Mechanisms.* Journal of Dynamic Systems, Measurement, and Control 104(3):205-211,
+  1982. [DOI 10.1115/1.3139699](https://doi.org/10.1115/1.3139699).
+- Roy Featherstone. *Rigid Body Dynamics Algorithms.* Springer, 2008 (ch. 5, Inverse
+  Dynamics; ch. 8, Closed Loop Systems).
+  [DOI 10.1007/978-1-4899-7560-7](https://doi.org/10.1007/978-1-4899-7560-7).
+- Firdaus E. Udwadia and Robert E. Kalaba. *A New Perspective on Constrained Motion.*
+  Proceedings of the Royal Society of London A 439(1906):407-410, 1992.
+  [DOI 10.1098/rspa.1992.0158](https://doi.org/10.1098/rspa.1992.0158).
+- Patrick M. Wensing, Albert Wang, Sangok Seok, David Otten, Jeffrey Lang, and Sangbae
+  Kim. *Proprioceptive Actuator Design in the MIT Cheetah: Impact Mitigation and
+  High-Bandwidth Physical Interaction for Dynamic Legged Robots.* IEEE Transactions on
+  Robotics 33(3):509-522, 2017.
+  [DOI 10.1109/TRO.2016.2640183](https://doi.org/10.1109/TRO.2016.2640183).
+- Emanuel Todorov, Tom Erez, and Yuval Tassa. *MuJoCo: A Physics Engine for
+  Model-Based Control.* IROS 2012, pp. 5026-5033.
+  [DOI 10.1109/IROS.2012.6386109](https://doi.org/10.1109/IROS.2012.6386109).
+- Mayank Mittal et al. *Isaac Lab: A GPU-Accelerated Simulation Framework for
+  Multi-Modal Robot Learning.* [arXiv:2511.04831](https://arxiv.org/abs/2511.04831),
+  2025.
+- Fadri Furrer, Michael Burri, Markus Achtelik, and Roland Siegwart. *RotorS—A
+  Modular Gazebo MAV Simulator Framework.* In *Robot Operating System (ROS): The
+  Complete Reference (Volume 1)*, Springer, 2016, pp. 595-625
+  (rotor thrust and drag model).
+  [DOI 10.1007/978-3-319-26054-9_23](https://doi.org/10.1007/978-3-319-26054-9_23).
+- Marco Camurri, Maurice Fallon, Stéphane Bazeille, Andreea Radulescu, Victor
+  Barasuol, Darwin G. Caldwell, and Claudio Semini. *Probabilistic Contact Estimation
+  and Impact Detection for State Estimation of Quadruped Robots.* IEEE Robotics and
+  Automation Letters 2(2):1023-1030, 2017.
+  [DOI 10.1109/LRA.2017.2652491](https://doi.org/10.1109/LRA.2017.2652491).
+- Gerardo Bledt, Patrick M. Wensing, Sam Ingersoll, and Sangbae Kim. *Contact Model
+  Fusion for Event-Based Locomotion in Unstructured Terrains.* ICRA 2018, pp.
+  4399-4406. [DOI 10.1109/ICRA.2018.8460904](https://doi.org/10.1109/ICRA.2018.8460904).
+- Michael Bloesch, Marco Hutter, Mark Hoepflinger, Stefan Leutenegger, Christian
+  Gehring, C. David Remy, and Roland Siegwart. *State Estimation for Legged Robots -
+  Consistent Fusion of Leg Kinematics and IMU.* RSS 2012.
+  [DOI 10.15607/RSS.2012.VIII.003](https://doi.org/10.15607/RSS.2012.VIII.003).
+- Charles L. Lawson and Richard J. Hanson. *Solving Least Squares Problems.* SIAM,
+  1995. [DOI 10.1137/1.9781611971217](https://doi.org/10.1137/1.9781611971217).
+- Amir Beck and Marc Teboulle. *A Fast Iterative Shrinkage-Thresholding Algorithm for
+  Linear Inverse Problems.* SIAM Journal on Imaging Sciences 2(1):183-202, 2009.
+  [DOI 10.1137/080716542](https://doi.org/10.1137/080716542).
+- Shuo Yang, Zixin Zhang, Benjamin Bokser, and Zachary Manchester. *Multi-IMU
+  Proprioceptive Odometry for Legged Robots.* IROS 2023, pp. 774-779 (MIPO data).
+  [DOI 10.1109/IROS55552.2023.10342061](https://doi.org/10.1109/IROS55552.2023.10342061).
+- Turcan Tuna, Jonas Frey, Lanke Frank Tarimo Fu, Katharine Patterson, Tianao Xu,
+  Maurice Fallon, Cesar Cadena, and Marco Hutter. *GrandTour: A Legged Robotics Dataset
+  in the Wild for Multi-Modal Perception and State Estimation.* The International
+  Journal of Robotics Research, 2026.
+  [DOI 10.1177/02783649261480737](https://doi.org/10.1177/02783649261480737).
+- Jemin Hwangbo, Joonho Lee, Alexey Dosovitskiy, Dario Bellicoso, Vassilios Tsounis,
+  Vladlen Koltun, and Marco Hutter. *Learning Agile and Dynamic Motor Skills for Legged
+  Robots.* Science Robotics 4(26), 2019.
+  [DOI 10.1126/scirobotics.aau5872](https://doi.org/10.1126/scirobotics.aau5872).

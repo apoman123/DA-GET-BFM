@@ -27,6 +27,22 @@ Columns (all optional except the indices and ``observation.state``):
 ``observation.contact``                    per-foot contact flag (0 or 1)
 ``observation.contact_force``              per-foot force magnitude (N)
 ========================================  ==========================================
+
+References:
+    * The layout follows LeRobotDataset v3.0 (``data/chunk-000/file-000.parquet`` and
+      ``meta/info.json``): LeRobot, Cadene et al., 2024, https://github.com/huggingface/lerobot
+      (Apache-2.0), ``docs/source/lerobot-dataset-v3.mdx``; paper: Cadene et al., ICLR
+      2026, arXiv:2602.22818. Only the layout is followed; no LeRobot code is used.
+    * Apache Parquet (https://parquet.apache.org/docs/file-format/), written with
+      PyArrow (Apache Arrow, https://arrow.apache.org/, Apache-2.0).
+    * ``HttpRangeFile`` uses HTTP range requests: RFC 9110 "HTTP Semantics", Sec. 14,
+      Fielding, Nottingham & Reschke (eds.), 2022, DOI 10.17487/RFC9110.
+    * Quaternions: ``rotation_from_xyzw`` is eq. (B.12) of Lynch & Park, Modern Robotics,
+      Cambridge University Press 2017, App. B.3, DOI 10.1017/9781316661239, which also
+      notes that ``q`` and ``-q`` give the same rotation (hence the sign continuity in
+      ``resample_quaternion``). ``resample_quaternion`` interpolates the components
+      linearly and renormalizes, an approximation of slerp (Shoemake, SIGGRAPH 1985,
+      DOI 10.1145/325165.325242) that is close for the short steps between samples.
 """
 
 from __future__ import annotations
@@ -148,7 +164,7 @@ def write_dataset(
     contact_names: list[str] | None = None,
     info: dict[str, Any] | None = None,
 ) -> dict[str, Any]:
-    """Write episodes as a LeRobot-style parquet table with ``meta/info.json``.
+    """Write episodes as a LeRobot-style (v3.0 layout) parquet table with ``meta/info.json``.
 
     Args:
         output (str | Path): Folder to create.
@@ -287,7 +303,7 @@ def source_config(
 
 
 class HttpRangeFile(io.RawIOBase):
-    """A seekable read-only file over HTTP range requests.
+    """A seekable read-only file over HTTP range requests (RFC 9110, Sec. 14).
 
     Lets ``zipfile`` read single members of a large remote archive (for
     example one NeuroBEM flight out of a 627 MB zip) without downloading all
@@ -358,7 +374,7 @@ def quaternion_wxyz_to_xyzw(quaternion: np.ndarray) -> np.ndarray:
 
 
 def rotation_from_xyzw(quaternion: np.ndarray) -> np.ndarray:
-    """Return world-from-base rotation matrices of (x, y, z, w) quaternions."""
+    """Return world-from-base rotation matrices of (x, y, z, w) quaternions (Lynch & Park eq. B.12)."""
     x, y, z, w = (np.asarray(quaternion, dtype=np.float64) / np.linalg.norm(quaternion, axis=-1, keepdims=True)).T
     return np.stack(
         [

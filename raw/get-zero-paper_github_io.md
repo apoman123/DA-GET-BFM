@@ -4,11 +4,18 @@ type: webpage
 title: "GET-Zero"
 captured_at: 2026-11-06T15:03:08.556603+00:00
 contributor: "apoman123"
+authors: "Austin Patel and Shuran Song (Stanford University)"
+citation: "Austin Patel and Shuran Song. GET-Zero: Graph Embodiment Transformer for Zero-shot Embodiment Generalization. ICRA 2025."
+rights: "Text of the authors' project page, kept verbatim for reference; copyright remains with the authors."
 ---
 
 # GET-Zero
 
 Source: https://get-zero-paper.github.io/
+
+Authors: Austin Patel and Shuran Song. This is a verbatim text capture of their project page
+for GET-Zero (ICRA 2025), kept for reference; all rights remain with the authors. Cite the
+paper, not this file.
 
 ---
 

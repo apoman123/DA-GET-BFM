@@ -1,4 +1,10 @@
-"""Training configuration of the cross-embodiment FB-CPR agent."""
+"""Training configuration of the cross-embodiment FB-CPR agent.
+
+The defaults are BFM-Zero's G1 values: ``default_train_config`` in ``humanoidverse/train.py``
+of https://github.com/LeCAR-Lab/BFM-Zero (CC BY-NC 4.0), most also in Table 1 of the paper
+(Li et al., ICLR 2026, arXiv:2511.04131v2, Appendix B). The algorithm is FB-CPR
+(Tirinzoni et al., ICLR 2025, arXiv:2504.11054).
+"""
 
 from dataclasses import dataclass, field
 
@@ -6,9 +12,10 @@ from dataclasses import dataclass, field
 def default_aux_reward_scales() -> dict[str, float]:
     """Return the auxiliary reward weights.
 
-    The first five are BFM-Zero's weights (paper Table 4) for its embodiment-independent
-    penalties. The three torque penalties are ours (``model.rl.actions``); they are
-    normalized by each robot's own limits. With ``adaptive_torque_penalties`` their weights
+    The first five are BFM-Zero's weights for its embodiment-independent penalties
+    (``aux_rewards_scaling`` in ``humanoidverse/train.py``; Table 4 of arXiv:2511.04131v2).
+    The three torque penalties are ours (``model.rl.actions``); they are normalized by
+    each robot's own limits. With ``adaptive_torque_penalties`` their weights
     are only starting values, scaled per robot by Lagrange multipliers
     (``model.rl.constraints``).
     """
@@ -34,6 +41,14 @@ def default_torque_targets() -> dict[str, list]:
 @dataclass
 class FbCprConfig:
     """Hyperparameters of ``DaGetFbCprAgent``; defaults are BFM-Zero's G1 values.
+
+    BFM-Zero's values (``humanoidverse/train.py``) are all fields from ``lr_f`` to
+    ``grad_penalty_discriminator`` and from ``use_mix_rollout`` to
+    ``rollout_expert_trajectories_percentage``; ``within_robot_pairs``, the encoder
+    fields and the torque-penalty fields are this repo's. The optimizer is Adam (Kingma
+    & Ba, ICLR 2015, arXiv:1412.6980), the gradient penalty WGAN-GP's (Gulrajani et al.,
+    NeurIPS 2017, arXiv:1704.00028) and the soft target updates DDPG's (Lillicrap et
+    al., ICLR 2016, arXiv:1509.02971).
 
     Attributes:
         lr_f (float): Forward map learning rate.

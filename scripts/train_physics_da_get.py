@@ -15,7 +15,19 @@ Examples::
 
 Every ``transformers.TrainingArguments`` option works (``--learning_rate``,
 ``--push_to_hub``, ...). A single JSON file with all arguments can be passed
-instead of flags.
+instead of flags. The trainer and argument parser are Hugging Face Transformers' (Wolf
+et al., EMNLP 2020 System Demonstrations, DOI 10.18653/v1/2020.emnlp-demos.6).
+
+The hub example reads ``unitreerobotics/G1_Dex3_ToastedBread_Dataset`` (Unitree Robotics,
+Apache-2.0, https://huggingface.co/datasets/unitreerobotics/G1_Dex3_ToastedBread_Dataset).
+
+References of the options: the encoder is GET-Zero's Graph Embodiment Transformer (Patel &
+Song, ICRA 2025, arXiv:2407.15002); ``topology_bias modulation`` follows ModuMorph (Xiong,
+Beck & Whiteson, "Universal Morphology Control via Contextual Modulation", ICML 2023, PMLR
+202:38286-38300, arXiv:2302.11070); the ``physics_mask_ratio`` ends are BERT's 15%
+(Devlin et al., NAACL 2019, DOI 10.18653/v1/N19-1423) and MAE's 75% (He et al., CVPR
+2022, arXiv:2111.06377); temperature sampling (``sampling_alpha``) is that of Lample &
+Conneau ("Cross-lingual Language Model Pretraining", arXiv:1901.07291).
 
 Runs are recorded in TensorBoard under ``<output_dir>/runs/``. Watch them with
 ``uv run tensorboard --logdir runs``, or turn this off with ``--report_to none``.

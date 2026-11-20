@@ -12,9 +12,10 @@ methods:
   of the feet. Each foot has a prior probability of being down from kinematics alone
   (height above the lowest foot and, when known, its speed; ``contact_probabilities``).
   Each subset has a likelihood from dynamics: the base wrench the motion needs
-  (floating-base RNEA) must be produced by pushing-only forces inside friction pyramids
-  at the subset's feet (flat feet: at their four sole corners), solved as a nonnegative
-  least-squares problem, and every chosen foot must carry at least ``min_load`` of the
+  (floating-base RNEA, ``model.dynamics``) must be produced by pushing-only forces inside
+  friction pyramids (the inscribed four-sided pyramid of the Coulomb cone) at the subset's
+  feet (flat feet: at their four sole corners), solved as a nonnegative least-squares
+  problem with FISTA, and every chosen foot must carry at least ``min_load`` of the
   weight (a foot that carries nothing is, for dynamics, a foot in the air; without this
   every foot would fit a flight phase). Without a base velocity, the feet of a subset must also move
   alike relative to the base, since feet standing still in the world all move with it
@@ -34,6 +35,26 @@ Go1 trot the low-confidence frames hold almost all wrong sets.
 sensors); ``scripts/evaluate_contact_detection.py`` reports both methods on real and
 simulated data. Related work: probabilistic contact estimation fusing kinematics and
 dynamics on legged robots (Camurri et al., IEEE RA-L 2017; Bledt et al., ICRA 2018).
+The subset search, the prior, the minimum load and the confidence are this repository's.
+
+References:
+    * RNEA: Luh, Walker & Paul, J. Dyn. Syst. Meas. Control 102(2):69-76, 1980, DOI
+      10.1115/1.3149599; Featherstone, Rigid Body Dynamics Algorithms, Springer 2008,
+      DOI 10.1007/978-1-4899-7560-7.
+    * Friction pyramid with edges ``n +- mu t`` and the wrench ``(f, p x f)`` of a contact
+      force: Lynch & Park, Modern Robotics, Cambridge University Press 2017, Sec. 12.2.1
+      (Fig. 12.18c), DOI 10.1017/9781316661239.
+    * FISTA: Beck & Teboulle, SIAM J. Imaging Sci. 2(1):183-202, 2009, DOI
+      10.1137/080716542. Power iteration: von Mises & Pollaczek-Geiringer, ZAMM
+      9(1):58-77, 1929, DOI 10.1002/zamm.19290090105. Tikhonov regularization:
+      Tikhonov, Dokl. Akad. Nauk SSSR 151(3):501-504, 1963.
+    * Stance feet at rest in the world (legged odometry): Bloesch, Hutter, Hoepflinger,
+      Leutenegger, Gehring, Remy & Siegwart, RSS 2012, DOI 10.15607/RSS.2012.VIII.003.
+    * Contact estimation: Camurri et al., IEEE RA-L 2(2):1023-1030, 2017, DOI
+      10.1109/LRA.2017.2652491; Bledt, Wensing, Ingersoll & Kim, ICRA 2018, pp.
+      4399-4406, DOI 10.1109/ICRA.2018.8460904.
+    * The Go1 trot figures are from the MIPO data (``Open-IO/mipo-go1-odometry``,
+      AGPL-3.0; see ``docs/data.md#references``).
 """
 
 from __future__ import annotations
@@ -115,6 +136,9 @@ def _nonnegative_least_squares(
     gram: torch.Tensor, linear: torch.Tensor, mask: torch.Tensor, iterations: int, damping: float
 ) -> torch.Tensor:
     """Minimize ``x^T H x / 2 - b^T x`` over ``x >= 0`` with masked entries at zero (FISTA).
+
+    Projected FISTA (Beck & Teboulle 2009, see the module references) with the step
+    ``1 / L`` and ``L`` from power iteration; the damping is a Tikhonov term.
 
     Args:
         gram (torch.Tensor): ``[T, n, n]`` positive semidefinite ``H``.

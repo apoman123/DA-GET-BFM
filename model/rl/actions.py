@@ -2,7 +2,10 @@
 
 The actor outputs normalized actions in [-1, 1]. ``ActionMap`` turns them into PD position
 targets the way BFM-Zero does (``nominal + action_scale * action``, clipped to the joint
-limits) and then, by default, moves each target so that the effort the drive's PD law
+limits; ``_compute_torques`` of ``humanoidverse/envs/legged_base_task/legged_robot_base.py``
+in https://github.com/LeCAR-Lab/BFM-Zero, the convention of legged_gym's
+``LeggedRobot._compute_torques``, Rudin et al., CoRL 2021, PMLR 164:91-100,
+arXiv:2109.11978) and then, by default, moves each target so that the effort the drive's PD law
 requests at the current state stays inside the actuator's torque-speed envelope
 ``tau^max(qd)`` (``model.physics.envelope_targets``). The training environments and the
 deployed robot call the same code, so the policy is trained on exactly the targets the

@@ -58,6 +58,21 @@ Torque labels come only from simulators (weight 1) and, if enabled, from torque
 sensors (``measured_torque_weight``). Nothing is estimated. Every frame, of every
 dataset, also trains the response tasks R and R^-1 on a torque change drawn by the
 collator, whose labels ``G(q) delta_tau`` are exact for the model.
+
+References:
+    * Observation tokens ``o_vl``, ``o_vg``, ``o_fl`` with an ``H``-step history:
+      GET-Zero, Patel & Song, ICRA 2025, pp. 14262-14269, Sec. III, DOI
+      10.1109/ICRA55743.2025.11127922, arXiv:2407.15002.
+    * Froude units (``dimensionless_inputs``, physics normalization of the effect):
+      dynamic similarity, Alexander & Jayes, J. Zool. 201(1):135-152, 1983, DOI
+      10.1111/j.1469-7998.1983.tb04266.x.
+    * ``spec_noise`` randomizes the given specification in the manner of dynamics
+      randomization (Peng, Andrychowicz, Zaremba & Abbeel, ICRA 2018, DOI
+      10.1109/ICRA.2018.8460528); the ``sysid_*`` deviation labels resemble the
+      extrinsics that RMA estimates from history (Kumar, Fu, Pathak & Malik, RSS 2021,
+      DOI 10.15607/RSS.2021.XVII.011).
+    * ``STANDARD_GRAVITY`` (9.80665 m/s^2) is the CODATA standard acceleration of gravity.
+    * Datasets: ``docs/data.md#references``; the config keys: ``docs/training.md``.
 """
 
 from __future__ import annotations
@@ -546,7 +561,7 @@ class CollatorSettings:
     Attributes:
         measured_torque_weight (float): Loss weight of FD and ID labels from torque
             sensors. 0 (default) keeps them out of training: real torque sensors
-            (Unitree's motor-current estimate, for example) are themselves
+            (Unitree's estimated output torque ``tauEst``, for example) are themselves
             approximate. Simulated torques always have weight 1.
         max_contact_residual (float): Drop response labels of frames whose detected
             contacts leave more than this fraction of the robot's weight in the base
@@ -840,7 +855,7 @@ class PhysicsDataCollator:
         effect_scale_rows = effect_scales[index]
 
         # Response tasks: a fresh torque change per state, and its exact effect G dtau.
-        weight = torch.tensor([graph.total_mass * 9.80665 for graph in graphs])
+        weight = torch.tensor([graph.total_mass * 9.80665 for graph in graphs])  # standard gravity (CODATA)
         residual = flags("contact_residual")
         trusted = ~flags("contacts_detected") | (residual <= settings.max_contact_residual * weight)
         response_rows = flags("response_valid") & trusted

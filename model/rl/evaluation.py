@@ -1,7 +1,20 @@
 """Evaluation of the cross-embodiment FB-CPR agent and the motion priorities it produces.
 
 Tracking errors follow BFM-Zero: a motion's priority is an exponential function of the earth
-mover's distance (EMD) between the joint positions of a rollout and of the motion.
+mover's distance (EMD) between the joint positions of a rollout and of the motion
+(``emd_numpy`` in ``humanoidverse/agents/evaluations/humanoidverse_isaac.py`` and the
+``prioritization_mode="exp"`` branch of ``humanoidverse/train.py`` in
+https://github.com/LeCAR-Lab/BFM-Zero, CC BY-NC 4.0; BFM-Zero computes the EMD with POT's
+``ot.emd2``, Flamary et al., JMLR 22(78):1-8, 2021).
+
+References: the EMD (Rubner, Tomasi & Guibas, IJCV 40:99-121, 2000, DOI
+10.1023/A:1026543900054); its reduction to an assignment for equal uniform weights
+(Peyré & Cuturi, "Computational Optimal Transport", arXiv:1803.00567, Prop. 2.1, via
+Birkhoff's theorem; Found. Trends Mach. Learn. 11:355-607, 2019, DOI
+10.1561/2200000073); the
+assignment solver, SciPy's ``linear_sum_assignment`` (Crouse, IEEE Trans. Aerosp.
+Electron. Syst. 52:1679-1696, 2016, DOI 10.1109/TAES.2016.140952; Virtanen et al.,
+Nature Methods 17:261-272, 2020, DOI 10.1038/s41592-019-0686-2).
 """
 
 from __future__ import annotations
@@ -14,7 +27,9 @@ from scipy.optimize import linear_sum_assignment
 def earth_movers_distance(rollout: np.ndarray, target: np.ndarray) -> float:
     """Return the EMD between equally weighted frame sets ``[T, J]`` of the same length.
 
-    With equal weights and sizes, optimal transport reduces to an assignment (Birkhoff's theorem).
+    With equal weights and sizes, optimal transport reduces to an assignment (Birkhoff's
+    theorem; Peyré & Cuturi 2019, Prop. 2.1). BFM-Zero solves the same problem with
+    ``ot.emd2`` and a Euclidean cost.
     """
     if rollout.shape != target.shape:
         raise ValueError("rollout and target must have the same shape")
@@ -24,7 +39,11 @@ def earth_movers_distance(rollout: np.ndarray, target: np.ndarray) -> float:
 
 
 def motion_priorities(emd: np.ndarray, minimum: float = 0.5, maximum: float = 2.0, scale: float = 2.0) -> np.ndarray:
-    """Return BFM-Zero's sampling weights: ``2 ** (scale * clip(EMD, minimum, maximum))``."""
+    """Return BFM-Zero's sampling weights: ``2 ** (scale * clip(EMD, minimum, maximum))``.
+
+    Defaults are BFM-Zero's ``prioritization_min_val``, ``prioritization_max_val`` and
+    ``prioritization_scale`` (``humanoidverse/train.py``).
+    """
     return 2.0 ** (scale * np.clip(emd, minimum, maximum))
 
 

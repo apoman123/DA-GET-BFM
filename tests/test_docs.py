@@ -5,7 +5,7 @@ import unittest
 from pathlib import Path
 
 ROOT = Path(__file__).resolve().parents[1]
-DOCUMENTS = [ROOT / "README.md", ROOT / "model" / "README.md", *sorted((ROOT / "docs").glob("*.md"))]
+DOCUMENTS = [ROOT / "README.md", ROOT / "THIRD_PARTY_NOTICES.md", ROOT / "model" / "README.md", *sorted((ROOT / "docs").glob("*.md"))]
 LINK = re.compile(r"\[(?:[^\]\[]|\[[^\]]*\])*\]\(([^)\s]+)\)")
 
 

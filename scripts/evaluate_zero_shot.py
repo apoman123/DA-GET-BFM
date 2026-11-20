@@ -5,15 +5,18 @@ repository's own BFM evaluation (``model.rl.evaluation.evaluate``: tracking MPJP
 EMD, the fallen fraction during tracking, goal MPJPE, and the getting-up rate of
 floating robots), then aggregates every metric over robots:
 
-* the interquartile mean (IQM) over robots and seeds (Agarwal et al., NeurIPS 2021,
-  arXiv:2108.13264);
-* a percentile bootstrap interval with the robot as the unit (robots drawn with
-  replacement, then each robot's seeds; rliable's ``task_bootstrap=True``), with
-  rliable's defaults of 50000 replicates and 95%;
+* the interquartile mean (IQM) over robots and seeds (Agarwal, Schwarzer, Castro,
+  Courville and Bellemare, NeurIPS 2021, arXiv:2108.13264);
+* a percentile bootstrap interval (Efron, Ann. Statist. 7(1):1-26, 1979, DOI
+  10.1214/aos/1176344552) with the robot as the unit (robots drawn with replacement,
+  then each robot's seeds; rliable's ``task_bootstrap=True``,
+  https://github.com/google-research/rliable, Apache-2.0), with rliable's defaults of
+  50000 replicates and 95%;
 * the gap ``Lk - L0`` of every level, with its interval.
 
-Runs are seeds: pass ``--checkpoint`` once per BFM training run (Henderson et al., AAAI
-2018, DOI 10.1609/aaai.v32i1.11694: results vary across seeds). Each run directory holds
+Runs are seeds: pass ``--checkpoint`` once per BFM training run (Henderson, Islam,
+Bachman, Pineau, Precup and Meger, AAAI 2018, DOI 10.1609/aaai.v32i1.11694: results
+vary across seeds). Each run directory holds
 ``checkpoint.pt`` and ``encoder/`` as written by ``scripts/train_bfm.py``.
 
 Robots of a level come from a data config of that level (``--level-data-config
@@ -40,9 +43,11 @@ What is not supported (reported, not faked):
 * Robots without expert motions (every generated L1–L3 robot, and Go2 and Talos until
   motions are retargeted to them) cannot be evaluated: all three tasks start from, or
   are prompted by, a motion of the robot itself.
-* MPJPE and EMD are sums over joints (``||q - q_ref||`` per frame, BFM-Zero's
-  definition), so they grow with the joint count; IQMs across robots with different
-  joint counts mix scales.
+* MPJPE and EMD are Euclidean norms over all joints (``||q - q_ref||_2`` per frame,
+  averaged over frames: BFM-Zero's ``E_mpjpe``, Li et al., ICLR 2026, arXiv:2511.04131,
+  Appendix C; the EMD of Rubner, Tomasi and Guibas, IJCV 40(2):99-121, 2000, DOI
+  10.1023/A:1026543900054, as BFM-Zero uses it), so they grow with the joint count;
+  IQMs across robots with different joint counts mix scales.
 """
 
 from __future__ import annotations

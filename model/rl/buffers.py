@@ -1,4 +1,10 @@
-"""Per-robot replay and expert-motion buffers of the cross-embodiment FB-CPR agent."""
+"""Per-robot replay and expert-motion buffers of the cross-embodiment FB-CPR agent.
+
+As in BFM-Zero (https://github.com/LeCAR-Lab/BFM-Zero, ``humanoidverse/train.py``; CC BY-NC
+4.0), expert motions are split into 10 s chunks (its training data
+``lafan_29dof_10s-clipped.pkl``) and sampled with per-motion priorities (its
+``expert_slicer.update_priorities``). The buffers themselves are written for this repo.
+"""
 
 from __future__ import annotations
 
@@ -7,7 +13,7 @@ import torch
 from model.rl.observation import EmbodimentObserver, Observation, RobotState, StateView, trajectory_state
 from model.training.episodes import Trajectory
 
-CHUNK_SECONDS = 10.0  # BFM-Zero splits motions into 10 s chunks.
+CHUNK_SECONDS = 10.0  # BFM-Zero splits motions into 10 s chunks (``humanoidverse/train.py``).
 
 
 def rotation_from_gravity(direction: torch.Tensor) -> torch.Tensor:

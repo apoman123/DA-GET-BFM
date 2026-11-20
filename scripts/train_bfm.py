@@ -1,7 +1,10 @@
 """Train the cross-embodiment behavior foundation model with online off-policy FB-CPR.
 
 Each robot in the data config has expert motions and its own simulated worlds; defaults
-follow BFM-Zero. On a machine with an NVIDIA GPU and Isaac Lab 3::
+follow BFM-Zero (Li et al., ICLR 2026, arXiv:2511.04131; ``humanoidverse/train.py`` of
+https://github.com/LeCAR-Lab/BFM-Zero, CC BY-NC 4.0), which trains FB-CPR (Tirinzoni et
+al., ICLR 2025, arXiv:2504.11054). On a machine with an NVIDIA GPU and Isaac Lab 3 (Mittal
+et al., arXiv:2511.04831, 2025)::
 
     python scripts/train_bfm.py --data_config configs/rl/go1_h1_ground.json \\
         --encoder_checkpoint runs/encoder --output_dir runs/bfm --headless
@@ -118,7 +121,7 @@ def main(argv: list[str] | None = None) -> None:
         run, model, agent = split_settings(vars(arguments))
         import isaaclab.sim as sim_utils
 
-        physics_dt = 0.005
+        physics_dt = 0.005  # 200 Hz, as BFM-Zero (config/simulator/isaacsim.yaml) and legged_gym
         sim_cfg = sim_utils.SimulationCfg(dt=physics_dt, device=run.device)
         with launch_simulation(sim_cfg, arguments):
             train(run, model, agent, sim_utils.SimulationContext(sim_cfg))

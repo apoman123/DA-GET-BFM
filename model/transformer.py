@@ -1,4 +1,22 @@
-"""Reusable blocks for numerical token sequences and Transformer attention."""
+"""Reusable blocks for numerical token sequences and Transformer attention.
+
+References:
+
+* Multi-head scaled dot-product attention and the sinusoidal position encoding
+  ``sin/cos(pos / 10000^(2i/d))``: Vaswani et al., "Attention Is All You Need",
+  NeurIPS 2017, arXiv:1706.03762.
+* Pre-normalization (LayerNorm before attention, inside the residual branch): Xiong et
+  al., "On Layer Normalization in the Transformer Architecture", ICML 2020, PMLR
+  119:10524-10533, arXiv:2002.04745. GET-Zero's encoder also uses pre-norm
+  (``norm_first=True`` in https://github.com/real-stanford/get_zero).
+* Layer normalization: Ba, Kiros & Hinton, "Layer Normalization", arXiv:1607.06450,
+  2016.
+* GELU: Hendrycks & Gimpel, "Gaussian Error Linear Units (GELUs)", arXiv:1606.08415,
+  2016.
+
+The attention itself is PyTorch's ``nn.MultiheadAttention``; no code is copied from
+another repository.
+"""
 
 from __future__ import annotations
 

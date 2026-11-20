@@ -1,6 +1,7 @@
 """Trajectory sources: domain-randomized simulation and recorded datasets.
 
-Two source types are supported in the data config (see ``model.training.dataset``).
+Four source types are supported in the data config (see ``model.training.dataset``);
+two are described here.
 
 ``"synthetic"``
     Simulates a URDF robot with the analytic dynamics of ``model.dynamics``.
@@ -27,8 +28,31 @@ Two source types are supported in the data config (see ``model.training.dataset`
     joints; joints the dataset does not record are frozen. Optional base
     columns (orientation, position, twist, projected gravity) and contact
     columns support floating-base robots. Missing velocities and accelerations
-    are finite-differenced, and missing torques are estimated by inverse
-    dynamics (floating base with contact forces when the base is floating).
+    are finite-differenced. Missing torques are not estimated: such episodes have
+    no torque labels (``model.training.episodes``).
+
+``"mujoco"`` and ``"procedural"`` sources are in ``model.training.ground_sim`` and
+``model.training.procedural``.
+
+References:
+    * Dynamics randomization (``DEFAULT_RANDOMIZATION``): Peng, Andrychowicz, Zaremba &
+      Abbeel, "Sim-to-Real Transfer of Robotic Control with Dynamics Randomization",
+      ICRA 2018, pp. 3803-3810, DOI 10.1109/ICRA.2018.8460528. The ranges are this
+      repository's choices, not values from the paper.
+    * PD control with gravity compensation (``_pd_command``): Takegaki & Arimoto, J. Dyn.
+      Syst. Meas. Control 103(2):119-125, 1981, DOI 10.1115/1.3139651.
+    * Geometric multirotor controller (``_FlightController``: thrust ``f . R e_3``,
+      desired axes from the force and a heading, attitude error
+      ``(R_d^T R - R^T R_d)^vee / 2``): Lee, Leok & McClamroch, "Geometric tracking
+      control of a quadrotor UAV on SE(3)", CDC 2010, pp. 5420-5425, DOI
+      10.1109/CDC.2010.5717652 (also arXiv:1003.2005). Rotor thrust ``k_f w^2`` and drag
+      torque ``k_m w^2``: Mahony, Kumar & Corke, IEEE Robot. Autom. Mag. 19(3):20-32,
+      2012, DOI 10.1109/MRA.2012.2206474. The gains, the mixer by pseudo-inverse and
+      the yaw-last allocation are this repository's.
+    * Recorded data: Hugging Face ``datasets`` (Lhoest et al., EMNLP 2021 System
+      Demonstrations, pp. 175-184, DOI 10.18653/v1/2021.emnlp-demo.21) and the LeRobot
+      layout (https://github.com/huggingface/lerobot); datasets are cited in
+      ``docs/data.md#references``.
 """
 
 from __future__ import annotations
@@ -333,7 +357,7 @@ def effective_joint_inertia(graph: EmbodimentGraph, positions: torch.Tensor) -> 
 
 
 def _pd_command(graph, q, qd, target, limited, omega, zeta, noise, gravity, generator, floating=False):
-    """PD toward targets, scaled by each joint's inertia, with gravity feed-forward."""
+    """PD toward targets, scaled by each joint's inertia, with gravity feed-forward (Takegaki & Arimoto 1981)."""
     error = target - q
     if not bool(limited.all()):
         error = torch.where(limited, error, torch.remainder(error + math.pi, 2 * math.pi) - math.pi)
@@ -540,7 +564,7 @@ def _simulate_floating(embodiment, record, settings, generator) -> list[Trajecto
 
 
 class _FlightController:
-    """Geometric multirotor controller that tracks random waypoints.
+    """Geometric multirotor controller that tracks random waypoints (Lee, Leok & McClamroch 2010).
 
     Desired thrust and body moments come from position and attitude PD laws.
     They are mapped to rotor speeds through the mixing matrix of the actual

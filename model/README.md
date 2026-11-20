@@ -73,16 +73,17 @@ T_j = [o_vg^{t-H+1..t}, o_fg, o_vl,j^{t-H+1..t}, o_fl,j]
 | `o_fl,j` | fixed per-joint hardware properties from URDF | joint origin and rotation relative to the parent joint |
 
 History is flattened feature-major, as in the GET-Zero code. The encoder applies a
-layer norm over each raw token and then a learned linear embedding, as in the
-paper. `DaGetConfig.da_get_zero` gives the paper's architecture: 8 layers, 16 heads,
-width 512, feed-forward 1024, dropout 0.1.
+layer norm over each raw token (as the GET-Zero code does) and then a learned linear
+embedding (as in the paper). `DaGetConfig.da_get_zero` gives the architecture of
+GET-Zero's released model configuration (`get_zero/distill/cfg/model/Base.yaml`; the
+paper does not list it): 8 layers, 16 heads, width 512, feed-forward 1024, dropout 0.1.
 
 `JointFeatureConfig()` matches the paper (6 features). Robots in the paper share
 joint axes, so axes were not needed. Across humanoids, quadrupeds, and hands they
 differ, so `JointFeatureConfig.cross_embodiment()` adds the axis, joint type,
 limits, effort and velocity limits, damping and friction, and the mass, center
 of mass, and inertia of the body each joint moves. It also uses the continuous
-6D rotation representation (31 features).
+6D rotation representation of Zhou et al. (CVPR 2019) (31 features).
 
 ## Embodiment graph from URDF
 
@@ -106,7 +107,8 @@ robotics dependencies). Expand xacro files first.
 * **Joint order** defaults to depth-first URDF order, the order MuJoCo and
   Pinocchio use. Pass `joint_order=[...]` to match your simulator.
 
-On all 633 LEAP Hand variants that ship with GET-Zero, the graph's edges match
+On all 633 LEAP Hand (Shaw, Agarwal & Pathak, RSS 2023) variants that ship with
+GET-Zero, the graph's edges match
 the reference implementation's adjacency matrix exactly. The joint
 origin/rotation features match the URDF to float32 precision.
 
@@ -136,7 +138,8 @@ A[i, j] = q_i k_j / sqrt(d) + spatial[SPD(i, j)] + parent[P(i, j)] + child[C(i, 
 descendant steps and are zero for unrelated pairs. Unreachable pairs, and
 distances above `max_graph_distance`, share an overflow bucket. That bucket does
 not depend on how far a batch is padded. The spatial and parent/child terms are
-from GET-Zero. The mass term is an addition in this repository. It is computed
+from GET-Zero; its spatial term follows Graphormer's spatial encoding (Ying et al.,
+NeurIPS 2021). The mass term is an addition in this repository. It is computed
 at every step from `M(q)`, so it changes with the configuration. Turn it off with
 `use_mass_encoding=False`.
 
@@ -178,7 +181,8 @@ The modules:
   and update tiers.
 * `model/physics.py`: feature extraction, plus `PhysicsFeatureCache` for tiered
   recomputation at control time.
-* `model/dynamics.py`: RNEA for fixed and floating bases (with rotor inertia),
+* `model/dynamics.py`: RNEA (Luh, Walker & Paul 1980; Featherstone 2008) for fixed
+  and floating bases (with rotor inertia),
   the floating-base mass matrix and forward dynamics, contact maps and the
   contact Jacobian, the contact-constrained response `constrained_response`,
   contact-force distribution, rotor thrust, and `estimate_joint_efforts`
@@ -216,3 +220,41 @@ and the recommended datasets.
 
 `scripts/make_data_config.py` and `scripts/convert_dataset.py` are the command
 lines; the repository README documents them.
+
+## References
+
+Each module's docstring cites the sources it uses. The ones this page relies on:
+
+- Austin Patel and Shuran Song. *GET-Zero: Graph Embodiment Transformer for Zero-shot
+  Embodiment Generalization.* ICRA 2025, pp. 14262-14269.
+  [DOI 10.1109/ICRA55743.2025.11127922](https://doi.org/10.1109/ICRA55743.2025.11127922),
+  [arXiv:2407.15002](https://arxiv.org/abs/2407.15002),
+  [project page](https://get-zero-paper.github.io/),
+  [code](https://github.com/real-stanford/get_zero) (no license file; no code is copied
+  here).
+- Chengxuan Ying, Tianle Cai, Shengjie Luo, Shuxin Zheng, Guolin Ke, Di He, Yanming
+  Shen, and Tie-Yan Liu. *Do Transformers Really Perform Badly for Graph
+  Representation?* NeurIPS 2021. [arXiv:2106.05234](https://arxiv.org/abs/2106.05234).
+- Ashish Vaswani, Noam Shazeer, Niki Parmar, Jakob Uszkoreit, Llion Jones, Aidan N.
+  Gomez, Łukasz Kaiser, and Illia Polosukhin. *Attention Is All You Need.* NeurIPS
+  2017. [arXiv:1706.03762](https://arxiv.org/abs/1706.03762).
+- Yi Zhou, Connelly Barnes, Jingwan Lu, Jimei Yang, and Hao Li. *On the Continuity of
+  Rotation Representations in Neural Networks.* CVPR 2019, pp. 5738-5746.
+  [DOI 10.1109/CVPR.2019.00589](https://doi.org/10.1109/CVPR.2019.00589).
+- Kenneth Shaw, Ananye Agarwal, and Deepak Pathak. *LEAP Hand: Low-Cost, Efficient,
+  and Anthropomorphic Hand for Robot Learning.* RSS 2023.
+  [DOI 10.15607/RSS.2023.XIX.089](https://doi.org/10.15607/RSS.2023.XIX.089).
+- J. Y. S. Luh, M. W. Walker, and R. P. C. Paul. *On-Line Computational Scheme for
+  Mechanical Manipulators.* J. Dyn. Syst. Meas. Control 102(2):69-76, 1980.
+  [DOI 10.1115/1.3149599](https://doi.org/10.1115/1.3149599).
+- Roy Featherstone. *Rigid Body Dynamics Algorithms.* Springer, 2008.
+  [DOI 10.1007/978-1-4899-7560-7](https://doi.org/10.1007/978-1-4899-7560-7).
+- Emanuel Todorov, Tom Erez, and Yuval Tassa. *MuJoCo: A Physics Engine for
+  Model-Based Control.* IROS 2012, pp. 5026-5033.
+  [DOI 10.1109/IROS.2012.6386109](https://doi.org/10.1109/IROS.2012.6386109).
+- Justin Carpentier, Guilhem Saurel, Gabriele Buondonno, Joseph Mirabel, Florent
+  Lamiraux, Olivier Stasse, and Nicolas Mansard. *The Pinocchio C++ library: A fast
+  and flexible implementation of rigid body dynamics algorithms and their analytical
+  derivatives.* IEEE/SICE SII 2019, pp. 614-619.
+  [DOI 10.1109/SII.2019.8700380](https://doi.org/10.1109/SII.2019.8700380).
+- ROS URDF XML specification (Open Robotics): <http://wiki.ros.org/urdf/XML>.

@@ -5,7 +5,13 @@ whether feet are flat, which joints are end effectors, and, for multirotors,
 which joints are rotors and plausible propeller coefficients. From a dataset
 (a Hub repo id or a converted folder) it matches columns to URDF joints and
 finds base pose, twist, gravity, IMU, and contact columns. It prints what it
-decided and why; check the report and edit the JSON where needed.
+decided and why; check the report and edit the JSON where needed. The propeller
+coefficients (``--thrust_to_weight``, ``--drag_ratio``) and position gains come from
+rules of thumb in ``model/robot_analysis.py``, which cites no source for them.
+
+The example dataset is Unitree's ``unitreerobotics/G1_WBT_Inspire_Pick_Up_Fruit``
+(https://huggingface.co/datasets/unitreerobotics/G1_WBT_Inspire_Pick_Up_Fruit,
+Apache-2.0); datasets and robot models are cited in ``docs/data.md#references``.
 
 Examples::
 

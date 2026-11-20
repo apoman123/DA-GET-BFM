@@ -5,12 +5,15 @@ A robot is mirror-symmetric when reflecting it through its sagittal (x-z) plane,
 exchanged. Its states then come in mirror pairs: if a motion is possible, so is its
 reflection. Mittal, Rudin, Klemm, Allshire and Hutter ("Symmetry Considerations for
 Learning Task Symmetric Robot Policies", ICRA 2024, pp. 7433-7439,
-DOI 10.1109/ICRA57147.2024.10611493) use this to augment training data with
-mirrored samples. Ordonez-Apraez, Turrisi, Kostic, Martin, Agudo, Moreno-Noguer,
-Pontil, Semini and Mastalli ("Morphological Symmetries in Robotics", IJRR
-44(10-11):1743-1766, 2025, DOI 10.1177/02783649241282422) show that such
-morphological symmetries act on joint space as signed permutations and that the
-dynamics are equivariant under them.
+DOI 10.1109/ICRA57147.2024.10611493, arXiv:2403.04359) use this to augment training
+data with mirrored samples ("augmenting the collected trajectories with their
+symmetrical copies", their Sec. III-B). Ordoñez-Apraez, Turrisi, Kostic, Martin, Agudo,
+Moreno-Noguer, Pontil, Semini and Mastalli ("Morphological Symmetries in Robotics",
+IJRR 44(10-11):1743-1766, 2025, DOI 10.1177/02783649241282422, arXiv:2402.15552) show
+that such morphological symmetries act on joint space as signed permutations (a
+permutation of the roles of identical branches and diagonal matrices of 1 and -1 for
+revolute and prismatic joints, their Sec. 5.3.1) and that the equations of motion are
+equivariant under them (their Proposition 1).
 
 ``mirror_map`` finds the reflection from geometry alone, with no name heuristics:
 

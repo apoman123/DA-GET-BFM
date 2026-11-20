@@ -12,6 +12,15 @@ Each robot state gives two per-DoF views, matching BFM-Zero's asymmetric inputs:
   and repeats the base state (gravity direction, angular velocity, linear velocity /
   size, height / size). It has no history, action or noise, because motion data has none:
   otherwise D could spot simulated states by those signals alone.
+
+BFM-Zero's split is the ``input_filter`` keys of ``humanoidverse/train.py`` (actor:
+``state``, ``last_action``, ``history_actor``; F and critics also ``privileged_state``) and
+the observation terms and noise of ``humanoidverse/config/obs/bfm_zero_obs.yaml``
+(https://github.com/LeCAR-Lab/BFM-Zero, CC BY-NC 4.0). Privileged critics with a
+partially observed actor are the asymmetric actor-critic of Pinto et al.
+(RSS 2018, DOI 10.15607/RSS.2018.XIV.008). The Froude scaling
+of ``dimensionless_inputs`` follows Alexander & Jayes (J. Zool. 201:135-152, 1983, DOI
+10.1111/j.1469-7998.1983.tb04266.x).
 """
 
 from __future__ import annotations

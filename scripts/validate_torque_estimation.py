@@ -1,11 +1,16 @@
 """Check inverse-dynamics torque estimates against measured joint torques.
 
 Uses the MIPO Unitree Go1 recordings (``Open-IO/mipo-go1-odometry`` on the
-Hugging Face Hub, AGPL-3.0, from Cerberus2.0). They have 400 Hz joint
-positions, velocities, and measured torques (Unitree's current-based
-estimate), a body IMU, and foot-force sensors. The script estimates the
-torques from kinematics alone with ``estimate_episode_efforts`` and compares
-them with the measured torques.
+Hugging Face Hub, card license AGPL-3.0). The recordings are from Cerberus 2.0
+(https://github.com/ShuoYangRobotics/Cerberus2.0, AGPL-3.0) and the paper Yang,
+Zhang, Bokser & Manchester, "Multi-IMU Proprioceptive Odometry for Legged Robots",
+IROS 2023, pp. 774-779, DOI 10.1109/IROS55552.2023.10342061. They have about 400 Hz
+joint positions, velocities, and measured torques (from the Unitree SDK; the card
+does not say how Unitree computes them), a body IMU, and foot-force sensors. The
+script estimates the torques from kinematics alone with ``estimate_episode_efforts``
+(floating-base inverse dynamics, ``model.dynamics``; RNEA of Luh, Walker & Paul 1980
+and Featherstone 2008, see ``model/training/contacts.py``) and compares them with the
+measured torques.
 
 This is the measurement behind the design decision that training never uses
 estimated torques (``docs/dynamics.md``): the estimate is 43-97% off. Run it on

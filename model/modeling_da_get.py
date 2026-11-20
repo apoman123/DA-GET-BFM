@@ -18,7 +18,32 @@ Options added by the zero-shot proposal (``docs/zero_shot.md``):
   Morphology Control via Contextual Modulation", ICML 2023, PMLR 202:38286-38300):
   a morphology-only attention bias per layer and a hypernetwork correction of the
   input projection, both from each joint's static physics tokens (D4);
-* learned mask embeddings for masked physics modeling (E3).
+* learned mask embeddings for masked physics modeling (E3), like BERT's ``[MASK]``
+  token (Devlin et al., NAACL 2019, DOI 10.18653/v1/N19-1423) and MAE's shared, learned
+  mask token (He et al., CVPR 2022, DOI 10.1109/CVPR52688.2022.01553).
+
+References:
+
+* GET-Zero (Patel & Song, ICRA 2025, DOI 10.1109/ICRA55743.2025.11127922,
+  arXiv:2407.15002): the one-token-per-joint encoder,
+  the input LayerNorm and linear embedding, and the structural attention bias, a
+  learned scalar per head for the undirected shortest-path distance (GET-Zero follows
+  Graphormer's spatial encoding here: Ying et al., "Do Transformers Really Perform
+  Badly for Graph Representation?", NeurIPS 2021, arXiv:2106.05234) plus GET-Zero's
+  directed parent and child distance tables. The bias tables follow the design of
+  GET-Zero's ``SpatialEncodingTransformerEncoderLayer``
+  (``get_zero/distill/models/embodiment_attention.py`` in
+  https://github.com/real-stanford/get_zero, commit 279652d, no license file); they are
+  reimplemented here, no code is copied. The mass-matrix bias and Physics Cross
+  Attention are new in this repository.
+* ``graph_distances`` computes all-pairs shortest paths with the Floyd-Warshall
+  recursion (Floyd, Commun. ACM 5(6):345, 1962, DOI 10.1145/367766.368168; Warshall,
+  J. ACM 9(1):11-12, 1962, DOI 10.1145/321105.321107).
+* Attention, pre-norm and GELU: see ``model.transformer``. The asinh feature scaling
+  is the inverse hyperbolic sine transformation (Burbidge, Magee & Robb, J. Am. Stat.
+  Assoc. 83(401):123-127, 1988, DOI 10.1080/01621459.1988.10478575).
+* Contextual modulation: ModuMorph (above) and hypernetworks (Ha, Dai & Le, ICLR 2017,
+  arXiv:1609.09106).
 """
 
 from __future__ import annotations
@@ -79,6 +104,9 @@ def graph_distances(
     adjacency_matrix: torch.Tensor | None = None,
 ) -> tuple[torch.Tensor, torch.Tensor, torch.Tensor]:
     """Compute undirected shortest paths and directed ancestry distances.
+
+    The shortest paths use the Floyd-Warshall recursion (Floyd 1962; Warshall 1962); the
+    ancestor and descendant distances are GET-Zero's parent and child matrices.
 
     Args:
         parent_indices (torch.Tensor): Integer ``[batch, joints]`` direct parent
@@ -197,7 +225,8 @@ def _spatial_buckets(spatial_distances: torch.Tensor, max_graph_distance: int) -
 class PhysicsFeatureTokenizer(nn.Module):
     """Embed one group of raw physics features into one token per joint.
 
-    Each feature is first mapped to ``asinh(x / s)`` with the scale ``s`` from
+    Each feature is first mapped to ``asinh(x / s)`` (the inverse hyperbolic sine
+    transformation, Burbidge, Magee & Robb 1988) with the scale ``s`` from
     ``model.physics_schema`` (pass-through features keep their value), so
     quantities spanning orders of magnitude across robots stay well conditioned.
     A two-layer MLP then maps the features to ``hidden_size``, and a learned
@@ -495,6 +524,10 @@ def normalize_mass_matrix(
 class DaGetGraphAttentionBias(nn.Module):
     """Learn per-head spatial, parent, child, and normalized mass logit biases.
 
+    The spatial, parent and child tables are GET-Zero's structural bias (Patel & Song,
+    ICRA 2025; the spatial table follows Graphormer, Ying et al., NeurIPS 2021); the
+    mass term is this repository's.
+
     Attributes:
         config (DaGetConfig): Encoder configuration controlling enabled biases.
         spatial_embedding (nn.Embedding | None): Undirected distance table.
@@ -603,8 +636,9 @@ class DaGetMorphologyModulation(nn.Module):
 
     Xiong, Beck & Whiteson (ICML 2023, PMLR 202:38286-38300) condition a universal
     morphology controller on per-limb morphology context in two ways: a hypernetwork
-    that generates the limb's input embedding, and "fixed attention" whose weights
-    depend on the morphology context only. Here both are additive to the GET encoder,
+    (Ha, Dai & Le, ICLR 2017) that generates the limb's input embedding (and decoder)
+    weights, and "fixed attention" whose weights depend on the morphology context only.
+    Here both are additive to the GET encoder,
     so the option can be ablated against the GET structural bias (proposal D4):
 
     * ``attention_bias``: per layer and head, ``(W_q c_i) . (W_k c_j) / sqrt(d)``

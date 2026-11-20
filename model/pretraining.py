@@ -56,13 +56,38 @@ Options of the zero-shot proposal (``docs/zero_shot.md``), all off by default:
   ``G`` and the consistency loss ``G K G = G``.
 * ``acceleration_metric`` (A1): ``mass`` replaces the squared error of FD and R by
   the Gauss metric ``e^T M_tilde e`` with the normalized mass matrix
-  (Udwadia & Kalaba 1992).
+  (Udwadia & Kalaba, Proc. R. Soc. Lond. A, 1992).
 * ``effect_mode`` ``rollout`` (B1, [H]): adds ``effect_rollout``, the displacement
   and orientation of every joint frame after a differentiable one-step rollout of
   the interface's predicted accelerations through the analytic forward kinematics.
 * ``use_contact_head`` (C2), ``use_centroidal_head`` (C3), ``use_sysid_head`` (E1)
   and ``physics_mask_ratio`` (E3) add the contact, centroidal, system-identification
   and masked-physics-modeling losses.
+
+References:
+
+* The encoder and the graph self-attention of ``GraphActionMixer`` are the Graph
+  Embodiment Transformer of Patel & Song, "GET-Zero", ICRA 2025, arXiv:2407.15002.
+* Rotations: the continuous 6D representation (Zhou et al., CVPR 2019,
+  arXiv:1812.07035), the geodesic distance on SO(3) (Huynh, J. Math. Imaging Vis.
+  35:155-164, 2009, DOI 10.1007/s10851-009-0161-2) and Rodrigues' formula (Lynch &
+  Park, *Modern Robotics*, Cambridge University Press, 2017, Prop. 3.11, DOI
+  10.1017/9781316661239).
+* The margin loss is the Huber loss (Huber, Ann. Math. Statist. 35:73-101, 1964, DOI
+  10.1214/aoms/1177703732).
+* The mass metric is Gauss's principle in the form of Udwadia & Kalaba (Proc. R. Soc.
+  Lond. A 439:407-410, 1992, DOI 10.1098/rspa.1992.0158). The structured interface uses
+  the ``L L^T`` parameterization of Deep Lagrangian Networks (Lutter, Ritter & Peters,
+  ICLR 2019, arXiv:1907.04490), the manipulator equation (Featherstone, *Rigid Body
+  Dynamics Algorithms*, Springer, 2008, DOI 10.1007/978-1-4899-7560-7), the
+  control-affine latent model of Embed to Control (Watter et al., NIPS 2015,
+  arXiv:1506.07365) and the first Penrose condition of a generalized inverse (Penrose,
+  Proc. Cambridge Philos. Soc. 51:406-413, 1955, DOI 10.1017/S0305004100030401).
+* Masking ratios: BERT masks 15% of tokens (Devlin et al., NAACL 2019,
+  DOI 10.18653/v1/N19-1423), MAE 75% of patches (He et al., CVPR 2022,
+  arXiv:2111.06377).
+* ``PretrainedConfig`` and ``PreTrainedModel`` are Hugging Face Transformers' (Wolf et
+  al., EMNLP 2020 System Demonstrations, DOI 10.18653/v1/2020.emnlp-demos.6).
 """
 
 from __future__ import annotations
@@ -96,7 +121,7 @@ ALL_LOSS_NAMES = LOSS_NAMES + EXTRA_LOSS_NAMES
 HEAD_TYPES = ("mixer", "linear", "linear_residual")
 ACCELERATION_METRICS = ("euclidean", "mass")
 EFFECT_MODES = ("head", "rollout")
-GRAVITY = 9.80665
+GRAVITY = 9.80665  # standard gravity in m/s^2, exact (NIST CODATA, https://physics.nist.gov/cgi-bin/cuu/Value?gn)
 MOTOR_FLAG_COUNT = 2
 MOTOR_MARGIN_COUNT = 5
 ACTION_FEATURE_SIZE = 3
@@ -134,7 +159,8 @@ class DaGetPhysicsPretrainingConfig(PretrainedConfig):
         use_sysid_head (bool): Spec-deviation head (E1), trained by spec noise.
         physics_mask_ratio (float): Probability of masking each rigid-body and
             actuator token in training (E3); 0 turns masked modeling off. BERT
-            masks 15% and MAE 75% of tokens: the two ends of the ablation.
+            masks 15% of tokens (Devlin et al., NAACL 2019) and MAE 75% of patches
+            (He et al., CVPR 2022): the two ends of the ablation.
     """
 
     model_type = "da_get_physics"
@@ -272,7 +298,7 @@ def _mlp(input_size: int, hidden_size: int, output_size: int) -> nn.Sequential:
 
 
 def rotation_from_6d(values: torch.Tensor) -> torch.Tensor:
-    """Map the continuous 6D representation to a rotation matrix.
+    """Map the continuous 6D representation to a rotation matrix (Zhou et al., CVPR 2019).
 
     Args:
         values (torch.Tensor): ``[..., 6]``, two stacked column vectors.
@@ -288,7 +314,7 @@ def rotation_from_6d(values: torch.Tensor) -> torch.Tensor:
 
 
 def geodesic_distance(prediction: torch.Tensor, target: torch.Tensor) -> torch.Tensor:
-    """Return the SO(3) geodesic angle between rotations.
+    """Return the SO(3) geodesic angle between rotations (Huynh, J. Math. Imaging Vis., 2009).
 
     Args:
         prediction (torch.Tensor): ``[..., 3, 3]``.
@@ -433,10 +459,11 @@ class DaGetPhysicsInterface(nn.Module):
     embedding) and one row per joint (from that joint's embedding), as Deep
     Lagrangian Networks guarantee positive definiteness with ``L L^T`` (Lutter, Ritter
     & Peters, ICLR 2019, arXiv:1907.04490). The control-affine form ``y = f + G u`` is
-    the manipulator equation itself (Featherstone 2008) and the structure of Embed to
-    Control (Watter et al., NIPS 2015, arXiv:1506.07365). The inverse ``K_tilde`` is
-    parameterized the same way and trained toward a generalized inverse with
-    ``G K G = G`` (the first Moore-Penrose condition; Udwadia & Kalaba 1992).
+    the manipulator equation itself (Featherstone, *Rigid Body Dynamics Algorithms*,
+    2008) and the structure of Embed to Control (Watter et al., NIPS 2015,
+    arXiv:1506.07365). The inverse ``K_tilde`` is parameterized the same way and trained
+    toward a generalized inverse with ``G K G = G``, the first of Penrose's four
+    conditions (Penrose, Proc. Cambridge Philos. Soc., 1955).
 
     The reference torque ``a_j`` is the joint's peak torque (the robot's median
     peak for passive joints); the base rows use ``m g`` and ``m g L``. Every scale
@@ -1063,7 +1090,7 @@ class DaGetForPhysicsPretraining(PreTrainedModel):
 
 
 def _exp_so3(vector: torch.Tensor) -> torch.Tensor:
-    """Rodrigues' formula for a rotation vector ``[3]`` (differentiable)."""
+    """Rodrigues' formula for a rotation vector ``[3]`` (differentiable; Lynch & Park 2017, Prop. 3.11)."""
     angle = vector.norm().clamp_min(1e-12)
     axis = vector / angle
     zero = vector.new_zeros(())

@@ -24,6 +24,35 @@ modelled). For a fixed base, ``tau`` is the familiar
 ``M(q) qdd + c(q, qd) + g(q)``. ``estimate_joint_efforts`` handles floating
 bases with ground contact: it distributes ``W`` over the active contact points
 by least squares and removes the contact forces from the joint efforts.
+
+References:
+
+* ``recursive_newton_euler`` is the recursive Newton-Euler algorithm in its vector
+  (not spatial) form: Luh, Walker & Paul, J. Dyn. Syst. Meas. Control 102(2):69-76,
+  1980, DOI 10.1115/1.3149599; Featherstone, *Rigid Body Dynamics Algorithms*,
+  Springer 2008, DOI 10.1007/978-1-4899-7560-7, ch. 5 (inverse dynamics).
+* ``floating_mass_matrix`` builds ``M_full`` column by column from inverse dynamics with
+  zero velocity and unit accelerations, the approach of Walker & Orin, J. Dyn. Syst.
+  Meas. Control 104(3):205-211, 1982, DOI 10.1115/1.3139699.
+* ``constrained_response``: the acceleration under ideal holonomic constraints
+  (Udwadia & Kalaba, Proc. R. Soc. Lond. A 439(1906):407-410, 1992, DOI
+  10.1098/rspa.1992.0158; Featherstone 2008, ch. 8, closed loop systems).
+* Rotor inertia (``armature``) enters the joint-space inertia as MuJoCo's joint
+  ``armature`` does: the rotor inertia times the squared gear ratio (Todorov, Erez &
+  Tassa, IROS 2012, DOI 10.1109/IROS.2012.6386109,
+  https://mujoco.readthedocs.io/en/stable/XMLreference.html#body-joint-armature;
+  Wensing et al., IEEE T-RO 33(3):509-522, 2017, DOI 10.1109/TRO.2016.2640183).
+* ``rotor_wrenches``: thrust proportional to the squared rotor speed and a drag moment
+  proportional to the thrust, as in the motor model of RotorS (Furrer et al., in *Robot
+  Operating System (ROS): The Complete Reference (Volume 1)*, Springer 2016, pp.
+  595-625, DOI 10.1007/978-3-319-26054-9_23).
+* ``friction_efforts`` uses the URDF ``<dynamics>`` ``damping`` (viscous) and
+  ``friction`` (static) values (ROS URDF joint specification,
+  http://wiki.ros.org/urdf/XML/joint); the ``tanh`` smoothing is this repository's.
+* ``quaternion_to_matrix`` uses the Hamilton convention (Solà, "Quaternion kinematics
+  for the error-state Kalman filter", arXiv:1711.02508, 2017).
+* ``STANDARD_GRAVITY`` = 9.80665 m/s^2 is the conventional value of g_n (3rd CGPM
+  1901, Declaration 2, DOI 10.59161/CGPM1901DECL2E).
 """
 
 from __future__ import annotations
@@ -139,7 +168,8 @@ def recursive_newton_euler(
         velocities (torch.Tensor): ``[..., J]`` joint velocities.
         accelerations (torch.Tensor): ``[..., J]`` joint accelerations.
         gravity (torch.Tensor | None): ``[3]`` or ``[..., 3]`` gravity in the base
-            frame; defaults to ``(0, 0, -9.81)``. Pass zeros to drop gravity.
+            frame; defaults to ``(0, 0, -STANDARD_GRAVITY)``, ``-9.80665`` m/s^2 along z.
+            Pass zeros to drop gravity.
         base (BaseMotion | None): Base twist and acceleration; zero (fixed base)
             when None.
         body_wrenches (torch.Tensor | None): ``[..., J, 6]`` known external
@@ -721,8 +751,9 @@ def constrained_response(
 
         delta_nu_dot = [M^-1 - M^-1 J^T (J M^-1 J^T)^-1 J M^-1] S^T delta_tau = G delta_tau
 
-    (Featherstone, *Rigid Body Dynamics Algorithms*, Springer 2008, on constrained
-    dynamics). ``G`` depends only on the configuration, the inertia (with rotor
+    (Featherstone, *Rigid Body Dynamics Algorithms*, Springer 2008, ch. 8; Udwadia &
+    Kalaba, Proc. R. Soc. Lond. A 439:407-410, 1992). ``G`` depends only on the
+    configuration, the inertia (with rotor
     inertia) and which contacts hold. It needs neither the applied torque, nor the
     velocity terms ``h``, nor the contact forces, so it can be computed exactly at any
     recorded state, including states of datasets without torque sensors. Torque
@@ -994,6 +1025,8 @@ def frame_velocities(
 
 def quaternion_to_matrix(quaternion: torch.Tensor, order: str = "wxyz") -> torch.Tensor:
     """Convert unit quaternions to rotation matrices.
+
+    Hamilton convention (Solà, arXiv:1711.02508, 2017), with ``w`` the scalar part.
 
     Args:
         quaternion (torch.Tensor): ``[..., 4]``.

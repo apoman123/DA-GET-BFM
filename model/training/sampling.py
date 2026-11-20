@@ -2,14 +2,22 @@
 
 With ``n_g`` samples in group ``g`` (a robot, a morphology family, or a source),
 temperature sampling draws group ``g`` with probability ``q_g = p_g^alpha / sum_h
-p_h^alpha`` where ``p_g = n_g / sum_h n_h`` (Lample & Conneau, arXiv:1901.07291).
+p_h^alpha`` where ``p_g = n_g / sum_h n_h`` (Lample and Conneau, "Cross-lingual
+Language Model Pretraining", NeurIPS 2019, arXiv:1901.07291, Sec. 3.1).
 ``alpha = 1`` is the data distribution and ``alpha = 0`` is uniform over groups.
-XLM-R found ``alpha = 0.3`` best (Conneau et al., ACL 2020, DOI
-10.18653/v1/2020.acl-main.747); Arivazhagan et al. (arXiv:1907.05019) use ``T = 5``,
-that is ``alpha = 1 / T = 0.2``. The zero-shot configs start from these two values
-and tune alpha on the validation split; balancing by family rather than by robot is
-an unverified hypothesis motivated by the unsaturated humanoid results of Ai et al.
-(CoRL 2025, arXiv:2505.05753).
+XLM-R found ``alpha = 0.3`` best ("we found 0.3 to be an optimal value for alpha";
+Conneau, Khandelwal, Goyal, Chaudhary, Wenzek, Guzmán, Grave, Ott, Zettlemoyer and
+Stoyanov, "Unsupervised Cross-lingual Representation Learning at Scale", ACL 2020,
+pp. 8440-8451, DOI 10.18653/v1/2020.acl-main.747); Arivazhagan, Bapna, Firat,
+Lepikhin, Johnson, Krikun, Chen, Cao, Foster, Cherry, Macherey, Chen and Wu
+("Massively Multilingual Neural Machine Translation in the Wild: Findings and
+Challenges", arXiv:1907.05019, 2019) sample with ``p^(1/T)`` and use ``T = 5``, that is
+``alpha = 1 / T = 0.2``. The zero-shot configs start from these two values and tune
+alpha on the validation split; balancing by family rather than by robot is an
+unverified hypothesis motivated by the unsaturated humanoid results of Ai et al.
+(CoRL 2025, PMLR 305:3483-3515, arXiv:2505.05753: "for quadrupeds and hexapods,
+performance saturates around 100 training embodiments, while for humanoids, it
+continues to improve steadily").
 """
 
 from __future__ import annotations

@@ -3,26 +3,27 @@
 Every aggregate follows Agarwal et al. [1]:
 
 * **Interquartile mean (IQM)**: the mean of the middle 50% of all runs pooled over
-  tasks, discarding the bottom and top 25% ([1], Sec. 4; rliable's
+  tasks, discarding the bottom and top 25% ([1], Sec. 4.3; rliable's
   ``aggregate_iqm`` is ``scipy.stats.trim_mean(scores, proportiontocut=0.25,
   axis=None)``, which ``interquartile_mean`` reproduces).
-* **Stratified bootstrap**: "re-sample runs with replacement independently for each
-  task" ([1], Sec. 4), then take **percentile** intervals ([1]: "percentile CIs
-  provide good interval estimates for as few as N = 10 runs").
+* **Stratified bootstrap**: the bootstrap of Efron [3], here "re-sample runs with
+  replacement independently for each task" ([1], Sec. 4.1), then take **percentile**
+  intervals ([1], Sec. 4.1: "percentile CIs provide good interval estimates for as few
+  as N = 10 runs").
 * **Defaults** are rliable's ``get_interval_estimates`` defaults: ``reps=50000``,
   ``confidence_interval_size=0.95``, ``method='percentile'``
   (``rliable/library.py``, checked 2026-11-19).
 * **The robot as the unit** (proposal v4, Sec. 5.7): ``robot_bootstrap_ci`` resamples
   robots with replacement, and the runs of every drawn robot with replacement. This is
-  rliable's ``task_bootstrap=True`` (``StratifiedBootstrap``: "Whether to perform
+  rliable's ``task_bootstrap=True`` (``get_interval_estimates``: "Whether to perform
   bootstrapping over tasks in addition to runs"), with robots as the tasks: the
   interval then also covers which robots happened to be in the set, which is what a
   claim about unseen robots needs.
 
 Runs are random seeds. Henderson et al. [2] split 10 trials of one configuration into
-two groups of 5 seeds and found significantly different results (``p = 0.0016``), and
-conclude that "many trials must be run with different random seeds"; they give no
-fixed number, so none is enforced here.
+two groups of 5 seeds and found significantly different results (``p = 0.0016``,
+their Fig. 5), and conclude that "many trials must be run with different random
+seeds"; they give no fixed number, so none is enforced here.
 
 No rliable code is copied; the algorithms above are re-implemented with NumPy and SciPy,
 and the random generator is a local ``numpy.random.Generator`` (rliable draws from the
@@ -30,11 +31,15 @@ global ``np.random``).
 
 References:
     [1] R. Agarwal, M. Schwarzer, P. S. Castro, A. Courville, M. G. Bellemare. Deep
-        Reinforcement Learning at the Edge of the Statistical Precipice. NeurIPS 2021.
-        arXiv:2108.13264. Library: https://github.com/google-research/rliable
-        (Apache-2.0).
+        Reinforcement Learning at the Edge of the Statistical Precipice. NeurIPS 2021,
+        Advances in NeurIPS 34:29304-29320. arXiv:2108.13264. Library:
+        https://github.com/google-research/rliable (Apache-2.0, "Copyright 2021 The
+        Rliable Authors").
     [2] P. Henderson, R. Islam, P. Bachman, J. Pineau, D. Precup, D. Meger. Deep
-        Reinforcement Learning that Matters. AAAI 2018. DOI 10.1609/aaai.v32i1.11694.
+        Reinforcement Learning that Matters. AAAI 2018, Proc. AAAI 32(1).
+        DOI 10.1609/aaai.v32i1.11694.
+    [3] B. Efron. Bootstrap Methods: Another Look at the Jackknife. Ann. Statist.
+        7(1):1-26, 1979. DOI 10.1214/aos/1176344552.
 """
 
 from __future__ import annotations

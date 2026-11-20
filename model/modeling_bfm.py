@@ -18,25 +18,36 @@ embodiment the GET encoder can tokenize.
 
 References and attribution:
 
-* BFM-Zero: Y. Li, Z. Luo, T. Zhang, et al. "BFM-Zero: A Promptable Behavioral
-  Foundation Model for Humanoid Control Using Unsupervised Reinforcement
-  Learning." arXiv:2511.04131, 2025. https://lecar-lab.github.io/BFM-Zero/
-* FB-CPR / Meta Motivo: A. Tirinzoni, A. Touati, J. Farebrother, M. Guzek,
-  A. Kanervisto, Y. Xu, A. Lazaric, M. Pirotta. "Zero-Shot Whole-Body Humanoid
-  Control via Behavioral Foundation Models." ICLR 2025, arXiv:2504.11054.
-* Forward-backward representations: A. Touati, Y. Ollivier. "Learning One
-  Representation to Optimize All Rewards." NeurIPS 2021.
-* GET-Zero: A. Patel, S. Song. "GET-Zero: Graph Embodiment Transformer for
-  Zero-shot Embodiment Generalization." ICRA 2025.
-* The MLP heads of ``DaGetBackwardMap`` and ``DaGetDiscriminator``, ``TruncatedNormal``,
-  ``bfm_weight_init``, the z projection and the inference methods of ``DaGetBfmModel``
-  are adapted from ``humanoidverse/agents/nn_models.py`` and ``agents/fb/model.py`` of
-  https://github.com/LeCAR-Lab/BFM-Zero (Copyright (c) Meta Platforms, Inc.
-  and affiliates, CC BY-NC 4.0, https://creativecommons.org/licenses/by-nc/4.0/).
-  Changes: rewritten in this repo's style, a padding mask on ``TruncatedNormal``,
-  vectorized ``tracking_inference``, per-DoF inputs.
-  The truncated normal itself follows DrQ-v2 (Yarats et al., ICLR 2022) and
-  the clipped target noise follows TD3 (Fujimoto et al., ICML 2018).
+* BFM-Zero: Li et al., "BFM-Zero: A Promptable Behavioral Foundation Model for
+  Humanoid Control Using Unsupervised Reinforcement Learning", ICLR 2026,
+  arXiv:2511.04131. https://lecar-lab.github.io/BFM-Zero/
+* FB-CPR / Meta Motivo: Tirinzoni et al., "Zero-Shot Whole-Body Humanoid Control via
+  Behavioral Foundation Models", ICLR 2025, arXiv:2504.11054. The CPR reward
+  ``log D - log(1 - D)`` of ``DaGetDiscriminator.compute_reward`` is theirs.
+* Forward-backward representations (``F(s, a, z)^T z`` as Q, ``B`` as the reward
+  embedding): Touati & Ollivier, "Learning One Representation to Optimize All
+  Rewards", NeurIPS 2021, arXiv:2103.07945.
+* GET-Zero: Patel & Song, "GET-Zero: Graph Embodiment Transformer for Zero-Shot
+  Embodiment Generalization", ICRA 2025, arXiv:2407.15002, DOI
+  10.1109/ICRA55743.2025.11127922.
+* Adapted code (https://github.com/LeCAR-Lab/BFM-Zero, Copyright (c) Meta Platforms,
+  Inc. and affiliates, CC BY-NC 4.0, https://creativecommons.org/licenses/by-nc/4.0/):
+  from ``humanoidverse/agents/nn_models.py``, the MLP heads of ``BackwardMap`` and
+  ``Discriminator`` (here ``DaGetBackwardMap``, ``DaGetDiscriminator``), ``TruncatedNormal``,
+  ``Norm`` (``project_to_sphere``) and ``weight_init`` (``bfm_weight_init``); from
+  ``humanoidverse/agents/fb/model.py``, ``FBModel.sample_z``, ``project_z``, ``act`` and the
+  goal, reward, weighted-reward and tracking inference; from
+  ``humanoidverse/agents/fb_cpr/model.py`` and ``fb_cpr_aux/model.py``, the set of
+  networks ``FBcprAuxModel`` holds. Changes: rewritten in this repo's style, a padding
+  mask on ``TruncatedNormal``, vectorized ``tracking_inference``, per-DoF inputs.
+* ``TruncatedNormal`` is the class of DrQ-v2 (Yarats et al., ICLR 2022, arXiv:2107.09645;
+  ``utils.py`` of https://github.com/facebookresearch/drqv2, MIT); its clipped sampling
+  noise is TD3's target policy smoothing (Fujimoto, van Hoof & Meger, ICML 2018, PMLR
+  80:1587-1596, arXiv:1802.09477).
+* Orthogonal initialization: Saxe, McClelland & Ganguli, ICLR 2014, arXiv:1312.6120.
+* Layers: attention and sinusoidal positions (Vaswani et al., NIPS 2017,
+  arXiv:1706.03762), LayerNorm (Ba, Kiros & Hinton, arXiv:1607.06450), GELU
+  (Hendrycks & Gimpel, arXiv:1606.08415), Mish (Misra, BMVC 2020, arXiv:1908.08681).
 * The per-DoF networks (latent tokens, joint-to-latent cross-attention, per-DoF
   action head, joint readout, and shared state-token adapter) are new in this repo.
 """
@@ -61,12 +72,12 @@ StateInputs = Mapping[str, torch.Tensor]
 
 
 def project_to_sphere(values: torch.Tensor) -> torch.Tensor:
-    """Scale the last dimension to norm ``sqrt(dim)`` (BFM-Zero's z projection)."""
+    """Scale the last dimension to norm ``sqrt(dim)`` (BFM-Zero's ``Norm``, ``nn_models.py``)."""
     return math.sqrt(values.shape[-1]) * F.normalize(values, dim=-1)
 
 
 def bfm_weight_init(module: nn.Module) -> None:
-    """Orthogonal weights and zero biases for linear layers, as BFM-Zero's ``weight_init``."""
+    """Orthogonal weights (Saxe et al., ICLR 2014) and zero biases, as BFM-Zero's ``weight_init`` (``nn_models.py``)."""
     if isinstance(module, nn.Linear):
         nn.init.orthogonal_(module.weight)
         if module.bias is not None:
@@ -82,7 +93,11 @@ class SphereNorm(nn.Module):
 
 
 class TruncatedNormal(pyd.Normal):
-    """Normal policy clamped to [low, high] with straight-through gradients (BFM-Zero).
+    """Normal policy clamped to [low, high] with straight-through gradients.
+
+    Adapted from BFM-Zero's ``TruncatedNormal`` (``humanoidverse/agents/nn_models.py``),
+    the class of DrQ-v2 (Yarats et al., ICLR 2022, ``utils.py``); this version adds
+    ``mask``.
 
     Args:
         loc (torch.Tensor): Mean action, ``[batch, joints]`` or ``[batch, joints, A]``.
@@ -114,7 +129,7 @@ class TruncatedNormal(pyd.Normal):
         return values - values.detach() + clamped.detach()
 
     def sample(self, clip: float | None = None, sample_shape: torch.Size = torch.Size()) -> torch.Tensor:
-        """Draw a reparameterized action; ``clip`` bounds the noise (TD3 style)."""
+        """Draw a reparameterized action; ``clip`` bounds the noise (TD3, Fujimoto et al., ICML 2018)."""
         shape = self._extended_shape(sample_shape)
         noise = _standard_normal(shape, dtype=self.loc.dtype, device=self.loc.device) * self.scale
         if clip is not None:
@@ -142,7 +157,8 @@ class JointReadout(nn.Module):
 class DaGetBackwardMap(nn.Module):
     """Backward representation B(s) -> z, shared across robots.
 
-    A readout of the shared encoder replaces BFM-Zero's flat input. Its head follows:
+    A readout of the shared encoder replaces BFM-Zero's flat input. Its head is adapted
+    from BFM-Zero's ``BackwardMap`` (``humanoidverse/agents/nn_models.py``):
     Linear -> LayerNorm -> Tanh, ``backward_hidden_layers - 1`` Linear -> ReLU, then Linear
     to ``z_dim`` and an optional projection to the sphere.
 
@@ -189,8 +205,10 @@ class DaGetBackwardMap(nn.Module):
 class DaGetDiscriminator(nn.Module):
     """FB-CPR discriminator D(s, z), shared across robots.
 
-    A readout of the shared encoder replaces BFM-Zero's flat input. Its head follows on the pooled
-    state and z. ``compute_reward`` gives the CPR reward ``log D - log(1 - D)``.
+    A readout of the shared encoder replaces BFM-Zero's flat input. Its head, adapted from
+    BFM-Zero's ``Discriminator`` (``humanoidverse/agents/nn_models.py``), follows on the
+    pooled state and z. ``compute_reward`` gives the CPR reward ``log D - log(1 - D)``
+    (Tirinzoni et al., ICLR 2025).
 
     Attributes:
         config (BfmConfig): Validated head dimensions and latent settings.
@@ -401,7 +419,8 @@ class DaGetBfmActor(nn.Module):
 
     GET joint embeddings are projected to ``hidden_size``, refined by
     ``actor_layers`` latent-conditioned blocks, and decoded per joint into
-    ``tanh`` means of a truncated normal, as in BFM-Zero's actor.
+    ``tanh`` means of a truncated normal, as in BFM-Zero's ``Actor``
+    (``humanoidverse/agents/nn_models.py``).
     """
 
     def __init__(self, config: BfmConfig) -> None:
@@ -534,7 +553,8 @@ class DaGetForwardNetwork(nn.Module):
 class DaGetForwardMap(nn.Module):
     """Ensemble of ``num_parallel`` forward networks (F with ``z_dim`` outputs, critics with 1).
 
-    Matches BFM-Zero's ``ForwardMap`` output layout: ``[num_parallel, batch, out]``
+    Matches the output layout of BFM-Zero's ``ForwardMap`` (``humanoidverse/agents/nn_models.py``):
+    ``[num_parallel, batch, out]``
     when ``num_parallel > 1`` and ``[batch, out]`` otherwise.
     """
 
@@ -584,7 +604,9 @@ class DaGetBfmModel(nn.Module):
     """FB-CPR model (BFM-Zero's ``FBcprAuxModel``) with GET-conditioned actor and critics.
 
     Holds B, F, the actor, the discriminator critic, the discriminator and an
-    optional auxiliary critic, plus BFM-Zero's latent sampling and inference.
+    optional auxiliary critic (as ``FBcprAuxModel``, ``humanoidverse/agents/fb_cpr_aux/model.py``),
+    plus the latent sampling and inference adapted from ``FBModel``
+    (``humanoidverse/agents/fb/model.py``).
     One ``DaGetEncoder`` produces embeddings for every head. State tokens pass
     through a shared input adapter before that encoder.
 
@@ -739,12 +761,12 @@ class DaGetBfmModel(nn.Module):
         return project_to_sphere(z) if self.config.norm_z else z
 
     def sample_z(self, size: int, device: torch.device | str = "cpu") -> torch.Tensor:
-        """Sample ``[size, z_dim]`` latents uniformly on the sphere."""
+        """Sample ``[size, z_dim]`` latents uniformly on the sphere (BFM-Zero's ``FBModel.sample_z``)."""
         return self.project_z(torch.randn(size, self.config.z_dim, device=device))
 
     @staticmethod
     def fb_q_value(forward_output: torch.Tensor, z: torch.Tensor) -> torch.Tensor:
-        """Return the FB value ``F(s, a, z)ᵀ z`` (keeps the ensemble dimension)."""
+        """Return the FB value ``F(s, a, z)ᵀ z`` (Touati & Ollivier, NeurIPS 2021; keeps the ensemble dimension)."""
         return (forward_output * z).sum(-1)
 
     @torch.no_grad()
@@ -762,12 +784,15 @@ class DaGetBfmModel(nn.Module):
 
     @torch.no_grad()
     def goal_inference(self, goal: StateInputs) -> torch.Tensor:
-        """Goal reaching: ``z = B(s_goal)``."""
+        """Goal reaching: ``z = B(s_goal)`` (BFM-Zero's ``FBModel.goal_inference``)."""
         return self.project_z(self.backward_map(self.encode_state(goal), goal["joint_mask"]))
 
     @torch.no_grad()
     def reward_inference(self, next_state: StateInputs, reward: torch.Tensor, weight: torch.Tensor | None = None) -> torch.Tensor:
         """Reward optimization: ``z = sum_i w_i r_i B(s_i)`` over one robot's buffer states, in chunks.
+
+        Adapted from BFM-Zero's ``FBModel.reward_inference``; the estimate of z for a
+        reward is that of Touati & Ollivier (NeurIPS 2021).
 
         Args:
             next_state (StateInputs): State tokens of ``N`` frames.
@@ -786,12 +811,15 @@ class DaGetBfmModel(nn.Module):
         return self.project_z(z)
 
     def reward_wr_inference(self, next_state: StateInputs, reward: torch.Tensor) -> torch.Tensor:
-        """Reward inference with softmax(10 r) weights, as BFM-Zero."""
+        """Reward inference with softmax(10 r) weights (BFM-Zero's ``FBModel.reward_wr_inference``)."""
         return self.reward_inference(next_state, reward, F.softmax(10 * reward, dim=0))
 
     @torch.no_grad()
     def tracking_inference(self, next_state: StateInputs) -> torch.Tensor:
-        """Motion tracking: ``z_t`` = mean of B over the next ``seq_length`` frames of one motion ``[T, ...]``."""
+        """Motion tracking: ``z_t`` = mean of B over the next ``seq_length`` frames of one motion ``[T, ...]``.
+
+        BFM-Zero's ``FBModel.tracking_inference``, vectorized with a prefix sum.
+        """
         embeddings = self.backward_map(self.encode_state(next_state), next_state["joint_mask"])
         prefix = torch.cat([embeddings.new_zeros(1, embeddings.shape[-1]), embeddings.cumsum(0)])
         starts = torch.arange(embeddings.shape[0], device=embeddings.device)

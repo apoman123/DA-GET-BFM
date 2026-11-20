@@ -7,20 +7,25 @@ tracking and goal inference (``DaGetBfmModel.tracking_inference`` and
 ``trajectory_state``.
 
 Method (Peng, Coumans, Zhang, Lee, Tan and Levine, "Learning Agile Robotic Locomotion
-Skills by Imitating Animals", RSS 2020, DOI 10.15607/RSS.2020.XVI.064, Sec. IV, checked
-against the paper): source keypoints are "paired with corresponding target keypoints on
-the robot's body" ("the positions of the feet and hips" in their case), and IK finds,
-at every frame, the pose that tracks them,
+Skills by Imitating Animals", RSS 2020, DOI 10.15607/RSS.2020.XVI.064, arXiv:2004.00784,
+Sec. IV, Eq. 1, checked against the paper): source keypoints are "paired with
+corresponding target keypoints on the robot's body" ("The keypoints include the
+positions of the feet and hips" in their case), and IK finds, at every frame, the pose
+that tracks them (retargeting by inverse kinematics, which they take from Gleicher,
+"Retargetting Motion to New Characters", SIGGRAPH 1998, pp. 33-42, DOI
+10.1145/280814.280820),
 
     argmin_q  sum_i ||x_hat_i(t) - x_i(q_t)||^2 + (q_bar - q_t)^T W (q_bar - q_t),
 
 where the second term keeps the pose near a default pose ``q_bar`` with a diagonal
 ``W``. The paper gives no values for ``W``; ``rest_weight`` (a scalar ``W = w I``)
 defaults to 0, which leaves the term out. The paper itself does not scale the source
-motion. Their code release (github.com/erwincoumans/motion_imitation,
-``retarget_motion/``, Apache-2.0) multiplies every reference position by a hand-set
-constant ``REF_POS_SCALE`` (1 for Laikago, 0.825 for A1) and places each toe target at
-the robot's hip plus the source's hip-to-toe offset. Here the scale is computed from the
+motion. Their code release (github.com/erwincoumans/motion_imitation, Apache-2.0,
+"Copyright 2020 The Google Research Authors", ``retarget_motion/retarget_motion.py``)
+multiplies every reference position by a hand-set constant ``REF_POS_SCALE`` (1 in
+``retarget_config_laikago.py``, 0.825 in ``retarget_config_a1.py``) and places each toe
+target at the robot's hip plus the source's hip-to-toe offset (height taken from the
+source toe). No code is copied from it. Here the scale is computed from the
 two robots instead (``scale_ratio``):
 
 * ``"characteristic_length"`` (default): ``L_B / L_A`` with
@@ -49,14 +54,19 @@ prompt quality. Scaling is about the world origin, so a floor at ``z = 0`` stays
 
 Solver: damped least squares (Wampler, "Manipulator Inverse Kinematic Solutions Based on
 Vector Formulations and Damped Least-Squares Methods", IEEE Trans. SMC 16(1):93-101,
-1986), in the Levenberg-Marquardt form with Sugihara's damping
+1986, DOI 10.1109/TSMC.1986.289285; independently Nakamura and Hanafusa, "Inverse
+Kinematic Solutions With Singularity Robustness for Robot Manipulator Control", ASME
+J. Dyn. Syst. Meas. Control 108(3):163-171, 1986, DOI 10.1115/1.3143764), in the
+Levenberg-Marquardt form (Levenberg, Q. Appl. Math. 2(2):164-168, 1944, DOI
+10.1090/qam/10666; Marquardt, J. SIAM 11(2):431-441, 1963, DOI 10.1137/0111030) with
+Sugihara's damping
 ``W_N = E_k I + w_bar I`` ("Solvability-Unconcerned Inverse Kinematics by the
 Levenberg-Marquardt Method", IEEE T-RO 27(5):984-991, 2011, DOI
 10.1109/TRO.2011.2148230), where ``E_k`` is half the squared residual. The bias
 ``w_bar`` is between ``0.01 l^2`` and ``l^2`` for a typical link length ``l``, as Haviland
-and Corke summarize Sugihara ("Manipulator Differential Kinematics: Part I", IEEE
-Robotics & Automation Magazine, 2023, DOI 10.1109/MRA.2023.3270228, arXiv:2207.01796,
-Eq. 51). The default is the lower end, ``0.01 l^2``, with ``l`` the mean nonzero joint
+and Corke summarize Sugihara ("Manipulator Differential Kinematics: Part I: Kinematics,
+Velocity, and Applications", IEEE Robotics & Automation Magazine 31(4):149-158, 2024,
+DOI 10.1109/MRA.2023.3270228, arXiv:2207.01796, Eq. 51 of the arXiv version). The default is the lower end, ``0.01 l^2``, with ``l`` the mean nonzero joint
 offset of the target: on the Go1 to ANYmal D motion above it needed 5.1 iterations per
 frame against 54 for ``l^2``, at the same final error (measured). The Jacobian
 comes from automatic differentiation of ``EmbodimentGraph.link_poses``
@@ -67,8 +77,10 @@ characteristic length and its rotation is a body-frame increment, so all unknown
 keypoints in meters, the unit of ``E_k``. Keypoints with ``orientation_weight`` also
 match their frame axes: the residual is ``(R_hat - R) L``, the error of three virtual
 points one characteristic length along the axes, so it is in meters as well. This
-assumes both robots' link frames share a convention (REP 103: x forward, z up), as the
-URDFs in ``assets/urdf`` do. [H] unverified hypothesis: the stopping settings
+assumes both robots' link frames share a convention (REP 103, Foote and Purvis,
+"Standard Units of Measure and Coordinate Conventions", 2010,
+https://www.ros.org/reps/rep-0103.html: x forward, y left, z up), as the URDFs in
+``assets/urdf`` do. [H] unverified hypothesis: the stopping settings
 (``MAX_ITERATIONS``, ``TOLERANCE``, ``STALL_FRACTION``) are numerical choices;
 ``RetargetResult`` reports the remaining keypoint error of every frame.
 """
@@ -88,7 +100,7 @@ from model.embodiment import EmbodimentGraph
 from model.training.episodes import Trajectory, exp_rotation
 
 SCALE_METHODS = ("characteristic_length", "keypoints")
-# Sugihara's bias range is 0.01 l^2 to l^2 (Haviland and Corke 2023, Eq. 51); we use the lower end.
+# Sugihara's bias range is 0.01 l^2 to l^2 (Haviland and Corke 2024, arXiv:2207.01796 Eq. 51); we use the lower end.
 DAMPING_BIAS_FRACTION = 0.01
 # [H] numerical stopping settings (see the module docstring): at most MAX_ITERATIONS per
 # frame; stop when the residual norm is below TOLERANCE times the target's characteristic

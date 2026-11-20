@@ -3,9 +3,11 @@
 Physics pretraining mixes simulators (0.01 s by default), recorded datasets (``1 / fps``,
 for example 30 Hz) and RL rollouts (0.02 s). A data config with ``control_dt`` puts every
 source on one period: simulated sources are run at that period, and recorded ones are
-interpolated here. BFM-Zero runs its policy at 50 Hz and resamples motion data to 50 Hz
-(Li et al., arXiv:2511.04131; ``docs/bfm.md``), which is why the zero-shot configs use
-``control_dt = 0.02``.
+interpolated here. BFM-Zero controls at 50 Hz (Li et al., arXiv:2511.04131, Sec. 3), and
+its motion library blends motion frames linearly at the control step (``step_dt``,
+default 1/50 s, ``humanoidverse/utils/motion_lib/motion_lib_base.py`` of
+https://github.com/LeCAR-Lab/BFM-Zero; ``docs/bfm.md``), which is why the zero-shot
+configs use ``control_dt = 0.02``.
 
 Interpolation is linear for joint and base signals (joint positions are unwrapped first,
 so a continuous joint crossing +-pi interpolates the short way), spherical for the base
@@ -13,6 +15,14 @@ orientation, zero-order hold for commands, and nearest-frame for contact flags.
 Simulated trajectories with exact labels are not resampled: their accelerations and
 probe effects belong to the period they were simulated at, so such sources must be
 simulated at ``control_dt`` instead.
+
+References:
+    * Spherical interpolation ``R_0 exp(u log(R_0^T R_1))`` is Shoemake's slerp
+      ``q_1 (q_1^-1 q_2)^u`` in matrix form: Shoemake, "Animating rotation with
+      quaternion curves", SIGGRAPH 1985, Computer Graphics 19(3):245-254, DOI
+      10.1145/325165.325242.
+    * ``_unwrap`` equals ``numpy.unwrap`` (NumPy: Harris et al., Nature 585:357-362,
+      2020, DOI 10.1038/s41586-020-2649-2).
 """
 
 from __future__ import annotations

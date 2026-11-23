@@ -9,7 +9,7 @@
       "name": "g1_wbt_pick_up_fruit",
       "repo_id": "unitreerobotics/G1_WBT_Inspire_Pick_Up_Fruit",
       "data_files": "data/*/*.parquet",
-      "urdf": "../../assets/urdf/g1_29dof.urdf",
+      "urdf": "../../assets/urdf/g1_29dof_rev_1_0.urdf",
       "floating_base": true,
       "joint_names": [
         "left_hip_pitch_joint",
@@ -31,16 +31,16 @@
         "left_shoulder_roll_joint",
         "left_shoulder_yaw_joint",
         "left_elbow_joint",
-        "left_wrist_yaw_joint",
         "left_wrist_roll_joint",
         "left_wrist_pitch_joint",
+        "left_wrist_yaw_joint",
         "right_shoulder_pitch_joint",
         "right_shoulder_roll_joint",
         "right_shoulder_yaw_joint",
         "right_elbow_joint",
-        "right_wrist_yaw_joint",
         "right_wrist_roll_joint",
-        "right_wrist_pitch_joint"
+        "right_wrist_pitch_joint",
+        "right_wrist_yaw_joint"
       ],
       "state_key": [
         "observation.state.lower_body",
@@ -83,8 +83,8 @@
       "smoothing_window": 3,
       "max_episodes": 40,
       "end_effectors": [
-        "left_wrist_pitch_joint",
-        "right_wrist_pitch_joint",
+        "left_wrist_yaw_joint",
+        "right_wrist_yaw_joint",
         "left_ankle_roll_joint",
         "right_ankle_roll_joint"
       ],
@@ -118,7 +118,7 @@
       "type": "synthetic",
       "name": "g1_synthetic",
       "robot": "g1",
-      "urdf": "../../assets/urdf/g1_29dof.urdf",
+      "urdf": "../../assets/urdf/g1_29dof_rev_1_0.urdf",
       "floating_base": true,
       "contact_links": [
         "left_ankle_roll_link",

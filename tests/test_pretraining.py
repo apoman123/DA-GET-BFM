@@ -22,7 +22,7 @@ from model.pretraining import (
     masked_joint_mean,
     rotation_from_6d,
 )
-from model.training import PhysicsPretrainingTrainer, build_physics_datasets
+from model.training import PhysicsPretrainingTrainer, PhysicsTrajectoryDataset, build_physics_datasets
 from model.training.episodes import TORQUE_SOURCES
 from tests.test_embodiment import humanoid, quadruped
 
@@ -143,9 +143,47 @@ class PretrainingPipelineTest(unittest.TestCase):
         self.assertEqual(quadruped_episode["applied_torque"].shape[1], 2)
         self.assertEqual(quadruped_episode["torque_source"].unique().tolist(), [TORQUE_SOURCES.index("exact")])
         root = Path(self.directory.name)
-        self.assertEqual(len(list((root / "cache").glob("*.pt"))), 1)
+        entries = [path for path in (root / "cache").iterdir() if path.is_dir()]
+        self.assertEqual(len(entries), 1)
+        self.assertTrue((entries[0] / "complete").exists())
+        marker_time = (entries[0] / "complete").stat().st_mtime_ns
+        # Every shard is a Hugging Face dataset with one row per frame.
+        from datasets import Dataset
+
+        shards = sorted(entries[0].glob("frames-*.arrow"))
+        frames = sum(len(Dataset.from_file(str(path))) for path in shards)
+        store = self.datasets.train.episodes
+        evaluation = self.datasets.eval.episodes if self.datasets.eval else []
+        total = sum(store.steps(index) for index in range(len(store))) + sum(evaluation.steps(index) for index in range(len(evaluation)))
+        self.assertEqual(frames, total)
         again = build_physics_datasets(self.config_path, cache_dir=root / "cache")
         self.assertEqual(len(again.train), len(self.datasets.train))
+        self.assertEqual((entries[0] / "complete").stat().st_mtime_ns, marker_time)
+
+    def test_arrow_samples_match_samples_in_memory(self) -> None:
+        """Reading frames from the Arrow cache gives the same samples as the episodes in memory."""
+        store = self.datasets.train.episodes
+        memory = [(store.embodiment(index), {key: store[index][1][key] for key in store[index][1]}) for index in range(len(store))]
+        for group in (False, True):
+            arrow = PhysicsTrajectoryDataset(self.datasets.records, store, self.datasets.history_size, group_variants=group)
+            in_memory = PhysicsTrajectoryDataset(self.datasets.records, memory, self.datasets.history_size, group_variants=group)
+            self.assertEqual(len(arrow), len(in_memory))
+            self.assertEqual(list(arrow.index), list(in_memory.index))
+            # A worker started with spawn gets a pickled copy that maps the files again.
+            import pickle
+
+            payload = pickle.dumps(arrow)
+            self.assertLess(len(payload), 1_000_000)
+            copy = pickle.loads(payload)
+            torch.testing.assert_close(copy[len(copy) - 1]["mass_matrix"], arrow[len(arrow) - 1]["mass_matrix"])
+            for item in sorted({0, 1, len(arrow) // 2, len(arrow) - 1}):
+                first, second = arrow[item], in_memory[item]
+                self.assertEqual(sorted(first), sorted(second))
+                for key, value in first.items():
+                    if torch.is_tensor(value):
+                        torch.testing.assert_close(value, second[key], rtol=0, atol=0, msg=key)
+                    else:
+                        self.assertEqual(value, second[key], key)
 
     def test_collated_batch_is_finite_and_masked(self) -> None:
         """Padding, masks, and normalized targets are consistent."""

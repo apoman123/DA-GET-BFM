@@ -16,7 +16,7 @@ Apache-2.0); datasets and robot models are cited in ``docs/data.md#references``.
 Examples::
 
     # A Hub dataset of a floating-base humanoid
-    uv run python scripts/make_data_config.py --urdf assets/urdf/g1_29dof.urdf \\
+    uv run python scripts/make_data_config.py --urdf assets/urdf/g1_29dof_rev_1_0.urdf \\
         --dataset unitreerobotics/G1_WBT_Inspire_Pick_Up_Fruit --synthetic --output configs/data/g1.json
 
     # Synthetic data only, for any URDF (fixed, legged, or multirotor)

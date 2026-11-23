@@ -38,7 +38,7 @@
     {
       "type": "mujoco",
       "name": "g1_ground",
-      "urdf": "../../assets/urdf/g1_29dof.urdf",
+      "urdf": "../../assets/urdf/g1_29dof_rev_1_0.urdf",
       "contact_links": ["left_ankle_roll_link", "right_ankle_roll_link"],
       "contact_geometry": {"radius": 0.01, "sole_offset": [0.03, 0.0, -0.03], "foot_size": [0.18, 0.06]},
       "nominal_pose": {

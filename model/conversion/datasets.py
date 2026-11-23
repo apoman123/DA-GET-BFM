@@ -27,13 +27,28 @@ entries in ``docs/data.md#references``):
   code MIT): MuJoCo ``qpos``/``qvel`` with a free root (position, w-x-y-z quaternion,
   world linear velocity, body angular velocity) and joint names. Al-Hafez, Zhao,
   Peters & Tateo, arXiv:2311.02496, 2023.
-* **AMASS retargeted to G1** (``ember-lab-berkeley/AMASS_Retargeted_for_G1``, npz, card
-  license CC BY 4.0; retargeting taken from ``fleaven/Retargeted_AMASS_for_robotics`` by
-  Kun Zhao, which keeps the AMASS license terms): named joint positions; body 0 is the
-  pelvis with w-x-y-z quaternions. Stored joint velocities do not match the positions,
-  so velocities are left to finite differencing. AMASS: Mahmood, Ghorbani, Troje,
-  Pons-Moll & Black, ICCV 2019, pp. 5441-5450, DOI 10.1109/ICCV.2019.00554
+* **AMASS retargeted to G1** (``fleaven/Retargeted_AMASS_for_robotics`` by Kun Zhao, ``.npy``,
+  card license CC BY 4.0, README: the AMASS terms apply; checked on files 2026-11-23 at
+  revision ``275c4c4a``, uploaded 2025-04-16): ``[T, 36]`` float64, root position, root
+  quaternion x, y, z, w, then the 29 joints in the README order (the URDF order). The rate
+  is in the file name (``..._poses_120_jpos.npy``, 59 to 250 Hz). The root position is
+  relative to the first frame; the upstream ``g1/visualize.py`` adds 0.793 m to z, which
+  puts clips that start lying or sitting in the air, so the height is set from the feet
+  instead. Wrist pitch and yaw are 0 in every clip, and the right wrist roll has the
+  wrong sign (negated here, see ``AMASS_SIGN_FIXES``); ``xwbc`` below moves every joint. The older copy
+  ``ember-lab-berkeley/AMASS_Retargeted_for_G1`` (every 4th frame of an earlier upload) also
+  has hip yaw, ankle roll and wrist roll at 0 and is no longer read. AMASS: Mahmood,
+  Ghorbani, Troje, Pons-Moll & Black, ICCV 2019, pp. 5441-5450, DOI 10.1109/ICCV.2019.00554
   (non-commercial research license, https://amass.is.tue.mpg.de/license.html).
+* **xwbc-retarget-data** (``TonyZhang1999/xwbc-retarget-data``, card license MIT, which the
+  AMASS and LAFAN1 terms override; checked on 107 G1 clips 2026-11-23 at revision
+  ``b4e169f4``): one ``.tar.gz`` per robot and source (AMASS about 5-8 GB, LAFAN1 below 1 GB)
+  of npz files with ``fps`` (30), ``joint_pos`` and ``joint_vel`` (``np.gradient`` of the
+  positions) named by ``joint_names`` (Isaac Lab breadth-first order), and per body
+  ``body_pos_w``, ``body_quat_w`` (w, x, y, z), ``body_lin_vel_w`` and ``body_ang_vel_w``, all
+  in the world frame; body 0 is the pelvis. The 32 G1 bodies match forward kinematics of
+  ``assets/urdf/g1_29dof_rev_1_0.urdf`` to 0.02 mm. Retargeted with GMR (Araujo et al.,
+  arXiv:2510.02252, inferred from the joint ranges); every joint moves, wrists included.
 * **LAFAN1 retargeted to Unitree** (``lvhaidong/LAFAN1_Retargeting_Dataset``, a copy of
   Unitree's ``unitreerobotics/LAFAN1_Retargeting_Dataset``; CSV, 30 Hz; LICENSE file
   BSD-3-Clause, Unitree Robotics): root x, y, z and an x, y, z, w quaternion, then
@@ -46,7 +61,9 @@ from __future__ import annotations
 
 import fnmatch
 import io
+import itertools
 import json
+import re
 import zipfile
 from pathlib import Path
 from typing import Any
@@ -71,18 +88,18 @@ from model.conversion.common import (
 GRAVITY = 9.80665
 
 
-def _hub_files(repo: str, prefix: str = "") -> list[str]:
+def _hub_files(repo: str, prefix: str = "", revision: str | None = None) -> list[str]:
     """List files of a Hub dataset under a prefix."""
     from huggingface_hub import HfApi
 
-    files = HfApi().list_repo_files(repo, repo_type="dataset")
+    files = HfApi().list_repo_files(repo, repo_type="dataset", revision=revision)
     return sorted(name for name in files if name.startswith(prefix))
 
 
-def _hub_download(repo: str, name: str) -> Path:
+def _hub_download(repo: str, name: str, revision: str | None = None) -> Path:
     from huggingface_hub import hf_hub_download
 
-    return Path(hf_hub_download(repo, name, repo_type="dataset"))
+    return Path(hf_hub_download(repo, name, repo_type="dataset", revision=revision))
 
 
 def _select(names: list[str], patterns: list[str] | None, limit: int | None) -> list[str]:
@@ -204,40 +221,47 @@ def convert_grandtour(
     Returns:
         dict: Data-config source.
     """
-    from model.conversion.zarr_lite import ZarrGroup
-
     if archives is None:
         names = sorted({name.split("/")[0] for name in _hub_files(GRANDTOUR_REPOSITORY) if name.endswith("anymal_state_state_estimator.tar")})
         names = _select(names, missions, max_missions)
         archives = [_hub_download(GRANDTOUR_REPOSITORY, f"{name}/data/anymal_state_state_estimator.tar") for name in names]
-    episodes = []
-    for archive in archives:
-        group = ZarrGroup(archive)
-        time = group["timestamp"]
-        raw = {
-            "state": group["joint_positions"],
-            "velocity": group["joint_velocities"],
-            "effort": group["joint_efforts"],
-            "base_position": group["pose_pos"],
-            "base_linear_velocity": group["twist_lin"],
-            "base_angular_velocity": group["twist_ang"],
-            "contact": np.stack([(group[f"{foot}_state"] >= 1).astype(np.float64) for foot in ANYMAL_FEET], 1),
-            "contact_force": np.stack([np.linalg.norm(group[f"{foot}_wrench_force"], axis=1) for foot in ANYMAL_FEET], 1),
-        }
-        orientation = group["pose_orien"]
-        for start, stop in split_segments(time, 0.05, 2.0):
-            grid = uniform_time(time[start], time[stop - 1], rate)
-            segment = time[start:stop]
-            signals = {key: resample(segment, value[start:stop], grid) for key, value in raw.items()}
-            signals["contact"] = (signals["contact"] > 0.5).astype(np.float64)
-            signals["base_orientation"] = resample_quaternion(segment, orientation[start:stop], grid)
-            episodes += chunk_episode(Episode(signals, {"archive": Path(archive).parent.parent.name}), int(episode_seconds * rate))
+
+    def episodes():
+        for archive in archives:
+            yield from _grandtour_episodes(archive, rate, episode_seconds)
+
     info = write_dataset(
-        output, episodes, rate, ANYMAL_JOINTS, ANYMAL_FEET,
+        output, episodes(), rate, ANYMAL_JOINTS, ANYMAL_FEET,
         {"source": f"https://huggingface.co/datasets/{GRANDTOUR_REPOSITORY}",
          "license": "see the dataset card (MIT) and website (CC BY-SA 4.0)", "robot": "ANYmal D"},
     )
     return source_config(output, info, urdf, "grandtour_anymal_d", True, ANYMAL_FEET)
+
+
+def _grandtour_episodes(archive: str | Path, rate: float, episode_seconds: float):
+    """Yield the episodes of one GrandTour state-estimator archive."""
+    from model.conversion.zarr_lite import ZarrGroup
+
+    group = ZarrGroup(archive)
+    time = group["timestamp"]
+    raw = {
+        "state": group["joint_positions"],
+        "velocity": group["joint_velocities"],
+        "effort": group["joint_efforts"],
+        "base_position": group["pose_pos"],
+        "base_linear_velocity": group["twist_lin"],
+        "base_angular_velocity": group["twist_ang"],
+        "contact": np.stack([(group[f"{foot}_state"] >= 1).astype(np.float64) for foot in ANYMAL_FEET], 1),
+        "contact_force": np.stack([np.linalg.norm(group[f"{foot}_wrench_force"], axis=1) for foot in ANYMAL_FEET], 1),
+    }
+    orientation = group["pose_orien"]
+    for start, stop in split_segments(time, 0.05, 2.0):
+        grid = uniform_time(time[start], time[stop - 1], rate)
+        segment = time[start:stop]
+        signals = {key: resample(segment, value[start:stop], grid) for key, value in raw.items()}
+        signals["contact"] = (signals["contact"] > 0.5).astype(np.float64)
+        signals["base_orientation"] = resample_quaternion(segment, orientation[start:stop], grid)
+        yield from chunk_episode(Episode(signals, {"archive": Path(archive).parent.parent.name}), int(episode_seconds * rate))
 
 
 # ------------------------------------------------------------------------ NeuroBEM
@@ -506,7 +530,7 @@ def convert_locomujoco(
     collection: str = "DefaultDatasets",
     patterns: list[str] | None = None,
     max_files: int | None = None,
-    urdf: str = "assets/urdf/g1_29dof.urdf",
+    urdf: str = "assets/urdf/g1_29dof_rev_1_0.urdf",
     rename: dict[str, str] | None = None,
     files: list[str | Path] | None = None,
 ) -> dict[str, Any]:
@@ -564,63 +588,259 @@ def convert_locomujoco(
 
 # --------------------------------------------------------------------- AMASS -> G1
 
-AMASS_REPOSITORY = "ember-lab-berkeley/AMASS_Retargeted_for_G1"
+AMASS_REPOSITORY = "fleaven/Retargeted_AMASS_for_robotics"
+# The upload checked on 2026-11-23 (2025-04-16, "Optimized the handling of elbow and knee
+# joints"); pinned because the files were replaced once before with different content.
+AMASS_REVISION = "275c4c4a028cadf5241c10a613c2f11913531ad2"
+# Sign corrections of the fleaven joint columns. Its right wrist roll is negated relative to
+# three other retargetings of the same AMASS clips (xwbc, TWIST2, any4hdmi: correlation -0.34
+# to -0.97 on two clips, while its left wrist roll, shoulders and elbows agree), and in
+# symmetric walking it has the sign of the left one, unlike the shoulder rolls. The Unitree
+# models it names (g1_29dof_rev_1_0.xml, g1_29dof_lock_waist_rev_1_0.xml) have the same wrist
+# roll axes as the URDF. Checked on 2026-11-23 (docs/data.md#humanoid-motions-retargeted).
+AMASS_SIGN_FIXES = {"right_wrist_roll_joint": -1.0}
 G1_FEET = ["left_ankle_roll_link", "right_ankle_roll_link"]
+_G1_LEG = ["hip_pitch", "hip_roll", "hip_yaw", "knee", "ankle_pitch", "ankle_roll"]
+_ARM = ["shoulder_pitch", "shoulder_roll", "shoulder_yaw", "elbow"]
+_WRIST = ["wrist_roll", "wrist_pitch", "wrist_yaw"]
+# The 29 G1 joints in URDF (and Unitree motor) order.
+G1_JOINTS = (
+    [f"{side}_{joint}_joint" for side in ("left", "right") for joint in _G1_LEG]
+    + ["waist_yaw_joint", "waist_roll_joint", "waist_pitch_joint"]
+    + [f"{side}_{joint}_joint" for side in ("left", "right") for joint in _ARM + _WRIST]
+)
+
+
+def _amass_rate(name: str) -> float:
+    """Return the frame rate in an AMASS file name (``..._poses_120_jpos.npy`` is 120 Hz)."""
+    match = re.search(r"_(\d+)_jpos\.npy$", str(name))
+    if not match:
+        raise ValueError(f"{name}: no frame rate in the file name")
+    return float(match.group(1))
 
 
 def convert_amass_g1(
     output: str | Path,
     patterns: list[str] | None = None,
     max_files: int | None = 50,
-    urdf: str = "assets/urdf/g1_29dof.urdf",
+    rate: float = 50.0,
+    ground: str = "body",
+    ground_window: float = 1.0,
+    root_height: float | None = None,
+    urdf: str = "assets/urdf/g1_29dof_rev_1_0.urdf",
     files: list[str | Path] | None = None,
+    revision: str = AMASS_REVISION,
 ) -> dict[str, Any]:
     """Convert AMASS motions retargeted to the Unitree G1 (kinematic, 29 DoF).
 
+    Each clip is resampled from its own rate to ``rate``. Its root height is then set from
+    the lowest point of the robot's collision geometry in every frame
+    (``model.conversion.geometry``): the lower envelope of that point over ``ground_window``
+    seconds is put at z = 0, which removes the drift of the retargeted root height and
+    never puts a frame below the ground. Clips that start lying, sitting or crawling rest
+    on the back, hands or knees. Pass ``root_height=0.793`` to add the constant of the
+    upstream ``visualize.py`` instead.
+
     Args:
         output (str | Path): Output folder.
-        patterns (list[str] | None): Globs over Hub paths, e.g. ``["*Running*"]``.
+        patterns (list[str] | None): Globs over Hub paths, e.g. ``["*Walk*"]``.
         max_files (int | None): Limit on motion files.
-        urdf (str): URDF path written into the source.
-        files (list | None): Local npz files instead of downloading.
+        rate (float): Output rate in Hz (clips are 59 to 250 Hz; 50 Hz is the
+            ``control_dt`` of ``configs/data/zero_shot.json``).
+        ground (str): ``"body"``: the whole collision model (needs the G1 collision
+            meshes from ``scripts/download_urdfs.py``); ``"feet"``: only the four
+            collision spheres of each sole.
+        ground_window (float): Length in seconds of the ground envelope; it must be
+            longer than the longest flight phase. 0 puts the 5th percentile of the
+            lowest point at z = 0 with one constant per clip.
+        root_height (float | None): Constant added to the relative root z instead of
+            using ``ground``.
+        urdf (str): URDF path written into the source and used for the feet.
+        files (list | None): Local ``.npy`` files instead of downloading; the rate is
+            read from their names.
+        revision (str): Hub revision to download.
 
     Returns:
         dict: Data-config source.
     """
+    from model.conversion.geometry import collision_points, ground_offset, lowest_point_heights
+    from model.embodiment import EmbodimentGraph
+
+    if ground not in ("body", "feet"):
+        raise ValueError(f"ground must be 'body' or 'feet', not {ground!r}")
+    geometry = graph = None
+    if root_height is None:
+        geometry = collision_points(urdf, None if ground == "body" else G1_FEET)
+        graph = EmbodimentGraph.from_urdf(urdf, joint_order=G1_JOINTS, floating_base=True)
     if files is None:
-        names = _select([n for n in _hub_files(AMASS_REPOSITORY, "g1/") if n.endswith(".npz")], patterns, max_files)
-        files = [_hub_download(AMASS_REPOSITORY, name) for name in names]
-    episodes, joints, rate = [], None, None
-    for path in files:
-        data = _load_npz(path)
-        names = [str(name) for name in data["dof_names"]]
-        joints = joints or names
-        if names != joints:
-            raise ValueError("all motions must have the same joints")
-        rate = float(np.asarray(data["fps"]).reshape(-1)[0])
-        signals = {
-            "state": data["dof_positions"].astype(np.float64),
-            "base_position": data["body_positions"][:, 0].astype(np.float64),
-            "base_orientation": quaternion_wxyz_to_xyzw(data["body_rotations"][:, 0].astype(np.float64)),
-        }
-        episodes.append(Episode(signals, {"file": Path(path).name}))
+        names = _select([n for n in _hub_files(AMASS_REPOSITORY, "g1/", revision) if n.endswith(".npy")], patterns, max_files)
+        files = [_hub_download(AMASS_REPOSITORY, name, revision) for name in names]
+    def episodes():
+        for path in files:
+            table = np.load(path, allow_pickle=False)
+            if table.ndim != 2 or table.shape[1] != 7 + len(G1_JOINTS):
+                raise ValueError(f"{path}: expected [T, {7 + len(G1_JOINTS)}], got {table.shape}")
+            native = _amass_rate(Path(path).name)
+            time = np.arange(len(table)) / native
+            new_time = uniform_time(0.0, time[-1], rate)
+            joints = resample(time, table[:, 7:], new_time)
+            for joint, sign in AMASS_SIGN_FIXES.items():
+                joints[:, G1_JOINTS.index(joint)] *= sign
+            position = resample(time, table[:, :3], new_time)
+            orientation = resample_quaternion(time, table[:, 3:7], new_time)
+            if root_height is None:
+                position[:, 2] -= ground_offset(lowest_point_heights(graph, geometry, joints, position, orientation), rate, ground_window)
+            else:
+                position[:, 2] += root_height
+            signals = {"state": joints, "base_position": position, "base_orientation": orientation}
+            yield Episode(signals, {"file": Path(path).name, "native_rate": native})
+
     info = write_dataset(
-        output, episodes, rate, joints, None,
-        {"source": f"https://huggingface.co/datasets/{AMASS_REPOSITORY}",
-         "license": "CC BY 4.0 on the card; AMASS terms apply", "robot": "Unitree G1"},
+        output, episodes(), rate, G1_JOINTS, None,
+        {"source": f"https://huggingface.co/datasets/{AMASS_REPOSITORY}", "revision": revision,
+         "license": "CC BY 4.0 on the card; AMASS terms apply (non-commercial research)", "robot": "Unitree G1",
+         "root_height": root_height if root_height is not None else {"ground": ground, "ground_window": ground_window}},
     )
     return source_config(output, info, urdf, "amass_g1", True, G1_FEET, {"smoothing_window": 3})
+
+
+# ---------------------------------------------------------------- xwbc retargeting
+
+XWBC_REPOSITORY = "TonyZhang1999/xwbc-retarget-data"
+XWBC_REVISION = "b4e169f460bd68b27e04e75c99be6e0affbfe046"  # checked on 2026-11-23
+# Robots with a URDF and feet in this repository; other xwbc robots need ``urdf`` and
+# ``contact_links`` (their models are not shipped with the data).
+XWBC_ROBOTS = {"unitree_g1_29dof": ("assets/urdf/g1_29dof_rev_1_0.urdf", G1_FEET)}
+
+
+def _tar_members(archive: str | Path, patterns: list[str] | None, limit: int | None):
+    """Yield ``(name, bytes)`` of the npz members of a ``.tar.gz``, read as a stream (nothing is extracted)."""
+    import tarfile
+
+    count = 0
+    with tarfile.open(archive, "r|gz") as tar:
+        for member in tar:
+            if not member.isfile() or not member.name.endswith(".npz"):
+                continue
+            if patterns and not any(fnmatch.fnmatch(member.name, pattern) for pattern in patterns):
+                continue
+            yield member.name, tar.extractfile(member).read()
+            count += 1
+            if limit and count >= limit:
+                return
+
+
+def convert_xwbc(
+    output: str | Path,
+    robot: str = "unitree_g1_29dof",
+    collection: str = "amass",
+    patterns: list[str] | None = None,
+    max_files: int | None = None,
+    urdf: str | None = None,
+    contact_links: list[str] | None = None,
+    ground: str = "body",
+    ground_window: float = 1.0,
+    archive: str | Path | None = None,
+    files: list[str | Path] | None = None,
+    revision: str = XWBC_REVISION,
+) -> dict[str, Any]:
+    """Convert xwbc-retarget-data motions (AMASS or LAFAN1 retargeted to one humanoid).
+
+    The archive of a robot is read as a stream, so it is downloaded once (5-8 GB for AMASS)
+    and never extracted. The root is body 0. Heights are recorded in the world, but the G1
+    soles sit about 2 cm below z = 0, so they are put on the ground as in
+    ``convert_amass_g1`` (``model.conversion.geometry.ground_offset``), and the base vertical
+    velocity is corrected by the offset's rate of change.
+
+    Args:
+        output (str | Path): Output folder.
+        robot (str): Archive name, e.g. ``unitree_g1_29dof``, ``unitree_h1_2``, ``pal_talos``.
+        collection (str): ``amass`` or ``lafan``.
+        patterns (list[str] | None): Globs over member names, e.g. ``["*/ACCAD__*"]``.
+        max_files (int | None): Stop after this many clips.
+        urdf (str | None): URDF of the robot (default for robots in ``XWBC_ROBOTS``).
+        contact_links (list[str] | None): Feet of the robot (default as for ``urdf``).
+        ground (str): ``"body"`` (whole collision model), ``"feet"`` (the contact links'
+            collision geometry) or ``"none"`` (keep the recorded heights).
+        ground_window (float): Seconds of the ground envelope (0: one constant per clip).
+        archive (str | Path | None): Local ``.tar.gz`` instead of downloading it.
+        files (list | None): Local npz files instead of an archive.
+        revision (str): Hub revision to download.
+
+    Returns:
+        dict: Data-config source.
+    """
+    from model.conversion.geometry import collision_points, ground_offset, lowest_point_heights
+    from model.embodiment import EmbodimentGraph
+
+    default_urdf, default_feet = XWBC_ROBOTS.get(robot, (None, None))
+    urdf = urdf or default_urdf
+    contact_links = contact_links or default_feet
+    if urdf is None or contact_links is None:
+        raise ValueError(f"{robot}: pass urdf and contact_links (defaults exist for {sorted(XWBC_ROBOTS)})")
+    if ground not in ("body", "feet", "none"):
+        raise ValueError(f"ground must be 'body', 'feet' or 'none', not {ground!r}")
+    geometry = None if ground == "none" else collision_points(urdf, None if ground == "body" else contact_links)
+    if files is not None:
+        clips = ((Path(path).name, Path(path).read_bytes()) for path in files)
+    else:
+        if archive is None:
+            archive = _hub_download(XWBC_REPOSITORY, f"{collection}/{robot}.tar.gz", revision)
+        clips = _tar_members(archive, patterns, max_files)
+    clips = iter(clips)
+    first = next(clips, None)
+    if first is None:
+        raise ValueError("no clips matched")
+    with np.load(io.BytesIO(first[1]), allow_pickle=False) as data:
+        joints = [str(joint) for joint in data["joint_names"]]
+        rate = float(np.asarray(data["fps"]).reshape(-1)[0])
+    graph = None if geometry is None else EmbodimentGraph.from_urdf(urdf, joint_order=joints, floating_base=True)
+
+    def episodes():
+        for name, payload in itertools.chain([first], clips):
+            with np.load(io.BytesIO(payload), allow_pickle=False) as data:
+                names = [str(joint) for joint in data["joint_names"]]
+                clip_rate = float(np.asarray(data["fps"]).reshape(-1)[0])
+                q = data["joint_pos"].astype(np.float64)
+                qd = data["joint_vel"].astype(np.float64)
+                position = data["body_pos_w"][:, 0].astype(np.float64)
+                orientation = quaternion_wxyz_to_xyzw(data["body_quat_w"][:, 0].astype(np.float64))
+                linear = data["body_lin_vel_w"][:, 0].astype(np.float64)
+                angular = data["body_ang_vel_w"][:, 0].astype(np.float64)
+            if names != joints:
+                order = [names.index(joint) for joint in joints]
+                q, qd = q[:, order], qd[:, order]
+            if clip_rate != rate:
+                raise ValueError(f"{name}: {clip_rate} Hz, but the first clip is {rate} Hz")
+            if geometry is not None and len(q) > 1:
+                offset = ground_offset(lowest_point_heights(graph, geometry, q, position, orientation), rate, ground_window)
+                position[:, 2] -= offset
+                linear[:, 2] -= np.gradient(offset, 1.0 / rate)
+            signals = {
+                "state": q,
+                "velocity": qd,
+                "base_position": position,
+                "base_orientation": orientation,
+                "base_linear_velocity": to_base_frame(orientation, linear),
+                "base_angular_velocity": to_base_frame(orientation, angular),
+            }
+            yield Episode(signals, {"file": name})
+
+    info = write_dataset(
+        output, episodes(), rate, joints, None,
+        {"source": f"https://huggingface.co/datasets/{XWBC_REPOSITORY}", "revision": revision,
+         "license": "MIT on the card; the AMASS or LAFAN1 terms apply (non-commercial research)",
+         "robot": robot, "collection": collection,
+         "root_height": "recorded" if geometry is None else {"ground": ground, "ground_window": ground_window}},
+    )
+    return source_config(output, info, urdf, f"xwbc_{robot}_{collection}", True, contact_links, {"smoothing_window": 3})
 
 
 # ------------------------------------------------------------------------- LAFAN1
 
 LAFAN1_REPOSITORY = "lvhaidong/LAFAN1_Retargeting_Dataset"
-_ARM = ["shoulder_pitch", "shoulder_roll", "shoulder_yaw", "elbow"]
-_WRIST = ["wrist_roll", "wrist_pitch", "wrist_yaw"]
 LAFAN1_JOINTS = {
-    "g1": [f"{side}_{joint}_joint" for side in ("left", "right") for joint in ("hip_pitch", "hip_roll", "hip_yaw", "knee", "ankle_pitch", "ankle_roll")]
-    + ["waist_yaw_joint", "waist_roll_joint", "waist_pitch_joint"]
-    + [f"{side}_{joint}_joint" for side in ("left", "right") for joint in _ARM + _WRIST],
+    "g1": list(G1_JOINTS),
     "h1_2": [f"{side}_{joint}_joint" for side in ("left", "right") for joint in ("hip_yaw", "hip_pitch", "hip_roll", "knee", "ankle_pitch", "ankle_roll")]
     + ["torso_joint"]
     + [f"{side}_{joint}_joint" for side in ("left", "right") for joint in _ARM + _WRIST],
@@ -629,7 +849,7 @@ LAFAN1_JOINTS = {
     + [f"{side}_{joint}_joint" for side in ("left", "right") for joint in _ARM],
 }
 LAFAN1_FEET = {"g1": G1_FEET, "h1": ["left_ankle_link", "right_ankle_link"], "h1_2": ["left_ankle_roll_link", "right_ankle_roll_link"]}
-LAFAN1_URDF = {"g1": "assets/urdf/g1_29dof.urdf", "h1": "assets/urdf/h1.urdf", "h1_2": "assets/urdf/h1_2.urdf"}
+LAFAN1_URDF = {"g1": "assets/urdf/g1_29dof_rev_1_0.urdf", "h1": "assets/urdf/h1.urdf", "h1_2": "assets/urdf/h1_2.urdf"}
 
 
 def convert_lafan1(
@@ -678,5 +898,6 @@ CONVERTERS = {
     "neurobem": convert_neurobem,
     "locomujoco": convert_locomujoco,
     "amass_g1": convert_amass_g1,
+    "xwbc": convert_xwbc,
     "lafan1": convert_lafan1,
 }

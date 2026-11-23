@@ -560,8 +560,9 @@ pairs of motions retargeted to both robots.
 
 1. Install [Isaac Lab 3](https://isaac-sim.github.io/IsaacLab/), then this repo inside
    its Python environment (`pip install -e .`).
-2. Get URDFs with collision meshes. `scripts/download_urdfs.py` fetches only the URDF
-   files, so clone the robot's description package and point `ros_package_paths` at it
+2. Get URDFs with collision meshes. `scripts/download_urdfs.py` fetches the URDF files
+   and only the G1 collision meshes (for `amass_g1` and `xwbc`), so clone the robot's description
+   package and point `ros_package_paths` at it
    (for Unitree robots, [unitree_ros](https://github.com/unitreerobotics/unitree_ros)).
 3. Start small and check each point below before scaling up:
 

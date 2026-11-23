@@ -50,9 +50,9 @@ JOINT_TYPE_NAMES = ("revolute", "continuous", "prismatic")
 ACTUATOR_MODES = ("torque", "position", "velocity", "passive", "thrust")
 STANDARD_GRAVITY = 9.80665  # m/s^2, conventional value of g_n (3rd CGPM 1901, Declaration 2)
 # Median total mass and characteristic length of the four robots measured at their
-# standing poses (Go1 13.1 kg / 0.31 m, G1 35.1 kg / 0.77 m, ANYmal D 57.0 kg /
-# 0.55 m, H1 59.3 kg / 1.00 m; docs/zero_shot.md, evidence R9).
-REFERENCE_MASS = 46.05
+# standing poses (Go1 13.1 kg / 0.31 m, G1 33.3 kg / 0.77 m with g1_29dof_rev_1_0.urdf,
+# ANYmal D 57.0 kg / 0.55 m, H1 59.3 kg / 1.00 m; docs/zero_shot.md, evidence R9).
+REFERENCE_MASS = 45.15
 REFERENCE_LENGTH = 0.66
 
 

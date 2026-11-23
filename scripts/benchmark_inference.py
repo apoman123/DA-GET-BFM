@@ -55,7 +55,7 @@ from model.training.episodes import EmbodimentRecord  # noqa: E402
 from model.training.ground_sim import ground_specs  # noqa: E402
 
 URDFS = {name: ROOT / "assets" / "urdf" / f"{file}.urdf" for name, file in
-         (("g1", "g1_29dof"), ("h1", "h1"), ("go1", "go1"), ("anymal", "anymal_d"))}
+         (("g1", "g1_29dof_rev_1_0"), ("h1", "h1"), ("go1", "go1"), ("anymal", "anymal_d"))}
 TOTALS = ("control step", "+ live tracking")
 
 

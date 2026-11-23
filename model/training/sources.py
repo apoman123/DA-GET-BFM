@@ -23,8 +23,8 @@ two are described here.
 
 ``"huggingface"``
     Loads recorded trajectories from the Hugging Face Hub or a local folder or
-    file (LeRobot parquet layout, or any parquet, CSV, or JSON table with
-    per-frame vector columns). A joint name list maps state columns to URDF
+    file (LeRobot parquet layout, a Hugging Face ``save_to_disk`` folder, or any
+    parquet, CSV, or JSON table with per-frame vector columns). A joint name list maps state columns to URDF
     joints; joints the dataset does not record are frozen. Optional base
     columns (orientation, position, twist, projected gravity) and contact
     columns support floating-base robots. Missing velocities and accelerations
@@ -686,6 +686,33 @@ def _keys(key: str | list[str] | None) -> list[str]:
     return [key] if isinstance(key, str) else list(key)
 
 
+_VECTOR_KEYS = (
+    "velocity_key", "torque_key", "action_key", "base_orientation_key", "base_position_key",
+    "base_linear_velocity_key", "base_angular_velocity_key", "projected_gravity_key",
+    "imu_acceleration_key", "contact_key",
+)
+
+
+def source_columns(source: dict[str, Any]) -> list[str]:
+    """Return the table columns a ``huggingface`` source reads.
+
+    The frame column (``frame_key``) is included although it is optional in the table.
+    """
+    columns = {
+        source.get("episode_key", "episode_index"),
+        source.get("frame_key", "frame_index"),
+        *_keys(source.get("state_key", "observation.state")),
+    }
+    for name in _VECTOR_KEYS:
+        columns.update(_keys(source.get(name)))
+    return sorted(columns)
+
+
+def is_saved_dataset(path: Path) -> bool:
+    """Whether a folder was written by ``datasets.Dataset.save_to_disk``."""
+    return path.is_dir() and (path / "state.json").is_file() and (path / "dataset_info.json").is_file()
+
+
 def _column(table: dict[str, Any], key: str | list[str] | None, indices: list | None) -> np.ndarray | None:
     """Read vector columns (concatenated in order) and select entries.
 
@@ -709,8 +736,8 @@ def _column(table: dict[str, Any], key: str | list[str] | None, indices: list | 
 
 
 def _load_table(source: dict[str, Any], base: Path | None):
-    """Load a Hub dataset or local parquet, CSV, or JSON files."""
-    from datasets import load_dataset
+    """Load a Hub dataset, a ``save_to_disk`` folder, or local parquet, CSV, or JSON files."""
+    from datasets import load_dataset, load_from_disk
 
     if "repo_id" in source:
         return load_dataset(
@@ -720,6 +747,8 @@ def _load_table(source: dict[str, Any], base: Path | None):
             revision=source.get("revision"),
         )
     path = resolve_path(source["path"], base)
+    if is_saved_dataset(path):
+        return load_from_disk(str(path))
     files = source.get("data_files") or (str(path / "data" / "*" / "*.parquet") if path.is_dir() else str(path))
     if isinstance(files, str) and path.is_dir() and not Path(files).is_absolute():
         files = str(path / files)
@@ -749,7 +778,9 @@ def huggingface_source(
 
     * ``repo_id`` (Hub dataset) or ``path`` (local folder or file);
       ``data_files`` (default ``data/*/*.parquet``, the LeRobot layout),
-      ``split`` ("train"), ``revision``.
+      ``split`` ("train"), ``revision``. A ``path`` written by
+      ``datasets.Dataset.save_to_disk`` (``model.conversion.common.save_hf_dataset``) is
+      opened with ``datasets.load_from_disk``, memory-mapped and without a cache copy.
     * ``urdf`` and ``joint_names``: URDF joint for each state entry, in order.
       Joints not listed are frozen at ``frozen_joints`` positions (default 0)
       unless ``freeze_unlisted_joints`` is false.
@@ -817,11 +848,9 @@ def huggingface_source(
         "imu": source.get("imu_acceleration_key"),
         "contact": source.get("contact_key"),
     }
-    keys = {episode_key, *_keys(state_key)}
-    for key in vector_keys.values():
-        keys.update(_keys(key))
-    if frame_key in dataset.column_names:
-        keys.add(frame_key)
+    keys = set(source_columns(source))
+    if frame_key not in dataset.column_names:
+        keys.discard(frame_key)
     dataset = dataset.select_columns(sorted(keys))
     episode_ids = np.asarray(dataset[episode_key]).reshape(-1)
     unique = np.unique(episode_ids)

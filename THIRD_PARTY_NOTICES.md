@@ -104,6 +104,9 @@ No code from these repositories is copied:
   torque at every physics step.
 - [unitreerobotics/unitree_rl_gym](https://github.com/unitreerobotics/unitree_rl_gym)
   (BSD-3-Clause, Unitree Robotics): PD gains, cited for comparison.
+- [unitreerobotics/unitree_sdk2_python](https://github.com/unitreerobotics/unitree_sdk2_python)
+  (BSD-3-Clause, Unitree Robotics): the G1 motor order (`G1JointIndex`), one of the checks
+  behind `KNOWN_NAME_FIXES` in `model/conversion/mapping.py`.
 - [Isaac Lab](https://github.com/isaac-sim/IsaacLab) (BSD-3-Clause, the Isaac Lab Project
   Developers): `model/rl/isaac_env.py` calls its API, subclasses `IdealPDActuator`, and
   uses the solver iteration counts of its `UNITREE_GO1_CFG`.
@@ -173,19 +176,21 @@ Debut, Younes Belkada, Sayak Paul, Benjamin Bossan and Marian Tietz; "Copyright
 
 ## Datasets
 
-The converters in `model/conversion/datasets.py` and the example configs download these
-datasets from their publishers; none is redistributed in this repository. Their terms
+The converters in `model/conversion/datasets.py`, `scripts/download_datasets.py` and the
+example configs download these datasets from their publishers; none is redistributed in
+this repository. Their terms
 apply to anything trained on them. Full references are in
 [docs/data.md](docs/data.md#references).
 
 | Dataset | Authors / publisher | License stated by the publisher | Used by |
 |---|---|---|---|
-| [`unitreerobotics/G1_WBT_Inspire_Pick_Up_Fruit`](https://huggingface.co/datasets/unitreerobotics/G1_WBT_Inspire_Pick_Up_Fruit), [`unitreerobotics/G1_Dex3_ToastedBread_Dataset`](https://huggingface.co/datasets/unitreerobotics/G1_Dex3_ToastedBread_Dataset) | Unitree Robotics | Apache-2.0 | `configs/data/g1_*.json`, `configs/rl/g1_go1_real_and_synthetic.json` |
+| [`unitreerobotics/G1_WBT_Inspire_Pick_Up_Fruit`](https://huggingface.co/datasets/unitreerobotics/G1_WBT_Inspire_Pick_Up_Fruit) and the other `unitreerobotics/G1_WBT_*` repositories (77 on 2026-11-23, `G1_WBT_SMPL_*` included), [`unitreerobotics/G1_Dex3_ToastedBread_Dataset`](https://huggingface.co/datasets/unitreerobotics/G1_Dex3_ToastedBread_Dataset) | Unitree Robotics | Apache-2.0 | `configs/data/g1_*.json`, `configs/rl/g1_go1_real_and_synthetic.json`, `scripts/download_datasets.py` (`g1_wbt`, `g1_wbt_q36`, `g1_wbt_smpl`, `g1_dex3`) |
 | MIPO-Go1, [`Open-IO/mipo-go1-odometry`](https://huggingface.co/datasets/Open-IO/mipo-go1-odometry) | Shuo Yang, Zixin Zhang, Benjamin Bokser, Zachary Manchester (IROS 2023); recordings from [Cerberus 2.0](https://github.com/ShuoYangRobotics/Cerberus2.0) | AGPL-3.0 (card and Cerberus 2.0) | `convert_mipo`, torque and contact validation |
 | GrandTour, [`leggedrobotics/grand_tour_dataset`](https://huggingface.co/datasets/leggedrobotics/grand_tour_dataset) | Turcan Tuna, Jonas Frey, Lanke Frank Tarimo Fu, Katharine Patterson, Tianao Xu, Maurice Fallon, Cesar Cadena, Marco Hutter | Card MIT; website: data CC BY-SA 4.0, software MIT | `convert_grandtour` |
 | NeuroBEM | Leonard Bauersfeld, Elia Kaufmann, Philipp Foehn, Sihao Sun, Davide Scaramuzza (Robotics and Perception Group, University of Zurich) | None stated | `convert_neurobem` |
 | LocoMuJoCo, [`robfiras/loco-mujoco-datasets`](https://huggingface.co/datasets/robfiras/loco-mujoco-datasets) | Firas Al-Hafez, Guoping Zhao, Jan Peters, Davide Tateo | Data CC BY-NC-ND 4.0; code MIT | `convert_locomujoco` |
-| AMASS retargeted to G1, [`ember-lab-berkeley/AMASS_Retargeted_for_G1`](https://huggingface.co/datasets/ember-lab-berkeley/AMASS_Retargeted_for_G1) | Retargeting from Kun Zhao's [`fleaven/Retargeted_AMASS_for_robotics`](https://huggingface.co/datasets/fleaven/Retargeted_AMASS_for_robotics); AMASS by Naureen Mahmood, Nima Ghorbani, Nikolaus F. Troje, Gerard Pons-Moll, Michael J. Black | Card CC BY 4.0; the AMASS license (non-commercial research, no redistribution) applies | `convert_amass_g1` |
+| AMASS retargeted to G1, [`fleaven/Retargeted_AMASS_for_robotics`](https://huggingface.co/datasets/fleaven/Retargeted_AMASS_for_robotics) (revision `275c4c4a`) | Retargeting by Kun Zhao; AMASS by Naureen Mahmood, Nima Ghorbani, Nikolaus F. Troje, Gerard Pons-Moll, Michael J. Black; the README also asks to cite SMPL-X (Pavlakos et al., CVPR 2019) | Card CC BY 4.0; the AMASS license (non-commercial research, no redistribution) applies | `convert_amass_g1` |
+| xwbc-retarget-data, [`TonyZhang1999/xwbc-retarget-data`](https://huggingface.co/datasets/TonyZhang1999/xwbc-retarget-data) (revision `b4e169f4`) | Retargeting by the Hub user TonyZhang1999 (paper unverified), apparently with GMR (Joao Pedro Araujo, Yanjie Ze, Pei Xu, Jiajun Wu, C. Karen Liu, arXiv:2510.02252); AMASS by Naureen Mahmood, Nima Ghorbani, Nikolaus F. Troje, Gerard Pons-Moll, Michael J. Black; LAFAN1 by Félix G. Harvey, Mike Yurick, Derek Nowrouzezahrai, Christopher Pal (Ubisoft La Forge) | Card MIT; the AMASS license (non-commercial research) and LAFAN1's CC BY-NC-ND 4.0 apply to the motions | `convert_xwbc` |
 | LAFAN1 retargeted to Unitree, [`lvhaidong/LAFAN1_Retargeting_Dataset`](https://huggingface.co/datasets/lvhaidong/LAFAN1_Retargeting_Dataset) (copy of `unitreerobotics/LAFAN1_Retargeting_Dataset`) | Retargeting by Unitree Robotics; LAFAN1 motions by Félix G. Harvey, Mike Yurick, Derek Nowrouzezahrai, Christopher Pal (Ubisoft La Forge) | Retargeting BSD-3-Clause; LAFAN1 CC BY-NC-ND 4.0 | `convert_lafan1` |
 
 ## Robot models (URDF)
@@ -195,7 +200,7 @@ they are not redistributed here) and the pipeline reads them unmodified:
 
 | File | Author / copyright holder | Source | License |
 |---|---|---|---|
-| `go1.urdf`, `h1.urdf`, `g1_29dof.urdf`, `go2.urdf` | HangZhou YuShu Technology Co., Ltd. ("Unitree Robotics"), 2016-2022 | [unitreerobotics/unitree_ros](https://github.com/unitreerobotics/unitree_ros) | BSD-3-Clause |
+| `go1.urdf`, `h1.urdf`, `g1_29dof_rev_1_0.urdf` and its 24 collision meshes (`meshes/*.STL`), `go2.urdf` | HangZhou YuShu Technology Co., Ltd. ("Unitree Robotics"), 2016-2022 | [unitreerobotics/unitree_ros](https://github.com/unitreerobotics/unitree_ros) | BSD-3-Clause |
 | `anymal_d.urdf` | ANYbotics AG, 2023 | [ANYbotics/anymal_d_simple_description](https://github.com/ANYbotics/anymal_d_simple_description) | BSD-3-Clause |
 | `talos_reduced.urdf` | PAL Robotics, S.L., 2016 (stated in the file) | [Gepetto/example-robot-data](https://github.com/Gepetto/example-robot-data) (repository by LAAS-CNRS, University of Edinburgh and INRIA, BSD-3-Clause) | The file itself: Creative Commons Attribution-NonCommercial-NoDerivs 3.0 (<http://creativecommons.org/licenses/by-nc-nd/3.0/>) |
 
@@ -250,6 +255,7 @@ metadata or license file.
 |---|---|---|
 | [PyTorch](https://github.com/pytorch/pytorch) | PyTorch Team and contributors | BSD-3-Clause (bundled components under other permissive licenses) |
 | [Transformers](https://github.com/huggingface/transformers), [Datasets](https://github.com/huggingface/datasets), [Accelerate](https://github.com/huggingface/accelerate), [safetensors](https://github.com/huggingface/safetensors) | Hugging Face and contributors | Apache-2.0 |
+| [PyArrow](https://arrow.apache.org/) (Apache Arrow) | The Apache Software Foundation (NOTICE: "Copyright 2016-2026 The Apache Software Foundation") | Apache-2.0 (bundled components under other permissive licenses, listed in its NOTICE) |
 | [NumPy](https://numpy.org) | Travis E. Oliphant et al., NumPy Developers | BSD-3-Clause |
 | [SciPy](https://scipy.org) | Enthought, Inc. and the SciPy Developers | BSD-3-Clause |
 | [TensorBoard](https://github.com/tensorflow/tensorboard) | Google Inc. / TensorFlow authors | Apache-2.0 |

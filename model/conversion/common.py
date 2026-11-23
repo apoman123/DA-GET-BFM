@@ -163,16 +163,23 @@ def write_dataset(
     joint_names: list[str],
     contact_names: list[str] | None = None,
     info: dict[str, Any] | None = None,
+    rows_per_group: int = 200_000,
 ) -> dict[str, Any]:
     """Write episodes as a LeRobot-style (v3.0 layout) parquet table with ``meta/info.json``.
 
+    The episodes are consumed one at a time and written in row groups of about
+    ``rows_per_group`` frames, so a generator of episodes is converted without holding the
+    whole dataset in memory. The table is written to a temporary name and renamed when
+    complete, so an interrupted conversion leaves no file that looks finished.
+
     Args:
         output (str | Path): Folder to create.
-        episodes (Iterable[Episode]): Episodes with consistent signal keys.
+        episodes (Iterable[Episode]): Episodes with consistent signal keys and widths.
         fps (float): Frame rate.
         joint_names (list[str]): Names of the joint columns.
         contact_names (list[str] | None): Names of contact columns (URDF links).
         info (dict | None): Extra provenance stored in ``info.json``.
+        rows_per_group (int): Frames buffered before a row group is written.
 
     Returns:
         dict: The ``info.json`` content.
@@ -183,45 +190,66 @@ def write_dataset(
     output = Path(output)
     (output / "data" / "chunk-000").mkdir(parents=True, exist_ok=True)
     (output / "meta").mkdir(parents=True, exist_ok=True)
-    columns: dict[str, list] = {"episode_index": [], "frame_index": [], "timestamp": []}
+    target = output / "data" / "chunk-000" / "file-000.parquet"
+    partial = target.with_name(target.name + ".partial")
     keys: list[str] | None = None
-    total = 0
-    count = 0
-    for index, episode in enumerate(episodes):
-        if keys is None:
-            keys = sorted(episode.signals)
-            for key in keys:
-                columns[FEATURE_COLUMNS[key]] = []
-        if sorted(episode.signals) != keys:
-            raise ValueError("every episode must have the same signals")
-        length = episode.length
-        columns["episode_index"] += [index] * length
-        columns["frame_index"] += list(range(length))
-        columns["timestamp"] += (np.arange(length) / fps).tolist()
+    widths: dict[str, int] = {}
+    buffer: list[tuple[int, Episode]] = []
+    buffered = total = count = 0
+    writer = None
+
+    def flush() -> None:
+        nonlocal writer, buffer, buffered
+        if not buffer:
+            return
+        lengths = [episode.length for _, episode in buffer]
+        arrays = {
+            "episode_index": pa.array(np.repeat([index for index, _ in buffer], lengths), type=pa.int64()),
+            "frame_index": pa.array(np.concatenate([np.arange(length) for length in lengths]), type=pa.int64()),
+            "timestamp": pa.array(np.concatenate([np.arange(length) / fps for length in lengths]), type=pa.float32()),
+        }
         for key in keys:
-            values = np.asarray(episode.signals[key], dtype=np.float32).reshape(length, -1)
-            columns[FEATURE_COLUMNS[key]].append(values)
-        total += length
-        count += 1
-    if not count:
-        raise ValueError("no episodes to write")
-    arrays = {}
-    for name, values in columns.items():
-        if name in ("episode_index", "frame_index"):
-            arrays[name] = pa.array(values, type=pa.int64())
-        elif name == "timestamp":
-            arrays[name] = pa.array(values, type=pa.float32())
-        else:
-            stacked = np.concatenate(values, axis=0)
-            arrays[name] = pa.FixedSizeListArray.from_arrays(pa.array(stacked.ravel()), stacked.shape[1])
-    pq.write_table(pa.table(arrays), output / "data" / "chunk-000" / "file-000.parquet")
+            stacked = np.concatenate([np.asarray(episode.signals[key], dtype=np.float32).reshape(episode.length, -1) for _, episode in buffer])
+            arrays[FEATURE_COLUMNS[key]] = pa.FixedSizeListArray.from_arrays(pa.array(stacked.ravel()), widths[key])
+        table = pa.table(arrays)
+        if writer is None:
+            writer = pq.ParquetWriter(partial, table.schema)
+        writer.write_table(table)
+        buffer, buffered = [], 0
+
+    try:
+        for episode in episodes:
+            if keys is None:
+                keys = sorted(episode.signals)
+                widths = {key: int(np.prod(np.shape(episode.signals[key])[1:], dtype=np.int64)) for key in keys}
+            if sorted(episode.signals) != keys:
+                raise ValueError("every episode must have the same signals")
+            for key in keys:
+                if int(np.prod(np.shape(episode.signals[key])[1:], dtype=np.int64)) != widths[key]:
+                    raise ValueError(f"{key}: every episode must have the same width")
+            buffer.append((count, episode))
+            buffered += episode.length
+            total += episode.length
+            count += 1
+            if buffered >= rows_per_group:
+                flush()
+        if not count:
+            raise ValueError("no episodes to write")
+        flush()
+    except BaseException:
+        if writer is not None:
+            writer.close()
+        partial.unlink(missing_ok=True)
+        raise
+    writer.close()
+    partial.replace(target)
     features = {
         "episode_index": {"dtype": "int64", "shape": [1], "names": None},
         "frame_index": {"dtype": "int64", "shape": [1], "names": None},
         "timestamp": {"dtype": "float32", "shape": [1], "names": None},
     }
     for key in keys:
-        width = arrays[FEATURE_COLUMNS[key]].type.list_size
+        width = widths[key]
         if key in ("state", "velocity", "effort", "action"):
             names = list(joint_names)
         elif key in ("contact", "contact_force"):
@@ -300,6 +328,78 @@ def source_config(
     source.update(extra or {})
     Path(output, "source.json").write_text(json.dumps(source, indent=2))
     return source
+
+
+HF_FOLDER = "hf"
+"""Subfolder of a dataset that holds its Hugging Face ``save_to_disk`` copy."""
+
+
+def save_hf_dataset(
+    source: dict[str, Any],
+    target: str | Path | None = None,
+    base: str | Path | None = None,
+    max_shard_size: str = "1GB",
+) -> dict[str, Any]:
+    """Save the table of a local ``huggingface`` source as a Hugging Face dataset.
+
+    The copy is written with ``datasets.Dataset.save_to_disk`` (Arrow files of at most
+    ``max_shard_size``) and keeps only the columns the source reads
+    (``model.training.sources.source_columns``). The ``huggingface`` source opens such a
+    folder with ``datasets.load_from_disk``: memory-mapped, with no parquet-to-Arrow copy
+    in ``HF_DATASETS_CACHE`` (under the home directory by default). The parquet tables stay
+    where they are; the intermediate Arrow cache is built next to the target and deleted.
+
+    Args:
+        source (dict): Source with ``path`` (a folder of parquet tables, e.g. the
+            ``source.json`` of a converter or a downloaded LeRobot dataset) and optional
+            ``data_files``.
+        target (str | Path | None): Folder to write (default ``<path>/hf``); replaced if
+            it exists.
+        base (str | Path | None): Directory that a relative ``path`` is relative to.
+        max_shard_size (str): Largest Arrow file.
+
+    Returns:
+        dict: The same source reading the copy (``path`` set to it, ``data_files``
+            removed).
+    """
+    import glob
+    import shutil
+    import tempfile
+
+    import pyarrow.parquet as pq
+    from datasets import load_dataset
+
+    from model.training.sources import source_columns
+
+    if "path" not in source:
+        raise ValueError("only a source with a local path can be saved")
+    path = Path(source["path"])
+    if not path.is_absolute() and base is not None:
+        path = Path(base) / path
+    pattern = source.get("data_files") or "data/*/*.parquet"
+    patterns = [pattern] if isinstance(pattern, str) else list(pattern)
+    files = sorted({name for item in patterns for name in glob.glob(str(item if Path(item).is_absolute() else path / item))})
+    if not files:
+        raise FileNotFoundError(f"no parquet files match {patterns} in {path}")
+    available = set(pq.read_schema(files[0]).names)
+    columns = [column for column in source_columns(source) if column in available]
+    frame_key = source.get("frame_key", "frame_index")
+    missing = sorted(set(source_columns(source)) - available - {frame_key})
+    if missing:
+        raise ValueError(f"{path}: the source reads columns the table does not have: {missing}")
+    target = Path(target) if target is not None else path / HF_FOLDER
+    target.parent.mkdir(parents=True, exist_ok=True)
+    partial = target.with_name(target.name + ".partial")
+    shutil.rmtree(partial, ignore_errors=True)
+    with tempfile.TemporaryDirectory(dir=target.parent, prefix=".hf-cache-") as cache:
+        table = load_dataset("parquet", data_files=files, split="train", columns=columns, cache_dir=cache)
+        table.save_to_disk(str(partial), max_shard_size=max_shard_size)
+        del table
+    shutil.rmtree(target, ignore_errors=True)
+    partial.replace(target)
+    saved = {key: value for key, value in source.items() if key not in ("data_files", "repo_id", "revision", "split")}
+    saved["path"] = str(target.resolve())
+    return saved
 
 
 class HttpRangeFile(io.RawIOBase):

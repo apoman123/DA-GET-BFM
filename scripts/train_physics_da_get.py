@@ -173,7 +173,10 @@ def main() -> None:
     training_args.label_names = ["fk_position"]
     set_seed(training_args.seed)
 
-    datasets = build_physics_datasets(data_args.data_config, data_args.cache_dir, data_args.rebuild_cache)
+    # The main process of each node builds the Arrow cache; the other ranks wait and read it.
+    rebuild = data_args.rebuild_cache and training_args.local_process_index == 0
+    with training_args.main_process_first(desc="physics data"):
+        datasets = build_physics_datasets(data_args.data_config, data_args.cache_dir, rebuild)
     if datasets.eval is None:
         training_args.eval_strategy = IntervalStrategy.NO
     print(

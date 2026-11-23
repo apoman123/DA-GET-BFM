@@ -36,7 +36,7 @@
    "name": "g1_29dof",
    "family": "humanoid",
    "split": "test",
-   "urdf": "../../assets/urdf/g1_29dof.urdf",
+   "urdf": "../../assets/urdf/g1_29dof_rev_1_0.urdf",
    "notes": "URDF from unitreerobotics/unitree_ros (BSD-3-Clause, Copyright (c) 2016-2022 HangZhou YuShu TECHNOLOGY CO.,LTD. (\"Unitree Robotics\")), fetched by scripts/download_urdfs.py. Used in configs/data/synthetic_unitree.json, ground_contact.json, g1_wbt_floating.json, g1_hub_plus_synthetic.json; configs/rl/g1_go1_real_and_synthetic.json"
   },
   {
@@ -50,8 +50,8 @@
    "name": "g1_arms",
    "family": "arm",
    "split": "test",
-   "urdf": "../../assets/urdf/g1_29dof.urdf",
-   "notes": "G1 arm joints of g1_29dof.urdf (configs/data/g1_hub_plus_synthetic.json: sources g1_dex3_toasted_bread and g1_arms)"
+   "urdf": "../../assets/urdf/g1_29dof_rev_1_0.urdf",
+   "notes": "G1 arm joints of g1_29dof_rev_1_0.urdf (configs/data/g1_hub_plus_synthetic.json: sources g1_dex3_toasted_bread and g1_arms)"
   }
  ],
  "levels": {
@@ -74,7 +74,7 @@
     "name": "g1_29dof",
     "family": "humanoid",
     "split": "test",
-    "urdf": "../../assets/urdf/g1_29dof.urdf",
+    "urdf": "../../assets/urdf/g1_29dof_rev_1_0.urdf",
     "notes": "held-out episodes of the data config's eval split (eval_fraction)"
    },
    {
@@ -88,7 +88,7 @@
     "name": "g1_arms",
     "family": "arm",
     "split": "test",
-    "urdf": "../../assets/urdf/g1_29dof.urdf",
+    "urdf": "../../assets/urdf/g1_29dof_rev_1_0.urdf",
     "notes": "held-out episodes of the data config's eval split (eval_fraction)"
    }
   ],

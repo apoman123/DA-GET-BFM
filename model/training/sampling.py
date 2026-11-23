@@ -72,13 +72,12 @@ def sample_groups(dataset, records: Sequence, group: str) -> list[object]:
     """
     if group not in SAMPLING_GROUPS:
         raise ValueError(f"sampling_group must be one of {SAMPLING_GROUPS}")
-    labels = []
-    for item in range(len(dataset)):
-        record = records[dataset.embodiment_of(item)]
-        if group == "embodiment":
-            labels.append(record.name)
-        elif group == "family":
-            labels.append(record.family or record.name)
-        else:
-            labels.append(record.name.split("/")[0])
-    return labels
+    if group == "embodiment":
+        names = [record.name for record in records]
+    elif group == "family":
+        names = [record.family or record.name for record in records]
+    else:
+        names = [record.name.split("/")[0] for record in records]
+    if hasattr(dataset, "sample_embodiments"):
+        return [names[embodiment] for embodiment in dataset.sample_embodiments()]
+    return [names[dataset.embodiment_of(item)] for item in range(len(dataset))]

@@ -55,8 +55,10 @@ DA-GET-BFM/
 │   ├── evaluation/            # split manifests, probes, physics metrics, counterfactuals,
 │   │                          # IQM and stratified bootstrap CIs
 │   ├── conversion/
-│   │   ├── common.py          # table format, resampling, HTTP range reads of remote zips
-│   │   ├── datasets.py        # GrandTour, MIPO, NeuroBEM, LocoMuJoCo, AMASS-G1, LAFAN1
+│   │   ├── common.py          # table format (streamed), Hugging Face copies, resampling, HTTP range reads
+│   │   ├── catalog.py         # datasets to download into chosen folders and convert (both scripts)
+│   │   ├── datasets.py        # GrandTour, MIPO, NeuroBEM, LocoMuJoCo, AMASS-G1, xwbc, LAFAN1
+│   │   ├── geometry.py        # URDF collision geometry, lowest body point, ground envelope
 │   │   ├── mapping.py         # match dataset columns to URDF joints and base signals
 │   │   └── zarr_lite.py       # minimal zarr v2 reader
 │   ├── training/
@@ -66,6 +68,7 @@ DA-GET-BFM/
 │   │   │                      # operator, slip check), base reconstruction, height rule, records
 │   │   ├── contacts.py        # contact inference: subset selection with confidence, evaluation
 │   │   ├── dataset.py         # data config, caching, dataset, collator
+│   │   ├── frame_store.py     # processed episodes as memory-mapped HF datasets Arrow files
 │   │   ├── resampling.py      # one control period: resample recorded trajectories
 │   │   ├── procedural.py      # procedural-robot source (generator + simulator source)
 │   │   ├── symmetry.py        # left-right mirror map and mirrored trajectories
@@ -76,7 +79,9 @@ DA-GET-BFM/
 │   ├── train_physics_da_get.py       # HF Trainer entry point
 │   ├── train_bfm.py                  # online off-policy FB-CPR across robots
 │   ├── make_data_config.py           # write a data config from a URDF and a dataset
-│   ├── convert_dataset.py            # convert public datasets to the table format
+│   ├── download_datasets.py          # download catalog datasets into chosen folders and convert them
+│   ├── convert_datasets.py           # convert downloaded catalog datasets (no network)
+│   ├── convert_dataset.py            # one converter with all its options (through the HF cache)
 │   ├── validate_torque_estimation.py # estimated vs measured torques on a real Go1 (analysis)
 │   ├── evaluate_contact_detection.py # inferred vs sensor or simulator contacts
 │   ├── benchmark_inference.py        # 50 Hz latency of every network
@@ -86,7 +91,7 @@ DA-GET-BFM/
 │   ├── retarget_motion.py            # G3: keypoint retargeting between robots
 │   ├── generate_morphologies.py      # D1: write a suite of procedural robots
 │   ├── build_proposal_pdf.py         # render docs/proposal/*.md to the PDF
-│   └── download_urdfs.py             # fetch the Unitree, ANYbotics and PAL Robotics URDFs into assets/urdf
+│   └── download_urdfs.py             # fetch the Unitree, ANYbotics and PAL Robotics URDFs (and G1 rev 1.0 collision meshes) into assets/urdf
 ├── assets/robots/quadrotor_x.urdf    # X quadrotor for synthetic flight
 ├── configs/data/              # example data configs
 ├── configs/rl/                # example RL training configs
@@ -169,6 +174,15 @@ The suite has 197 tests (the MuJoCo and HDF5 tests are skipped without the
     than 90% of the time; the switches `detected_contact_response`,
     `min_contact_confidence` and `contact_detection` act as documented; the evaluation
     script reports both methods.
+- `test_catalog.py`:
+  - `scripts/download_datasets.py` and `scripts/convert_datasets.py` against a fake Hub:
+    folders, `--path`, `--raw_root`, `--pattern`, `--limit`, `--dry_run`, `--no-convert`,
+    re-runs that skip finished work, `--delete_raw`, `--redownload`;
+  - the Hugging Face copies, which load to the same trajectories as the parquet tables and
+    keep only the columns their source reads;
+  - the Unitree sets: sorting repositories by schema, no videos, nested folders, and
+    sources that load; the source templates equal those of the shipped data configs;
+  - streamed `write_dataset`: several row groups, and no table left by a failed run.
 - `test_conversion.py`:
   - every converter on small files in each dataset's real format;
   - the NeuroBEM thrust identification;
@@ -372,7 +386,7 @@ to `feature/**` branches, on pull requests, and on demand, on Ubuntu with Python
 | Lock | `uv lock --check` | `uv.lock` matches `pyproject.toml` |
 | Install | `uv sync --locked --all-extras` | The locked environment installs, with MuJoCo, the converters and the validation tools |
 | Compile | `uv run python -m compileall -q model scripts tests` | Every module byte-compiles |
-| URDFs | `uv run python scripts/download_urdfs.py` | Go1, H1, G1, ANYmal D, Go2 and Talos for the tests and the morphology generator (`assets/urdf/` is not committed) |
+| URDFs | `uv run python scripts/download_urdfs.py` | Go1, H1, G1 (`g1_29dof_rev_1_0.urdf`), ANYmal D, Go2 and Talos for the tests and the morphology generator, and the 24 G1 collision meshes (about 11 MB) for `amass_g1` and `xwbc` (`assets/urdf/` is not committed) |
 | Test | `uv run pytest -q -ra` | The whole suite, including both training scripts end to end on MuJoCo, the zero-shot options and the documentation link check |
 
 To run the same steps locally, run those five commands from the repository root. Tests

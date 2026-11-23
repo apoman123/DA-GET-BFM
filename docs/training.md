@@ -661,10 +661,26 @@ columns that are concatenated in order.
 | `contact_detection`, `detected_contact_response` | Per-source inference method (overrides the data config), and `false` to give inferred contacts no response labels at all (dynamic gaits without contact data). |
 | `fps`, `episode_key`, `frame_key`, `max_episodes`, `smoothing_window`, `gravity`, `end_effectors` | Timing, grouping, size, smoothing, a constant gravity in the base frame, task-E frames. |
 
-Processed features and labels are cached in `.cache/physics_data/<hash>.pt`.
-The hash covers the config and the URDF contents, so the analytic dynamics run
-once per dataset rather than once per epoch. Episodes, not frames, are split
-between train and eval.
+Processed features and labels are cached as Hugging Face `datasets` Arrow files in
+`.cache/physics_data/<hash>/` (`model/training/frame_store.py`). The hash covers the config
+and the URDF contents, so the analytic dynamics run once per dataset rather than once per
+epoch. Episodes, not frames, are split between train and eval.
+
+| File | Content |
+|---|---|
+| `frames-00000.arrow`, … | One row per frame, one list column per per-frame tensor (flattened). Each file opens with `datasets.Dataset.from_file(path)`; `ProcessedEpisodes(path).dataset()` concatenates them. |
+| `episodes.json` | Per episode: robot index, file, first row, frame count, tensor shapes, `dt` |
+| `records.pt` | The robot records with the data scales |
+| `complete` | Written last; an entry without it is rebuilt |
+
+The Arrow files are memory-mapped and every sample reads only the frames it needs, so the
+processed data can be larger than the RAM. Sources are processed one at a time and written
+as they go, so building the cache needs memory for one source's trajectories, not for all
+processed frames. The disk use is about 25 KB per frame for G1 with two probe variants
+(`history_size` 25, measured with a synthetic source). Reading a sample from Arrow took
+1.2 ms against 0.3 ms from memory, small next to collating a batch of 64 (about 250 ms on
+one CPU thread); set `--dataloader_num_workers` to hide both. Caches of earlier versions
+(`<hash>.pt`) are not read; delete them.
 
 ### Values taken from papers in the shipped configs
 

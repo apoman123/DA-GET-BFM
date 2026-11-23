@@ -36,6 +36,18 @@ SIDE_WORDS = {
 }
 DROP_WORDS = {"joint", "k", "motor", "dof", "j", "observation", "state", "action", "q"}
 UNITREE_LEG_PARTS = {"0": "hip", "1": "thigh", "2": "calf"}
+# Feature names that do not match the stored values, by ``robot_type`` prefix. Unitree's G1
+# LeRobot sets (every ``G1_WBT_*`` and most ``G1_Dex1_*``; 184 of the 262 ``unitreerobotics``
+# repos on 2026-11-23) name the arm entries ``..., elbow, wrist_yaw, wrist_roll, wrist_pitch``,
+# but store them in the motor order ``wrist_roll, wrist_pitch, wrist_yaw`` (``G1JointIndex`` of
+# unitree_sdk2_python). Checked with forward kinematics against the recorded end-effector poses
+# on four repos (docs/data.md#g1-joint-order-check).
+KNOWN_NAME_FIXES = {
+    "unitree_g1": {
+        ("shoulder_pitch", "shoulder_roll", "shoulder_yaw", "elbow", "wrist_yaw", "wrist_roll", "wrist_pitch"):
+        ["shoulder_pitch", "shoulder_roll", "shoulder_yaw", "elbow", "wrist_roll", "wrist_pitch", "wrist_yaw"],
+    },
+}
 
 
 def words(name: str) -> list[str]:
@@ -121,6 +133,16 @@ def _names(feature: dict) -> list[str]:
     return [str(name) for name in names or []]
 
 
+def corrected_names(info: dict[str, Any], column: str) -> tuple[list[str], bool]:
+    """Return the entry names of a column, corrected by ``KNOWN_NAME_FIXES``, and whether they were."""
+    names = _names(info["features"][column])
+    robot = str(info.get("robot_type") or "")
+    for prefix, fixes in KNOWN_NAME_FIXES.items():
+        if robot.startswith(prefix) and tuple(names) in fixes:
+            return list(fixes[tuple(names)]), True
+    return names, False
+
+
 def _find_vector(features: dict, required: list[str], prefer: tuple[str, ...] = ()) -> tuple[str, list[int]] | None:
     """Find a column whose names contain ``required`` (in any order)."""
     found = []
@@ -159,11 +181,15 @@ def inspect_dataset(dataset: str | Path, urdf_joints: list[str], threshold: floa
         return "state" in lowered or "position" in lowered or "joint" in lowered
 
     candidates = []
+    entry_names: dict[str, list[str]] = {}
     for column, feature in features.items():
         if feature.get("dtype") in ("video", "image") or not state_like(column):
             continue
         context = [word for word in words(column.split(".")[-1]) if word not in {"state"}] if column.count(".") >= 2 else []
-        for index, name in enumerate(_names(feature)):
+        entry_names[column], fixed = corrected_names(info, column)
+        if fixed:
+            report.append(f"{column}: names {_names(feature)} are stored as {entry_names[column]} (KNOWN_NAME_FIXES)")
+        for index, name in enumerate(entry_names[column]):
             candidates.append((column, index, name, context))
     assigned, unmatched = match_joints(urdf_joints, candidates, threshold)
     if not assigned:
@@ -186,7 +212,7 @@ def inspect_dataset(dataset: str | Path, urdf_joints: list[str], threshold: floa
     }
     for joint in joints:
         column, index = assigned[joint]
-        report.append(f"  {joint:32s} <- {column}[{index}] {_names(features[column])[index]!r}")
+        report.append(f"  {joint:32s} <- {column}[{index}] {entry_names[column][index]!r}")
     action_columns = [column.replace("observation.state", "action") for column in columns]
     if all(column in features for column in action_columns):
         source["action_key"] = action_columns[0] if len(action_columns) == 1 else action_columns

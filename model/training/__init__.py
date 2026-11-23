@@ -19,16 +19,19 @@ from model.training.episodes import (
     estimate_episode_efforts,
     process_episode,
 )
+from model.training.frame_store import MemoryEpisodes, ProcessedEpisodes
 from model.training.trainer import PhysicsPretrainingTrainer
 
 __all__ = [
     "TORQUE_SOURCES",
     "CollatorSettings",
     "EmbodimentRecord",
+    "MemoryEpisodes",
     "PhysicsDataCollator",
     "PhysicsDatasets",
     "PhysicsPretrainingTrainer",
     "PhysicsTrajectoryDataset",
+    "ProcessedEpisodes",
     "Trajectory",
     "build_physics_datasets",
     "estimate_episode_efforts",

@@ -60,6 +60,7 @@ cd DA-GET-BFM
 uv sync --all-extras                     # core + MuJoCo, dataset converters, validation tools
 uv run pytest                            # run the tests
 uv run python scripts/download_urdfs.py  # robot URDFs by Unitree, ANYbotics and PAL Robotics
+uv run python scripts/download_datasets.py --list  # public datasets to download and convert (docs/data.md)
 ```
 
 URDF parsing and the dynamics need only PyTorch and the Python standard library.

@@ -41,9 +41,10 @@ Options of the zero-shot proposal (``docs/zero_shot.md``), all off by default:
   (``model.training.symmetry``).
 
 ``build_physics_datasets`` loads every source, computes features and labels
-once per frame (``model.training.episodes``), caches the result on disk under a
-hash of the config and the URDF files, and splits episodes into train and
-evaluation sets. ``PhysicsDataCollator`` pads samples of different robots into
+once per frame (``model.training.episodes``), writes them to memory-mapped Hugging
+Face ``datasets`` Arrow files under a hash of the config and the URDF files
+(``model.training.frame_store``), and splits episodes into train and evaluation
+sets. Only the frames of a batch are read, so the data can exceed the RAM. ``PhysicsDataCollator`` pads samples of different robots into
 one batch and builds the GET-Zero observation tokens:
 
 * variable local ``o_vl`` per joint and step (5): normalized position, velocity
@@ -101,9 +102,17 @@ from model.training.episodes import (
     finalize_acceleration_scales,
     process_episode,
 )
+from model.training.frame_store import (
+    EpisodeWriter,
+    MemoryEpisodes,
+    ProcessedEpisodes,
+    SampleIndex,
+    as_episode_store,
+    entry_complete,
+)
 from model.training.sources import SOURCE_TYPES, resolve_path
 
-CACHE_VERSION = 7
+CACHE_VERSION = 8
 VARIABLE_LOCAL_SIZE = 5
 VARIABLE_GLOBAL_SIZE = BASE_FEATURE_SIZE
 FD_TORQUE_CLIP = 5.0
@@ -320,6 +329,62 @@ class PhysicsDatasets:
         }
 
 
+def _write_entry(
+    entry: Path, config: dict[str, Any], base: Path | None, feature_config: JointFeatureConfig, control_dt: float | None
+) -> None:
+    """Process every source and write the episodes of a cache entry, one source at a time.
+
+    Processed episodes go to disk as they are made; only their label statistics stay in
+    memory until ``finalize_acceleration_scales`` sets the record scales. The entry is
+    written under ``<entry>.partial-<pid>`` and renamed when complete; if another process
+    finished the same entry first, this copy is discarded.
+    """
+    import os
+    import shutil
+
+    partial = entry.with_name(f"{entry.name}.partial-{os.getpid()}")
+    writer = EpisodeWriter(partial)
+    records: list[EmbodimentRecord] = []
+    statistics: list[tuple[int, dict[str, torch.Tensor]]] = []
+    for source in config["sources"]:
+        source_records, trajectories = load_source(source, base, feature_config, control_dt)
+        offset = len(records)
+        records += source_records
+        for trajectory in trajectories:
+            index = offset + trajectory.embodiment
+            episode = process_episode(
+                records[index],
+                trajectory,
+                contact_height_tolerance=float(source.get("contact_height_tolerance", 0.03)),
+                contact_speed_tolerance=float(source.get("contact_speed_tolerance", 0.5)),
+                proposal_variants=int(config.get("proposal_variants", 2)),
+                contact_margin_steps=int(config.get("contact_margin_steps", 2)),
+                seed=int(config.get("seed", 0)) * 1_000_003 + len(statistics),
+                max_contact_slip=_optional_float(config.get("max_contact_slip", 0.1)),
+                contact_detection=str(source.get("contact_detection", config.get("contact_detection", "dynamics"))),
+                detected_contact_response=bool(source.get("detected_contact_response", True)),
+                min_contact_confidence=float(config.get("min_contact_confidence", 3.0)),
+            )
+            statistics.append((index, {key: value for key, value in episode.items() if key.startswith("_")}))
+            writer.add(index, episode)
+        del trajectories
+    if not statistics:
+        raise ValueError("the data config produced no episodes")
+    finalize_acceleration_scales(records, statistics)
+    writer.close(records)
+    if entry_complete(entry):
+        shutil.rmtree(partial)
+        return
+    if entry.exists():
+        shutil.rmtree(entry)
+    try:
+        partial.rename(entry)
+    except OSError:
+        if not entry_complete(entry):
+            raise
+        shutil.rmtree(partial)
+
+
 def build_physics_datasets(
     config_source: str | Path | dict,
     cache_dir: str | Path | None = None,
@@ -347,40 +412,13 @@ def build_physics_datasets(
     history = int(config.get("history_size", 3))
     control_dt = _optional_float(config.get("control_dt"))
     cache_root = Path(cache_dir or config.get("cache_dir") or ".cache/physics_data")
-    cache_file = cache_root / f"{_cache_key(config, base)}.pt"
-    if cache_file.exists() and not rebuild:
-        payload = torch.load(cache_file, weights_only=False)
-        records, episodes = payload["records"], payload["episodes"]
-    else:
-        records, episodes = [], []
-        for source in config["sources"]:
-            source_records, trajectories = load_source(source, base, feature_config, control_dt)
-            offset = len(records)
-            records += source_records
-            for trajectory in trajectories:
-                index = offset + trajectory.embodiment
-                episodes.append(
-                    (
-                        index,
-                        process_episode(
-                            records[index],
-                            trajectory,
-                            contact_height_tolerance=float(source.get("contact_height_tolerance", 0.03)),
-                            contact_speed_tolerance=float(source.get("contact_speed_tolerance", 0.5)),
-                            proposal_variants=int(config.get("proposal_variants", 2)),
-                            contact_margin_steps=int(config.get("contact_margin_steps", 2)),
-                            seed=int(config.get("seed", 0)) * 1_000_003 + len(episodes),
-                            max_contact_slip=_optional_float(config.get("max_contact_slip", 0.1)),
-                            contact_detection=str(source.get("contact_detection", config.get("contact_detection", "dynamics"))),
-                            detected_contact_response=bool(source.get("detected_contact_response", True)),
-                            min_contact_confidence=float(config.get("min_contact_confidence", 3.0)),
-                        ),
-                    )
-                )
-        finalize_acceleration_scales(records, episodes)
-        cache_root.mkdir(parents=True, exist_ok=True)
-        torch.save({"records": records, "episodes": episodes}, cache_file)
-    order = list(range(len(episodes)))
+    entry = cache_root / _cache_key(config, base)
+    if rebuild or not entry_complete(entry):
+        _write_entry(entry, config, base, feature_config, control_dt)
+    store = ProcessedEpisodes(entry)
+    records = store.records()
+    episode_count = len(store)
+    order = list(range(episode_count))
     random.Random(int(config.get("seed", 0))).shuffle(order)
     eval_count = int(round(float(config.get("eval_fraction", 0.05)) * len(order)))
     if eval_count == 0 and float(config.get("eval_fraction", 0.05)) > 0 and len(order) > 1:
@@ -388,12 +426,8 @@ def build_physics_datasets(
     eval_ids, train_ids = order[:eval_count], order[eval_count:]
     include_probes = bool(config.get("include_probe_variants", True))
     group = bool(config.get("group_variants", False))
-    train = PhysicsTrajectoryDataset(records, [episodes[i] for i in train_ids], history, include_probes, group)
-    evaluation = (
-        PhysicsTrajectoryDataset(records, [episodes[i] for i in eval_ids], history, include_probes, group)
-        if eval_ids
-        else None
-    )
+    train = PhysicsTrajectoryDataset(records, store.subset(train_ids), history, include_probes, group)
+    evaluation = PhysicsTrajectoryDataset(records, store.subset(eval_ids), history, include_probes, group) if eval_ids else None
     sampling = {
         "sampling_alpha": _optional_float(config.get("sampling_alpha")),
         "sampling_group": str(config.get("sampling_group", "embodiment")),
@@ -429,6 +463,10 @@ PER_VARIANT_KEYS = (
 PER_VARIANT_FLAGS = ("torque_source", "base_acceleration_known", "effect_valid", "motor_valid")
 
 
+HISTORY_KEYS = ("positions_normalized", "velocities_normalized", "base_features", "action_features")
+FRAME_FLAG_KEYS = ("contact_residual", "contacts_detected", "response_valid", "floating_base", "contact_flags", "contact_label_valid")
+
+
 class PhysicsTrajectoryDataset(Dataset):
     """Index every (episode, frame, action variant) of processed episodes.
 
@@ -437,12 +475,15 @@ class PhysicsTrajectoryDataset(Dataset):
     at t. Probe variants share the state and history of the executed variant.
     With ``group_variants`` a sample is one (episode, frame) with the labels of
     all its variants stacked, so the encoder runs once per state (proposal D2).
+
+    The episodes are a ``ProcessedEpisodes`` view of the Arrow cache (each sample
+    reads only its frames) or ``(embodiment, episode)`` pairs in memory.
     """
 
     def __init__(
         self,
         records: Sequence[EmbodimentRecord],
-        episodes: Sequence[tuple[int, dict[str, torch.Tensor]]],
+        episodes: ProcessedEpisodes | MemoryEpisodes | Sequence[tuple[int, dict[str, torch.Tensor]]],
         history_size: int,
         include_probes: bool = True,
         group_variants: bool = False,
@@ -451,25 +492,22 @@ class PhysicsTrajectoryDataset(Dataset):
 
         Args:
             records (Sequence[EmbodimentRecord]): Embodiments.
-            episodes (Sequence): ``(embodiment, processed episode)`` pairs.
+            episodes: ``ProcessedEpisodes``, ``MemoryEpisodes`` or ``(embodiment,
+                processed episode)`` pairs.
             history_size (int): Observation history length H.
             include_probes (bool): Also index probe variants.
             group_variants (bool): One sample per state with all its variants.
         """
         self.records = list(records)
-        self.episodes = list(episodes)
+        self.episodes = as_episode_store(episodes)
         self.history_size = history_size
         self.include_probes = include_probes
         self.group_variants = group_variants
-        self.index: list[tuple[int, int, int]] = []
-        for episode_index, (_, episode) in enumerate(self.episodes):
-            steps, variants = episode["applied_torque"].shape[:2]
-            for step in range(steps):
-                if group_variants:
-                    self.index.append((episode_index, step, -1))
-                    continue
-                for variant in range(variants if include_probes else 1):
-                    self.index.append((episode_index, step, variant))
+        count = len(self.episodes)
+        steps = [self.episodes.steps(index) for index in range(count)]
+        per_step = [1 if group_variants or not include_probes else self.episodes.variants(index) for index in range(count)]
+        self.index = SampleIndex(steps, per_step, group_variants)
+        self._embodiments = [self.episodes.embodiment(index) for index in range(count)]
 
     def __len__(self) -> int:
         """Return the number of samples."""
@@ -477,70 +515,92 @@ class PhysicsTrajectoryDataset(Dataset):
 
     def embodiment_of(self, item: int) -> int:
         """Return the embodiment index of a sample (for balanced sampling)."""
-        return self.episodes[self.index[item][0]][0]
+        return self._embodiments[self.index[item][0]]
 
-    def _contact_labels(self, record: EmbodimentRecord, episode: dict[str, torch.Tensor], step: int) -> tuple[torch.Tensor, torch.Tensor]:
-        """Return per-joint contact targets and masks ``[J]`` from per-link flags."""
+    def sample_embodiments(self) -> list[int]:
+        """Return the embodiment index of every sample, in order."""
+        embodiments = torch.tensor(self._embodiments, dtype=torch.long)
+        return embodiments[torch.from_numpy(self.index.episodes())].tolist() if len(self) else []
+
+    @staticmethod
+    def _contact_labels(record: EmbodimentRecord, frames: dict[str, torch.Tensor], step: int | None = None) -> tuple[torch.Tensor, torch.Tensor]:
+        """Return per-joint contact targets and masks ``[J]`` from per-link flags.
+
+        ``frames`` is one frame's row, or a whole episode with ``step`` selecting the frame.
+        """
         joints = record.graph.num_joints
         target = torch.zeros(joints)
         mask = torch.zeros(joints, dtype=torch.bool)
-        flags = episode.get("contact_flags")
-        if flags is None or flags.shape[-1] == 0 or "contact_label_valid" not in episode:
+        flags = frames.get("contact_flags")
+        if flags is None or flags.shape[-1] == 0 or "contact_label_valid" not in frames:
             return target, mask
-        if not bool(episode["contact_label_valid"][step]):
+        valid = frames["contact_label_valid"]
+        if step is not None:
+            flags, valid = flags[step], valid[step]
+        if not bool(valid):
             return target, mask
         owners = record.contact_joints
         for link, owner in enumerate(owners.tolist()):
             if owner < 0:
                 continue
             mask[owner] = True
-            if bool(flags[step, link]):
+            if bool(flags[link]):
                 target[owner] = 1.0
         return target, mask
 
     def __getitem__(self, item: int) -> dict[str, Any]:
         """Return one unpadded sample."""
         episode_index, step, variant = self.index[item]
-        embodiment, episode = self.episodes[episode_index]
+        store = self.episodes
+        embodiment = self._embodiments[episode_index]
+        available = store.keys(episode_index)
+        first = max(step - self.history_size, 0)
+        block = store.frames(episode_index, first, step + 1, HISTORY_KEYS)
         frames = torch.arange(step - self.history_size + 1, step + 1).clamp_min(0)
         previous = (frames - 1).clamp_min(0)
-        previous_action = episode["action_features"][previous, 0]
+        previous_action = block["action_features"][previous - first, 0]
         previous_action = torch.where((frames > 0)[:, None, None], previous_action, torch.zeros_like(previous_action))
+        label_keys = [
+            key
+            for key in (*PER_FRAME_KEYS, *OPTIONAL_FRAME_KEYS, *PER_VARIANT_KEYS, *PER_VARIANT_FLAGS, *FRAME_FLAG_KEYS)
+            if key in available
+        ]
+        row = {key: value[0] for key, value in store.frames(episode_index, step, step + 1, label_keys).items()}
         sample = {
             "embodiment": embodiment,
             "variable_local": torch.cat(
                 (
-                    episode["positions_normalized"][frames, :, None],
-                    episode["velocities_normalized"][frames, :, None],
+                    block["positions_normalized"][frames - first, :, None],
+                    block["velocities_normalized"][frames - first, :, None],
                     previous_action,
                 ),
                 dim=-1,
             ),
-            "variable_global": episode["base_features"][frames],
-            "contact_residual": float(episode["contact_residual"][step]),
-            "contacts_detected": bool(episode["contacts_detected"][step]),
-            "response_valid": bool(episode["response_valid"][step]),
-            "floating_base": bool(episode["floating_base"][step]),
-            "dt": float(episode["dt"]) if "dt" in episode else 0.0,
+            "variable_global": block["base_features"][frames - first],
+            "contact_residual": float(row["contact_residual"]),
+            "contacts_detected": bool(row["contacts_detected"]),
+            "response_valid": bool(row["response_valid"]),
+            "floating_base": bool(row["floating_base"]),
+            "dt": float(store.scalar(episode_index, "dt", 0.0)),
             "grouped": variant < 0,
         }
         for key in PER_FRAME_KEYS:
-            sample[key] = episode[key][step]
+            sample[key] = row[key]
         for key in OPTIONAL_FRAME_KEYS:
-            if key in episode:
-                sample[key] = episode[key][step]
-        sample["contact_target"], sample["contact_mask"] = self._contact_labels(self.records[embodiment], episode, step)
+            if key in row:
+                sample[key] = row[key]
+        sample["contact_target"], sample["contact_mask"] = self._contact_labels(self.records[embodiment], row)
         if variant < 0:
-            count = episode["applied_torque"].shape[1] if self.include_probes else 1
+            count = row["applied_torque"].shape[0] if self.include_probes else 1
             for key in PER_VARIANT_KEYS:
-                sample[key] = episode[key][step, :count]
+                sample[key] = row[key][:count]
             for key in PER_VARIANT_FLAGS:
-                sample[key] = episode[key][step, :count].clone()
+                sample[key] = row[key][:count].clone()
         else:
             for key in PER_VARIANT_KEYS:
-                sample[key] = episode[key][step, variant]
+                sample[key] = row[key][variant]
             for key in PER_VARIANT_FLAGS:
-                sample[key] = episode[key][step, variant]
+                sample[key] = row[key][variant]
         return sample
 
 

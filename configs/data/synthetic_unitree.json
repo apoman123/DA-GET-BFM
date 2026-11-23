@@ -33,7 +33,7 @@
     {
       "type": "synthetic",
       "name": "g1",
-      "urdf": "../../assets/urdf/g1_29dof.urdf",
+      "urdf": "../../assets/urdf/g1_29dof_rev_1_0.urdf",
       "base_modes": ["fixed", "floating"],
       "contact_links": ["left_ankle_roll_link", "right_ankle_roll_link"],
       "randomized_embodiments": 8,

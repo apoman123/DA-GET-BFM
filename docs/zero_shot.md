@@ -76,7 +76,7 @@ before this change.
 | R6 | B and D read a diagonal mass matrix, which the normalization turns into the identity: the mass bias was off in the state path. |
 | R7 | Each action variant was a separate sample, so each state was encoded several times. |
 | R8 | Training robots were Go1, ANYmal D, G1, H1, a quadrotor and the G1 arm, with ±20% mass and ±10% length perturbations. |
-| R9 | Measured at their standing poses: Go1 13.1 kg / 0.31 m, G1 35.1 kg / 0.77 m, ANYmal D 57.0 kg / 0.55 m, H1 59.3 kg / 1.00 m. Median peak / standing torque over loaded joints: ANYmal D 3.4, H1 7.8, Go1 12.6, G1 13.3 (minimum 2.3). |
+| R9 | Measured at their standing poses: Go1 13.1 kg / 0.31 m, G1 33.3 kg / 0.77 m (`g1_29dof_rev_1_0.urdf`; 35.1 kg with the older `g1_29dof.urdf`, [G1 model](data.md#g1-model)), ANYmal D 57.0 kg / 0.55 m, H1 59.3 kg / 1.00 m. Median peak / standing torque over loaded joints: ANYmal D 3.4, H1 7.8, Go1 12.6, G1 13.3 (minimum 2.3). |
 | R10 | Within-robot `z` pairing only; actions `nominal + 1.25 a` and `K_p = 2 tau^peak` for every robot. |
 
 ## Options by proposal item
@@ -102,7 +102,7 @@ The zero-shot configs use 0.02 s, the 50 Hz of BFM-Zero.
 Base velocities in the tokens become `omega sqrt(L / g)` and `v / sqrt(g L)`; every
 physics feature is divided by its unit `m^a L^b T^c` with `T = sqrt(L / g)`
 (`model/physics_schema.py` records the exponents of every feature). Asinh scales are
-chosen so that a robot of the measured median size (46.05 kg, 0.66 m; R9) is tokenized
+chosen so that a robot of the measured median size (45.15 kg, 0.66 m; R9) is tokenized
 exactly as before. The absolute size lives in the root token (C1). RL observers apply the
 same scaling, and the RL trainer refuses an encoder pretrained with the other setting.
 Whether this helps the encoder is [H].

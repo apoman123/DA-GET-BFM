@@ -239,6 +239,7 @@ The suite has 197 tests (the MuJoCo and HDF5 tests are skipped without the
   Isaac Lab.
 - `test_pretraining.py`:
   - both data sources and caching;
+  - worker processes build the same cache, sample for sample, as the main process;
   - collation and masks;
   - all seven losses, with a loss decrease;
   - data without torque gives no FD/ID rows and no torque in the tokens, but R,

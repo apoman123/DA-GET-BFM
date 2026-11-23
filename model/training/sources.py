@@ -713,6 +713,31 @@ def is_saved_dataset(path: Path) -> bool:
     return path.is_dir() and (path / "state.json").is_file() and (path / "dataset_info.json").is_file()
 
 
+def _arrow_column(column) -> np.ndarray:
+    """Return an Arrow column as numpy: ``[N]`` for numbers, ``[N, D]`` for lists of D numbers.
+
+    Lists of numbers with the same length in every row (and fixed-size lists) are read
+    without a Python loop over the rows; anything else (lists of varying length, nested
+    lists) becomes an object array of rows.
+    """
+    import pyarrow as pa
+    import pyarrow.compute as pc
+
+    array = column.combine_chunks() if isinstance(column, pa.ChunkedArray) else column
+    kind = array.type
+    if pa.types.is_list(kind) or pa.types.is_large_list(kind) or pa.types.is_fixed_size_list(kind):
+        values = kind.value_type
+        if array.null_count == 0 and (pa.types.is_integer(values) or pa.types.is_floating(values) or pa.types.is_boolean(values)):
+            lengths = pc.list_value_length(array)
+            width = pc.min(lengths).as_py() if len(array) else 0
+            if len(array) and width == pc.max(lengths).as_py():
+                return array.flatten().to_numpy(zero_copy_only=False).reshape(len(array), width)
+        rows = np.empty(len(array), dtype=object)
+        rows[:] = [np.asarray(row, dtype=np.float64) for row in array.to_pylist()]
+        return rows
+    return array.to_numpy(zero_copy_only=False)
+
+
 def _column(table: dict[str, Any], key: str | list[str] | None, indices: list | None) -> np.ndarray | None:
     """Read vector columns (concatenated in order) and select entries.
 
@@ -724,7 +749,11 @@ def _column(table: dict[str, Any], key: str | list[str] | None, indices: list | 
     for name in _keys(key):
         if name not in table:
             raise KeyError(f"dataset has no column {name!r}; columns are {sorted(table)}")
-        parts.append(np.stack([np.asarray(row, dtype=np.float64).reshape(-1) for row in table[name]]))
+        values = table[name]
+        if isinstance(values, np.ndarray) and values.dtype != object:
+            parts.append(values.astype(np.float64, copy=False).reshape(len(values), -1))
+        else:
+            parts.append(np.stack([np.asarray(row, dtype=np.float64).reshape(-1) for row in values]))
     values = np.concatenate(parts, axis=1)
     if indices is None:
         return values
@@ -852,14 +881,15 @@ def huggingface_source(
     if frame_key not in dataset.column_names:
         keys.discard(frame_key)
     dataset = dataset.select_columns(sorted(keys))
-    episode_ids = np.asarray(dataset[episode_key]).reshape(-1)
+    episode_ids = _arrow_column(dataset.with_format("arrow")[episode_key]).reshape(-1)
     unique = np.unique(episode_ids)
     if source.get("max_episodes"):
         unique = unique[: int(source["max_episodes"])]
         rows = np.nonzero(np.isin(episode_ids, unique))[0]
         dataset = dataset.select(rows.tolist())
         episode_ids = episode_ids[rows]
-    table = {key: dataset[key] for key in dataset.column_names}
+    columns = dataset.with_format("arrow")
+    table = {key: _arrow_column(columns[key]) for key in dataset.column_names}
     joint_count = graph.num_joints
     state_indices = source.get("state_indices") or list(range(joint_count))
     if len(state_indices) != joint_count:
@@ -901,9 +931,12 @@ def huggingface_source(
     orientation_format = source.get("base_orientation_format", "wxyz")
     threshold = float(source.get("contact_threshold", 0.5))
     trajectories = []
-    for episode in unique:
-        rows = np.nonzero(episode_ids == episode)[0]
-        rows = rows[np.argsort(frames[rows], kind="stable")]
+    # Rows of each episode in one sort (by episode, then frame) instead of a scan per episode.
+    by_episode = np.lexsort((frames, episode_ids))
+    starts = np.searchsorted(episode_ids[by_episode], unique, side="left")
+    stops = np.searchsorted(episode_ids[by_episode], unique, side="right")
+    for start, stop in zip(starts, stops):
+        rows = by_episode[start:stop]
         if len(rows) < minimum:
             continue
 

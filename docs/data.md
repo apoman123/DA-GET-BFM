@@ -206,10 +206,17 @@ source is that of `configs/data/g1_wbt_floating.json`, without its 40-episode li
 one repository without `state_base_rot` (`G1_WBT_Inspire_Put_Sink_Towel`) has no angular
 velocity. `g1_wbt_q36` and `g1_wbt_smpl` read `robot_q_current`: root position,
 quaternion (w, x, y, z), then the 29 joints in URDF order (checked on one file of each,
-[below](#g1-joint-order-check)). `robot_q_desired` is not used as the action, because what
-it holds is not confirmed. The converters stream their episodes, so memory stays bounded
-on whole datasets. The training pipeline's preprocessing is slow at that scale: on 107
-xwbc clips (114,024 samples) it took about 25 minutes.
+[below](#g1-joint-order-check)). Both have **no actions**: the SMPL repositories record no
+joint commands, and in the q36 ones it is not confirmed that `robot_q_desired` is the motor
+command, so it is not used ([details](#humanoids-real-robots)). `locomujoco_g1` has 23 of
+the 29 joints; the other six stay frozen.
+
+The converters stream their episodes, so memory stays bounded on whole datasets. The
+training pipeline then builds its cache with worker processes
+([data config](training.md#data-config)): 107 xwbc G1 clips at 50 Hz (114,024 training
+samples) take 21.6 s with 16 workers, against 359.7 s before. At that rate the
+about 13k clips of `xwbc_g1_amass` would take roughly 45 minutes (an extrapolation from
+these 107 ACCAD clips, which average 233 frames at 30 Hz).
 
 On 2026-11-23 a small part of every dataset was downloaded and converted with these
 scripts, except `xwbc_g1_amass` (one 8.1 GB archive; `xwbc_g1_lafan` takes the same path)
@@ -412,8 +419,8 @@ from it, so most inherit a non-commercial license.
 | Dataset | Robot | Size | Torque | Base and contacts | Format | License | Use, notes |
 |---|---|---|---|---|---|---|---|
 | [Unitree G1 whole-body teleop](https://huggingface.co/datasets/unitreerobotics/G1_WBT_Inspire_Pick_Up_Fruit) (`unitreerobotics/G1_WBT_*`, 55 repos) | Unitree G1, 29 + hands | 12,641 episodes / 14.3M frames (about 132 h), 30 Hz | no | base pose (xyz + quaternion xyzw), projected gravity and angular velocity | LeRobot parquet ✅ | Apache-2.0 | P. `configs/data/g1_wbt_floating.json`. The state is split into `lower_body`, `left_arm`, `right_arm`. The base position may be estimated. **The wrist names are wrong**: the arm vectors are stored as `…elbow, wrist_roll, wrist_pitch, wrist_yaw` (the URDF and motor order), while `meta/info.json` names them `wrist_yaw, wrist_roll, wrist_pitch` ([checked](#g1-joint-order-check)). The config and `make_data_config.py` use the stored order. By Unitree Robotics. |
-| [`unitreerobotics/G1_WBT_SMPL_*`](https://huggingface.co/datasets/unitreerobotics/G1_WBT_SMPL_Brainco_Pick_Vegetables) (18 repos) | Unitree G1, 29 + hands | 5,337 episodes / 7.75M frames (about 72 h), 30 Hz | no | `observation.state.robot_q_current` [36]: root xyz, root quaternion (w, x, y, z), 29 joints in URDF order (checked on a file); the root moves metres | LeRobot v3 ✅ | Apache-2.0 | **R** (real whole-body motion that walks, with the tracked SMPL motion in `action.frame_axis`) and P. Use `state_indices` 7–35, base position 0–2 and orientation 3–6 with `base_orientation_format: "wxyz"`. Whether the base pose comes from an estimator or mocap is not documented. |
-| `unitreerobotics/G1_WBT_Inspire_*` with the q36 schema (4 repos) | Unitree G1 | 1,702 episodes / 0.75M frames | no | the same 36-vector, plus `robot_q_desired` | LeRobot ✅ | Apache-2.0 | P, R. The three `*_MainCamOnly` repos are nested one folder down: set `data_files` to `G1_WB_Dex5_<task>/data/*/*.parquet`. |
+| [`unitreerobotics/G1_WBT_SMPL_*`](https://huggingface.co/datasets/unitreerobotics/G1_WBT_SMPL_Brainco_Pick_Vegetables) (18 repos) | Unitree G1, 29 + hands | 5,337 episodes / 7.75M frames (about 72 h), 30 Hz | no | `observation.state.robot_q_current` [36]: root xyz, root quaternion (w, x, y, z), 29 joints in URDF order (checked on a file); the root moves metres | LeRobot v3 ✅ | Apache-2.0 | **R** (real whole-body motion that walks, with the tracked SMPL motion in `action.frame_axis`) and P. Use `state_indices` 7–35, base position 0–2 and orientation 3–6 with `base_orientation_format: "wxyz"`. Whether the base pose comes from an estimator or mocap is not documented. **No actions**: there are no joint commands (the action columns are the SMPL reference, the hands and the wrist reference), so the `g1_wbt_smpl` sources of `scripts/download_datasets.py` read only `robot_q_current`. |
+| `unitreerobotics/G1_WBT_Inspire_*` with the q36 schema (4 repos) | Unitree G1 | 1,702 episodes / 0.75M frames | no | the same 36-vector, plus `robot_q_desired` | LeRobot ✅ | Apache-2.0 | P, R. The three `*_MainCamOnly` repos are nested one folder down: set `data_files` to `G1_WB_Dex5_<task>/data/*/*.parquet`. **No actions**: `robot_q_desired` follows `robot_q_current` (median gap 0.04 rad, median correlation 0.94 per joint, in one file of `Take_Plates_Into_Dishwasher`), but whether it is the motor command or a planner target is not documented, so the `g1_wbt_q36` sources of `scripts/download_datasets.py` read only `robot_q_current` and have no actions. |
 | `unitreerobotics/G1_Dex1_*` with lower-body state (129 repos) | Unitree G1, 29 | 66,941 episodes / 50.2M frames (about 465 h), 30 Hz | no | none (no base pose, IMU or gravity); `base_command` in the actions | LeRobot v3 ✅ | Apache-2.0 | P (whole-body joints while balancing). The robot stands under its locomotion controller. The arm vectors have the same wrong wrist names as `G1_WBT_*` ([checked](#g1-joint-order-check)). |
 | `unitreerobotics/G1_Dex1_*` with the `G1_ALL` schema (9 repos) | Unitree G1, 29 | 1,800 episodes / 1.53M frames | no | none | LeRobot v2.1 ✅ (`state_key: "observation.body"`, URDF order) | Apache-2.0 | P; standing. |
 | [Humanoid Everyday](https://huggingface.co/datasets/USC-PSI-Lab/humanoid-everyday) (`USC-PSI-Lab/humanoid-everyday`) | Unitree G1 and H1 (`H1_2` in the project README) + hands | 8,949 episodes / 3.4M frames, 30 Hz | no (`tau_ff` is a command) | IMU and odometry in the combined repo | LeRobot v2.1 parquet ✅ | Apache-2.0 on the card, MIT in the project README | P. Joint vectors are unnamed; map them by the order in the project README. Zhao et al., arXiv:2510.08807. |
@@ -501,6 +508,12 @@ The other joints match their names:
   quaternion w, x, y, z, then the 29 joints in URDF order. With that reading the lower foot
   is at 3.45 cm with a 3° tilt; reading the quaternion as x, y, z, w turns the robot upside
   down. Joint 19 reaches −1.78 rad, so it is wrist roll.
+- **`G1_WBT_Inspire_Take_Plates_Into_Dishwasher`** (q36 schema; `file-000`, 181,793 frames).
+  `robot_q_current` has the same layout. Read as w, x, y, z the robot stands upright (the
+  x and y components have medians 0.003 and 0.009); read as x, y, z, w it is upside down.
+  With the URDF leg order the lower foot tilts 4.8° (median; 95th percentile 7.1°, against
+  12.6° with ankle pitch and roll swapped). Joint 19 reaches −1.63 rad, beyond the ±1.61 rad
+  of wrist pitch and yaw, so it is wrist roll.
 
 The scripts are not part of the repository; the numbers above are their output.
 `model.conversion.mapping.KNOWN_NAME_FIXES` applies the correction when `robot_type`

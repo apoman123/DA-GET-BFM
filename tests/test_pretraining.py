@@ -160,6 +160,26 @@ class PretrainingPipelineTest(unittest.TestCase):
         self.assertEqual(len(again.train), len(self.datasets.train))
         self.assertEqual((entries[0] / "complete").stat().st_mtime_ns, marker_time)
 
+    def test_parallel_preprocessing_gives_the_same_cache(self) -> None:
+        """Worker processes write the same episodes, in the same order, as the main process."""
+        from model.training import dataset as data_module
+
+        root = Path(self.directory.name)
+        with mock.patch.object(data_module, "PARALLEL_MIN_FRAMES", 0):
+            parallel = build_physics_datasets(self.config_path, cache_dir=root / "parallel", workers=2)
+        serial = build_physics_datasets(self.config_path, cache_dir=root / "serial", workers=1)
+        self.assertEqual((len(parallel.train), len(parallel.eval)), (len(serial.train), len(serial.eval)))
+        for index in range(len(serial.train)):
+            left, right = serial.train[index], parallel.train[index]
+            self.assertEqual(left.keys(), right.keys())
+            for key, value in left.items():
+                if isinstance(value, torch.Tensor):
+                    torch.testing.assert_close(right[key], value, rtol=1e-6, atol=1e-6, msg=key)
+                else:
+                    self.assertEqual(right[key], value, key)
+        for left, right in zip(serial.records, parallel.records):
+            torch.testing.assert_close(right.acceleration_scale, left.acceleration_scale)
+
     def test_arrow_samples_match_samples_in_memory(self) -> None:
         """Reading frames from the Arrow cache gives the same samples as the episodes in memory."""
         store = self.datasets.train.episodes

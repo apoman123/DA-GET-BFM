@@ -831,6 +831,36 @@ class EmbodimentGraph:
             cache[key] = tuple(levels)
         return cache[key]
 
+    def _level_layout(self, device: torch.device | str) -> tuple[tuple[tuple[torch.Tensor, torch.Tensor], ...], torch.Tensor]:
+        """Return the depth levels with parent slots, for recursions that keep one tensor per level.
+
+        Args:
+            device (torch.device | str): Device of the returned indices.
+
+        Returns:
+            tuple: ``(levels, order)``. ``levels`` has one ``(joints, parent_slots)`` pair per
+                depth, roots first: ``joints`` are joint indices and ``parent_slots`` the
+                position of each joint's parent among the previous level's joints (empty for
+                level 0). ``order[j]`` is the position of joint ``j`` in the concatenation of
+                the levels, so ``torch.cat(per_level, dim).index_select(dim, order)`` puts
+                per-level results back in joint order.
+        """
+        cache = self.__dict__.setdefault("_layout_cache", {})
+        key = str(device)
+        if key not in cache:
+            levels = []
+            slot: dict[int, int] = {}
+            concatenated: list[int] = []
+            for level, (joints, parents) in enumerate(self._depth_levels("cpu")):
+                parent_slots = [] if level == 0 else [slot[parent] for parent in parents.tolist()]
+                slot = {joint: position for position, joint in enumerate(joints.tolist())}
+                concatenated += joints.tolist()
+                levels.append((joints.to(device), torch.tensor(parent_slots, dtype=torch.long, device=device)))
+            order = torch.empty(len(concatenated), dtype=torch.long)
+            order[torch.tensor(concatenated, dtype=torch.long)] = torch.arange(len(concatenated))
+            cache[key] = (tuple(levels), order.to(device))
+        return cache[key]
+
     def _kinematics(
         self, positions: torch.Tensor
     ) -> tuple[torch.Tensor, torch.Tensor, torch.Tensor]:
@@ -870,17 +900,25 @@ class EmbodimentGraph:
             ),
             dim=-2,
         )
-        # One level of the tree at a time: a joint's frame needs only its parent's.
+        # One level of the tree at a time: a joint's frame needs only its parent's, which is
+        # in the previous level. Each level keeps its own tensor; they are put in joint
+        # order once at the end.
         joint_dim = len(batch_shape)
-        moving = positions.new_zeros((*batch_shape, self.num_joints, 4, 4))
-        fixed = moving
-        for level, (joints, parents) in enumerate(self._depth_levels(device)):
+        if self.num_joints == 0:
+            moving = positions.new_zeros((*batch_shape, 0, 4, 4))
+            return moving, moving[..., :3, 3], moving[..., :3, 3]
+        levels, order = self._level_layout(device)
+        moving_levels: list[torch.Tensor] = []
+        fixed_levels: list[torch.Tensor] = []
+        for level, (joints, parent_slots) in enumerate(levels):
             if level == 0:
                 joint_frame = tree[joints].expand(*batch_shape, -1, 4, 4)
             else:
-                joint_frame = moving.index_select(joint_dim, parents) @ tree[joints]
-            fixed = fixed.index_copy(joint_dim, joints, joint_frame)
-            moving = moving.index_copy(joint_dim, joints, joint_frame @ motions.index_select(joint_dim, joints))
+                joint_frame = moving_levels[-1].index_select(joint_dim, parent_slots) @ tree[joints]
+            fixed_levels.append(joint_frame)
+            moving_levels.append(joint_frame @ motions.index_select(joint_dim, joints))
+        moving = torch.cat(moving_levels, dim=joint_dim).index_select(joint_dim, order)
+        fixed = torch.cat(fixed_levels, dim=joint_dim).index_select(joint_dim, order)
         world_axes = (fixed[..., :3, :3] @ axes[..., None]).squeeze(-1)
         return moving, fixed[..., :3, 3], world_axes
 

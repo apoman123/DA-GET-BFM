@@ -673,6 +673,25 @@ epoch. Episodes, not frames, are split between train and eval.
 | `records.pt` | The robot records with the data scales |
 | `complete` | Written last; an entry without it is rebuilt |
 
+**Building the cache.** Sources with at least 20,000 frames are processed by worker
+processes (`--preprocess_workers`, or `workers=` of `build_physics_datasets`; by default half
+the cores, at most 16; 1 processes everything in the main process). Each worker uses one
+PyTorch thread, and the main process at most four when it processes a source itself: the
+tensors are small, so on 32 cores 32 threads were slower than 4. Episodes keep their order
+and seeds, so the cache is the same for any number of workers up to floating-point
+rounding (tested to 1e-6). Building the cache
+of 107 xwbc G1 clips at 50 Hz (`control_dt` 0.02; 114,024 training samples) took 359.7 s
+before the changes below; it now takes 21.6 s with 16 workers and 60.8 s with one (32
+cores shared with other users, load average 7–9 at the start of each run):
+
+- `EmbodimentGraph._kinematics` and `recursive_newton_euler` keep one tensor per tree level
+  (a joint's parent is in the previous level) instead of rewriting a tensor over all
+  joints at every level;
+- `floating_mass_matrix` computes the kinematics once and shares it between its 6 + J
+  Newton-Euler passes instead of recomputing it for each;
+- the `huggingface` source reads columns from Arrow without a Python loop over rows and
+  finds the rows of every episode with one sort instead of one scan per episode.
+
 The Arrow files are memory-mapped and every sample reads only the frames it needs, so the
 processed data can be larger than the RAM. Sources are processed one at a time and written
 as they go, so building the cache needs memory for one source's trajectories, not for all

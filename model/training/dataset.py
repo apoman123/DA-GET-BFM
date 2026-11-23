@@ -329,8 +329,89 @@ class PhysicsDatasets:
         }
 
 
+PARALLEL_MIN_FRAMES = 20_000
+"""Sources with fewer frames are processed in the main process: starting workers takes seconds."""
+WORKER_THREADS = 1
+"""PyTorch threads per worker process: the tensors are small, so processes beat threads."""
+SERIAL_THREADS = 4
+"""At most this many PyTorch threads when episodes are processed in the main process (on
+10 xwbc clips with 32 cores: 1 thread 7.3 s, 4 threads 5.6 s, 32 threads slower again)."""
+
+
+def default_preprocess_workers() -> int:
+    """Return the number of worker processes for preprocessing: half the usable cores, at most 16."""
+    import os
+
+    cores = len(os.sched_getaffinity(0)) if hasattr(os, "sched_getaffinity") else (os.cpu_count() or 1)
+    return max(1, min(16, cores // 2))
+
+
+def _episode_options(config: dict[str, Any], source: dict[str, Any]) -> dict[str, Any]:
+    """Return the ``process_episode`` keyword arguments of a source (all but the seed)."""
+    return {
+        "contact_height_tolerance": float(source.get("contact_height_tolerance", 0.03)),
+        "contact_speed_tolerance": float(source.get("contact_speed_tolerance", 0.5)),
+        "proposal_variants": int(config.get("proposal_variants", 2)),
+        "contact_margin_steps": int(config.get("contact_margin_steps", 2)),
+        "max_contact_slip": _optional_float(config.get("max_contact_slip", 0.1)),
+        "contact_detection": str(source.get("contact_detection", config.get("contact_detection", "dynamics"))),
+        "detected_contact_response": bool(source.get("detected_contact_response", True)),
+        "min_contact_confidence": float(config.get("min_contact_confidence", 3.0)),
+    }
+
+
+def _init_worker(threads: int) -> None:
+    torch.set_num_threads(threads)
+
+
+def _process_in_worker(task: tuple) -> dict[str, Any]:
+    """Process one episode in a worker; tensors travel back as numpy arrays (plain pickles)."""
+    record, trajectory, options, seed = task
+    episode = process_episode(record, trajectory, seed=seed, **options)
+    return {key: value.detach().cpu().numpy() if isinstance(value, torch.Tensor) else value for key, value in episode.items()}
+
+
+def _from_worker(episode: dict[str, Any]) -> dict[str, Any]:
+    import numpy as np
+
+    return {key: torch.from_numpy(value) if isinstance(value, np.ndarray) else value for key, value in episode.items()}
+
+
+def _processed_episodes(records, trajectories, options: dict[str, Any], first_seed: int, pool, in_flight: int = 1):
+    """Yield ``(embodiment, processed episode)`` in trajectory order, in ``pool`` when given.
+
+    At most ``in_flight`` tasks are submitted at a time, so finished episodes do not pile
+    up in memory while an earlier one is still running.
+    """
+    from collections import deque
+
+    if pool is None:
+        threads = torch.get_num_threads()
+        torch.set_num_threads(min(threads, SERIAL_THREADS))
+        try:
+            for number, trajectory in enumerate(trajectories):
+                yield trajectory.embodiment, process_episode(records[trajectory.embodiment], trajectory, seed=first_seed + number, **options)
+        finally:
+            torch.set_num_threads(threads)
+        return
+    tasks = ((records[trajectory.embodiment], trajectory, options, first_seed + number) for number, trajectory in enumerate(trajectories))
+    embodiments = (trajectory.embodiment for trajectory in trajectories)
+    window: deque = deque()
+    for task in tasks:
+        window.append(pool.submit(_process_in_worker, task))
+        if len(window) >= in_flight:
+            yield next(embodiments), _from_worker(window.popleft().result())
+    while window:
+        yield next(embodiments), _from_worker(window.popleft().result())
+
+
 def _write_entry(
-    entry: Path, config: dict[str, Any], base: Path | None, feature_config: JointFeatureConfig, control_dt: float | None
+    entry: Path,
+    config: dict[str, Any],
+    base: Path | None,
+    feature_config: JointFeatureConfig,
+    control_dt: float | None,
+    workers: int | None = None,
 ) -> None:
     """Process every source and write the episodes of a cache entry, one source at a time.
 
@@ -338,36 +419,46 @@ def _write_entry(
     memory until ``finalize_acceleration_scales`` sets the record scales. The entry is
     written under ``<entry>.partial-<pid>`` and renamed when complete; if another process
     finished the same entry first, this copy is discarded.
+
+    Sources with at least ``PARALLEL_MIN_FRAMES`` frames are processed by ``workers``
+    processes (``default_preprocess_workers()`` when None; 1 processes everything here).
+    Episodes keep their order and seeds, so the entry does not depend on the number of
+    workers.
     """
+    import multiprocessing
     import os
     import shutil
+    from concurrent.futures import ProcessPoolExecutor
 
+    workers = default_preprocess_workers() if workers is None else max(1, int(workers))
     partial = entry.with_name(f"{entry.name}.partial-{os.getpid()}")
     writer = EpisodeWriter(partial)
     records: list[EmbodimentRecord] = []
     statistics: list[tuple[int, dict[str, torch.Tensor]]] = []
-    for source in config["sources"]:
-        source_records, trajectories = load_source(source, base, feature_config, control_dt)
-        offset = len(records)
-        records += source_records
-        for trajectory in trajectories:
-            index = offset + trajectory.embodiment
-            episode = process_episode(
-                records[index],
-                trajectory,
-                contact_height_tolerance=float(source.get("contact_height_tolerance", 0.03)),
-                contact_speed_tolerance=float(source.get("contact_speed_tolerance", 0.5)),
-                proposal_variants=int(config.get("proposal_variants", 2)),
-                contact_margin_steps=int(config.get("contact_margin_steps", 2)),
-                seed=int(config.get("seed", 0)) * 1_000_003 + len(statistics),
-                max_contact_slip=_optional_float(config.get("max_contact_slip", 0.1)),
-                contact_detection=str(source.get("contact_detection", config.get("contact_detection", "dynamics"))),
-                detected_contact_response=bool(source.get("detected_contact_response", True)),
-                min_contact_confidence=float(config.get("min_contact_confidence", 3.0)),
-            )
-            statistics.append((index, {key: value for key, value in episode.items() if key.startswith("_")}))
-            writer.add(index, episode)
-        del trajectories
+    pool = None
+    try:
+        for source in config["sources"]:
+            source_records, trajectories = load_source(source, base, feature_config, control_dt)
+            offset = len(records)
+            records += source_records
+            frames = sum(len(trajectory.positions) for trajectory in trajectories)
+            parallel = workers > 1 and len(trajectories) > 1 and frames >= PARALLEL_MIN_FRAMES
+            if parallel and pool is None:
+                pool = ProcessPoolExecutor(
+                    max_workers=workers, mp_context=multiprocessing.get_context("spawn"),
+                    initializer=_init_worker, initargs=(WORKER_THREADS,),
+                )
+            first_seed = int(config.get("seed", 0)) * 1_000_003 + len(statistics)
+            options = _episode_options(config, source)
+            episodes = _processed_episodes(source_records, trajectories, options, first_seed, pool if parallel else None, 2 * workers)
+            for embodiment, episode in episodes:
+                index = offset + embodiment
+                statistics.append((index, {key: value for key, value in episode.items() if key.startswith("_")}))
+                writer.add(index, episode)
+            del trajectories
+    finally:
+        if pool is not None:
+            pool.shutdown(cancel_futures=True)
     if not statistics:
         raise ValueError("the data config produced no episodes")
     finalize_acceleration_scales(records, statistics)
@@ -389,6 +480,7 @@ def build_physics_datasets(
     config_source: str | Path | dict,
     cache_dir: str | Path | None = None,
     rebuild: bool = False,
+    workers: int | None = None,
 ) -> PhysicsDatasets:
     """Load, process, cache, and split every source of a data config.
 
@@ -397,6 +489,9 @@ def build_physics_datasets(
         cache_dir (str | Path | None): Where processed data is cached; the
             config's ``cache_dir`` or ``.cache/physics_data`` by default.
         rebuild (bool): Ignore an existing cache.
+        workers (int | None): Processes that build a missing cache entry
+            (``default_preprocess_workers()`` when None; 1 for none). The entry is
+            the same for any number.
 
     Returns:
         PhysicsDatasets: Datasets and records.
@@ -414,7 +509,7 @@ def build_physics_datasets(
     cache_root = Path(cache_dir or config.get("cache_dir") or ".cache/physics_data")
     entry = cache_root / _cache_key(config, base)
     if rebuild or not entry_complete(entry):
-        _write_entry(entry, config, base, feature_config, control_dt)
+        _write_entry(entry, config, base, feature_config, control_dt, workers)
     store = ProcessedEpisodes(entry)
     records = store.records()
     episode_count = len(store)

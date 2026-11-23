@@ -115,6 +115,10 @@ class DataArguments:
     data_config: str = field(metadata={"help": "JSON data config (see configs/data)."})
     cache_dir: str | None = field(default=None, metadata={"help": "Processed-data cache directory."})
     rebuild_cache: bool = field(default=False, metadata={"help": "Recompute features and labels."})
+    preprocess_workers: int | None = field(
+        default=None,
+        metadata={"help": "Processes that build the cache (default: half the cores, at most 16; 1 for none)."},
+    )
 
 
 @dataclass
@@ -176,7 +180,7 @@ def main() -> None:
     # The main process of each node builds the Arrow cache; the other ranks wait and read it.
     rebuild = data_args.rebuild_cache and training_args.local_process_index == 0
     with training_args.main_process_first(desc="physics data"):
-        datasets = build_physics_datasets(data_args.data_config, data_args.cache_dir, rebuild)
+        datasets = build_physics_datasets(data_args.data_config, data_args.cache_dir, rebuild, data_args.preprocess_workers)
     if datasets.eval is None:
         training_args.eval_strategy = IntervalStrategy.NO
     print(

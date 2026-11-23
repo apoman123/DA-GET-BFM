@@ -208,53 +208,6 @@ def recursive_newton_euler(
     cross = torch.linalg.cross
     if body_wrenches is not None:
         body_wrenches = body_wrenches.to(positions)
-    empty = positions.new_zeros((*batch_shape, graph.num_joints, 3))
-    omega = alpha = linear_velocity = linear_acceleration = force = moment = empty
-    levels = graph._depth_levels(device)
-    # Outward pass, one tree level at a time: a joint needs only its parent's motion.
-    for level, (joints, parents) in enumerate(levels):
-        if level == 0:
-            shape = (*batch_shape, joints.numel(), 3)
-            parent_omega, parent_alpha = base_omega[..., None, :].expand(shape), base_alpha[..., None, :].expand(shape)
-            parent_velocity = base_velocity[..., None, :].expand(shape)
-            parent_acceleration = base_acceleration[..., None, :].expand(shape)
-            lever = origins.index_select(joint_dim, joints)
-        else:
-            parent_omega = omega.index_select(joint_dim, parents)
-            parent_alpha = alpha.index_select(joint_dim, parents)
-            parent_velocity = linear_velocity.index_select(joint_dim, parents)
-            parent_acceleration = linear_acceleration.index_select(joint_dim, parents)
-            lever = origins.index_select(joint_dim, joints) - origins.index_select(joint_dim, parents)
-        axis = axes.index_select(joint_dim, joints)
-        is_prismatic = prismatic[joints]
-        speed = velocities.index_select(-1, joints)[..., None]
-        rate = accelerations.index_select(-1, joints)[..., None]
-        joint_velocity = axis * speed
-        joint_acceleration = axis * rate
-        omega_cross_motion = cross(parent_omega, joint_velocity, dim=-1)
-        zero = torch.zeros_like(joint_velocity)
-        velocity = parent_velocity + cross(parent_omega, lever, dim=-1) + torch.where(is_prismatic, joint_velocity, zero)
-        acceleration = (
-            parent_acceleration
-            + cross(parent_alpha, lever, dim=-1)
-            + cross(parent_omega, cross(parent_omega, lever, dim=-1), dim=-1)
-            + torch.where(is_prismatic, joint_acceleration + 2 * omega_cross_motion, zero)
-        )
-        body_omega = parent_omega + torch.where(is_prismatic, zero, joint_velocity)
-        body_alpha = parent_alpha + torch.where(is_prismatic, zero, joint_acceleration + omega_cross_motion)
-        rotation = frames.index_select(joint_dim, joints)[..., :3, :3]
-        offset = (rotation @ coms[joints][..., None]).squeeze(-1)
-        inertia = rotation @ inertias[joints] @ rotation.transpose(-1, -2)
-        body_force, body_moment = _body_wrench(masses[joints][:, None], offset, inertia, acceleration, body_omega, body_alpha)
-        if body_wrenches is not None:
-            selected = body_wrenches.index_select(joint_dim, joints)
-            body_force, body_moment = body_force - selected[..., :3], body_moment - selected[..., 3:]
-        omega = omega.index_copy(joint_dim, joints, body_omega)
-        alpha = alpha.index_copy(joint_dim, joints, body_alpha)
-        linear_velocity = linear_velocity.index_copy(joint_dim, joints, velocity)
-        linear_acceleration = linear_acceleration.index_copy(joint_dim, joints, acceleration)
-        force = force.index_copy(joint_dim, joints, body_force)
-        moment = moment.index_copy(joint_dim, joints, body_moment)
     base_force, base_moment = _body_wrench(
         torch.tensor(graph.base_mass, dtype=dtype, device=device),
         graph.base_com.to(dtype=dtype, device=device).expand_as(base_omega),
@@ -263,20 +216,86 @@ def recursive_newton_euler(
         base_omega,
         base_alpha,
     )
-    # Inward pass, deepest level first: each joint adds its subtree's wrench to its parent.
-    # A joint's own wrench is final once its children's level has run.
-    for level in range(len(levels) - 1, -1, -1):
-        joints, parents = levels[level]
-        child_force = force.index_select(joint_dim, joints)
-        child_moment = moment.index_select(joint_dim, joints)
-        if level == 0:
-            lever = origins.index_select(joint_dim, joints)
-            base_force = base_force + child_force.sum(-2)
-            base_moment = base_moment + (child_moment + cross(lever, child_force, dim=-1)).sum(-2)
-        else:
-            lever = origins.index_select(joint_dim, joints) - origins.index_select(joint_dim, parents)
-            force = force.index_add(joint_dim, parents, child_force)
-            moment = moment.index_add(joint_dim, parents, child_moment + cross(lever, child_force, dim=-1))
+    if graph.num_joints == 0:
+        empty = positions.new_zeros((*batch_shape, 0, 3))
+        force = moment = linear_velocity = omega = empty
+        base_force, base_moment = base_force.expand(*batch_shape, 3), base_moment.expand(*batch_shape, 3)
+    else:
+        levels, order = graph._level_layout(device)
+        # Per-level motion and wrench; a joint's parent is in the previous level
+        # (``parent_slots`` index into it), so no tensor over all joints is rewritten.
+        omegas: list[torch.Tensor] = []
+        alphas: list[torch.Tensor] = []
+        speeds: list[torch.Tensor] = []
+        accelerations_: list[torch.Tensor] = []
+        forces: list[torch.Tensor] = []
+        moments: list[torch.Tensor] = []
+        joint_origins: list[torch.Tensor] = []
+        levers: list[torch.Tensor] = []
+        # Outward pass, one tree level at a time: a joint needs only its parent's motion.
+        for level, (joints, parent_slots) in enumerate(levels):
+            here = origins.index_select(joint_dim, joints)
+            if level == 0:
+                shape = (*batch_shape, joints.numel(), 3)
+                parent_omega, parent_alpha = base_omega[..., None, :].expand(shape), base_alpha[..., None, :].expand(shape)
+                parent_velocity = base_velocity[..., None, :].expand(shape)
+                parent_acceleration = base_acceleration[..., None, :].expand(shape)
+                lever = here
+            else:
+                parent_omega = omegas[-1].index_select(joint_dim, parent_slots)
+                parent_alpha = alphas[-1].index_select(joint_dim, parent_slots)
+                parent_velocity = speeds[-1].index_select(joint_dim, parent_slots)
+                parent_acceleration = accelerations_[-1].index_select(joint_dim, parent_slots)
+                lever = here - joint_origins[-1].index_select(joint_dim, parent_slots)
+            axis = axes.index_select(joint_dim, joints)
+            is_prismatic = prismatic[joints]
+            speed = velocities.index_select(-1, joints)[..., None]
+            rate = accelerations.index_select(-1, joints)[..., None]
+            joint_velocity = axis * speed
+            joint_acceleration = axis * rate
+            omega_cross_motion = cross(parent_omega, joint_velocity, dim=-1)
+            zero = torch.zeros_like(joint_velocity)
+            velocity = parent_velocity + cross(parent_omega, lever, dim=-1) + torch.where(is_prismatic, joint_velocity, zero)
+            acceleration = (
+                parent_acceleration
+                + cross(parent_alpha, lever, dim=-1)
+                + cross(parent_omega, cross(parent_omega, lever, dim=-1), dim=-1)
+                + torch.where(is_prismatic, joint_acceleration + 2 * omega_cross_motion, zero)
+            )
+            body_omega = parent_omega + torch.where(is_prismatic, zero, joint_velocity)
+            body_alpha = parent_alpha + torch.where(is_prismatic, zero, joint_acceleration + omega_cross_motion)
+            rotation = frames.index_select(joint_dim, joints)[..., :3, :3]
+            offset = (rotation @ coms[joints][..., None]).squeeze(-1)
+            inertia = rotation @ inertias[joints] @ rotation.transpose(-1, -2)
+            body_force, body_moment = _body_wrench(masses[joints][:, None], offset, inertia, acceleration, body_omega, body_alpha)
+            if body_wrenches is not None:
+                selected = body_wrenches.index_select(joint_dim, joints)
+                body_force, body_moment = body_force - selected[..., :3], body_moment - selected[..., 3:]
+            omegas.append(body_omega)
+            alphas.append(body_alpha)
+            speeds.append(velocity)
+            accelerations_.append(acceleration)
+            forces.append(body_force)
+            moments.append(body_moment)
+            joint_origins.append(here)
+            levers.append(lever)
+        # Inward pass, deepest level first: each joint adds its subtree's wrench to its parent.
+        # A level's wrenches are final once the next level has been added to them.
+        for level in range(len(levels) - 1, 0, -1):
+            parent_slots = levels[level][1]
+            child_force = forces[level]
+            forces[level - 1] = forces[level - 1].index_add(joint_dim, parent_slots, child_force)
+            moments[level - 1] = moments[level - 1].index_add(
+                joint_dim, parent_slots, moments[level] + cross(levers[level], child_force, dim=-1)
+            )
+        base_force = base_force + forces[0].sum(-2)
+        base_moment = base_moment + (moments[0] + cross(levers[0], forces[0], dim=-1)).sum(-2)
+
+        def joint_order(per_level: list[torch.Tensor]) -> torch.Tensor:
+            return torch.cat(per_level, dim=joint_dim).index_select(joint_dim, order)
+
+        force, moment = joint_order(forces), joint_order(moments)
+        linear_velocity, omega = joint_order(speeds), joint_order(omegas)
     efforts = torch.where(prismatic[:, 0], (axes * force).sum(-1), (axes * moment).sum(-1))
     if graph.armature is not None:
         # Rotor inertia reflected through the gearbox, in joint space.
@@ -433,6 +452,14 @@ def floating_mass_matrix(graph: EmbodimentGraph, positions: torch.Tensor) -> tor
     eye = eye.expand(*batch_shape, size, size)
     q = positions[..., None, :].expand(*batch_shape, size, joints)
     zero = torch.zeros_like(q)
+    # One RNEA per unit acceleration, all at the same configuration: the kinematics is
+    # computed once and shared (expanded, not copied).
+    frames, origins, axes = graph._kinematics(positions)
+    kinematics = (
+        frames[..., None, :, :, :].expand(*batch_shape, size, joints, 4, 4),
+        origins[..., None, :, :].expand(*batch_shape, size, joints, 3),
+        axes[..., None, :, :].expand(*batch_shape, size, joints, 3),
+    )
     result = recursive_newton_euler(
         graph,
         q,
@@ -440,6 +467,7 @@ def floating_mass_matrix(graph: EmbodimentGraph, positions: torch.Tensor) -> tor
         eye[..., 6:],
         torch.zeros(3, dtype=positions.dtype, device=positions.device),
         BaseMotion(linear_acceleration=eye[..., :3], angular_acceleration=eye[..., 3:6]),
+        kinematics=kinematics,
     )
     matrix = torch.cat((result.base_wrench, result.efforts), dim=-1).transpose(-1, -2)
     return 0.5 * (matrix + matrix.transpose(-1, -2))

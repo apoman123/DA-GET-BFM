@@ -70,7 +70,11 @@ class FbCprConfig:
         critic_pessimism_penalty (float): Ensemble pessimism in the critic target.
         aux_critic_pessimism_penalty (float): Same for the auxiliary critic.
         stddev_clip (float): Clip of the policy noise when sampling actions.
-        batch_size (int): Transitions per update; a multiple of the model's ``seq_length``.
+        batch_size (int): Transitions per micro-batch; a multiple of the model's ``seq_length``.
+        gradient_accumulation_steps (int): Micro-batches per update. Every network steps
+            once on the mean of their gradients, so an update sees
+            ``batch_size * gradient_accumulation_steps`` transitions with the activation
+            memory of one micro-batch.
         discount (float): Discount factor.
         reg_coeff (float): Weight of the discriminator critic in the actor loss.
         reg_coeff_aux (float): Weight of the auxiliary critic in the actor loss.
@@ -120,6 +124,7 @@ class FbCprConfig:
     aux_critic_pessimism_penalty: float = 0.5
     stddev_clip: float = 0.3
     batch_size: int = 1024
+    gradient_accumulation_steps: int = 1
     discount: float = 0.98
     reg_coeff: float = 0.05
     reg_coeff_aux: float = 0.02
@@ -151,3 +156,5 @@ class FbCprConfig:
             raise ValueError("relabel_ratio must be in [0, 1]")
         if self.batch_size <= 0:
             raise ValueError("batch_size must be positive")
+        if self.gradient_accumulation_steps < 1:
+            raise ValueError("gradient_accumulation_steps must be at least 1")

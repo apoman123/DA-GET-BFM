@@ -202,6 +202,8 @@ The suite has 197 tests (the MuJoCo and HDF5 tests are skipped without the
     including that states of other robots do not enter them;
   - each update changes only its own networks, RL and physics losses reach the encoder
     but the actor's does not, and targets move by exactly `tau`;
+  - gradient accumulation: one optimizer step per network on the mean gradient of the
+    micro-batches, with one replay and one physics batch per micro-batch;
   - prompts pair only with transitions of the same robot;
   - tokens, dynamics features, and mass matrix equal the pretraining pipeline's,
     and no observation reads a torque;
@@ -225,7 +227,7 @@ The suite has 197 tests (the MuJoCo and HDF5 tests are skipped without the
     and a push ends the right transition in each;
   - real and synthetic sources sharing a robot, the robot graph carrying the
     simulators' rotor inertia, and the training script on two robots (with the
-    physics replay and the torque metrics).
+    physics replay and the torque metrics), resumed with two micro-batches per update.
 - `test_deployment.py`: `DaGetBfmPolicy` gives the training path's actions and B,
   refreshes after a weight change, checks inputs on the CPU, and records no call that
   waits for the device or copies from the host (the CUDA Graph replay test runs only
@@ -240,6 +242,7 @@ The suite has 197 tests (the MuJoCo and HDF5 tests are skipped without the
 - `test_pretraining.py`:
   - both data sources and caching;
   - worker processes build the same cache, sample for sample, as the main process;
+  - with gradient accumulation, the Trainer's step uses the mean gradient of the batches;
   - collation and masks;
   - all seven losses, with a loss decrease;
   - data without torque gives no FD/ID rows and no torque in the tokens, but R,

@@ -512,6 +512,15 @@ example to pretrain on legged, humanoid, and flying robots together. Every
 - `--physics_layers 0,2`, `--mass_encoding`, `--mixing_layers`;
 - `--fk_orientation false`, and the task weights.
 
+**Gradient accumulation.** `--gradient_accumulation_steps k` (a `TrainingArguments`
+flag) steps the optimizer once every k batches of `--per_device_train_batch_size`, so an
+update sees k times more samples with the memory of one batch. The batch has no `labels`
+key, so the Trainer divides each batch's loss by k and the gradient is the mean over the
+k batches (checked with one SGD step in `tests/test_pretraining.py`). Each task loss is a
+mean over the samples of its batch that have the task's labels (zero when none has), so
+this mean equals the loss of one batch k times larger only when every batch has as many
+labeled samples for each task.
+
 The Trainer logs `loss_fk`, `loss_fd`, `loss_id`, `loss_response`,
 `loss_inverse_response`, `loss_motor`, `loss_effect`, and the matching
 `eval_loss_*` next to the total loss. A batch without a task's labels (for

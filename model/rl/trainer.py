@@ -82,7 +82,7 @@ class TrainingArguments:
         num_seed_steps (int): Frames with random actions before updates start.
         update_agent_every (int): Frames between update rounds.
         num_agent_updates (int): Gradient steps per round.
-        physics_batch_size (int): Batch size of the physics auxiliary losses (here: 64).
+        physics_batch_size (int): Batch size of the physics auxiliary losses per micro-batch (here: 64).
         physics_cache_dir (str | None): Cache of the processed physics data.
         log_every (int): Frames between logs.
         eval_every (int): Frames between evaluations and priority updates; 0 disables them.
@@ -610,7 +610,7 @@ class FbCprTrainer:
                     self.multipliers.update()
                     self.agent.set_reward_scales(self.multipliers.scales(self.config.aux_reward_scales, self.agent.reward_names))
                 for _ in range(arguments.num_agent_updates):
-                    physics = self._physics_batch()
+                    physics = [self._physics_batch() for _ in range(self.config.gradient_accumulation_steps)]
                     metrics = self.agent.update(self.replays, self.motions, physics)
                     updates += 1
                     for key, value in metrics.items():

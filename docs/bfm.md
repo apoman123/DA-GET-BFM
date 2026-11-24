@@ -224,6 +224,27 @@ every update:     equal share of each robot's replay + its expert motion windows
                     └─ soft-update every target network, including the target encoder
 ```
 
+**Gradient accumulation.** `--gradient_accumulation_steps k` (default 1, as in BFM-Zero)
+draws k micro-batches of `--batch_size` transitions per update, each with its own expert
+windows, z and physics batch (`--physics_batch_size` samples each). Every network still
+steps once per update, in the order above, on the mean of its k gradients:
+
+1. D, on the k micro-batches.
+2. F, B, Q_D, Q_R and the encoder, with the rewards of the new D.
+3. The actor, with the new critics.
+
+Gradient clipping (`--clip_grad_norm`) applies to the accumulated mean. Each backward pass
+frees its graph before the next micro-batch, so activations take the memory of one
+micro-batch; the sampled transitions of all k stay in memory until the actor step.
+`tests/test_fb_cpr.py` checks the mean gradient and the single step.
+
+It is not the same as one batch of k × `batch_size`:
+- **F and B pairs:** the FB and orthonormality losses compare each state with the other
+  states of its own micro-batch, so k micro-batches of n transitions make k·n(n − 1)
+  pairs instead of kn(kn − 1). Replay transitions are drawn uniformly, so the expected
+  loss is the same, but the estimate is noisier.
+- **Actor weight:** the `scale_reg` weight |Q_fb| is computed per micro-batch.
+
 ### Data config: real and synthetic trajectories
 
 The script reads the same data config as pretraining. Sources with the same `robot`
@@ -332,6 +353,7 @@ U([−0.5, 1.25]):
 | Three torque penalties (limit, continuous load, power), with per-robot weights adapted by Lagrange multipliers | Normalized by each robot's own limits, with data-sheet targets instead of tuned weights |
 | No torque in any observation | BFM-Zero's G1 has no torque input either; earlier versions of this repo fed the last torque, now removed ([why](dynamics.md#why-training-uses-no-estimated-torque)) |
 | Physics losses on the policy's own rollouts (physics replay) | Keeps the encoder's dynamics faithful on the states the policy visits |
+| Optional gradient accumulation (`--gradient_accumulation_steps`, default 1) | Larger updates within the activation memory of one batch; see [How one training step works](#how-one-training-step-works) |
 
 ### Actuator torque limits
 
@@ -461,7 +483,7 @@ constrain actions.
 | `--physics_loss_weight` | 1.0 | Weight of the physics losses; 0 turns them off |
 | `--lr_encoder` | `3e-5` | Encoder learning rate |
 | `--lr_physics_heads` | `1e-4` | Physics heads' learning rate |
-| `--physics_batch_size` | 64 | Physics batch size |
+| `--physics_batch_size` | 64 | Physics batch size, per micro-batch |
 
 These learning rates and weights are not from BFM-Zero, which has no encoder. They are
 starting points and have not been tuned. The checkpoint folder holds the tuned encoder

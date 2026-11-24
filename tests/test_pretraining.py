@@ -1,5 +1,6 @@
 """Test the physics pretraining data pipeline, heads, losses, and Trainer."""
 
+import copy
 import importlib.util
 import json
 import sys
@@ -402,6 +403,40 @@ class PretrainingPipelineTest(unittest.TestCase):
         self.assertIn("eval_loss_motor", metrics)
         self.assertTrue(np.isfinite(metrics["eval_loss"]))
 
+
+    def test_gradient_accumulation_steps_on_the_mean_of_the_micro_batches(self) -> None:
+        """With ``gradient_accumulation_steps`` 2, one SGD step uses the mean gradient of both micro-batches.
+
+        The Trainer divides each micro-batch loss by the number of steps only while the batch
+        has no ``labels`` for it to count; this test fails if that changes.
+        """
+        model = self.model()
+        start = copy.deepcopy(model.state_dict())
+        collator = self.datasets.collator()
+        seen = []
+
+        def collate(samples):
+            batch = collator(samples)
+            seen.append({key: value.clone() if torch.is_tensor(value) else value for key, value in batch.items()})
+            return batch
+
+        with tempfile.TemporaryDirectory() as folder:
+            arguments = TrainingArguments(
+                output_dir=folder, max_steps=1, per_device_train_batch_size=4, gradient_accumulation_steps=2,
+                optim="sgd", learning_rate=0.1, lr_scheduler_type="constant", weight_decay=0.0, max_grad_norm=0.0,
+                dataloader_num_workers=0, report_to=[], save_strategy="no", eval_strategy="no",
+                remove_unused_columns=False, prediction_loss_only=True, label_names=["fk_position"], use_cpu=True,
+            )
+            PhysicsPretrainingTrainer(model=model, args=arguments, train_dataset=self.datasets.train, data_collator=collate).train()
+        reference = self.model()
+        reference.load_state_dict(start)
+        reference.train()
+        for batch in seen[:2]:
+            (reference(**batch).loss / 2).backward()
+        for (name, trained), parameter in zip(model.named_parameters(), reference.parameters()):
+            expected = parameter.detach() if parameter.grad is None else parameter.detach() - 0.1 * parameter.grad
+            torch.testing.assert_close(trained.detach(), expected, rtol=1e-5, atol=1e-6, msg=name)
+        self.assertTrue(any(parameter.grad is not None for parameter in reference.parameters()))
 
 class ExampleConfigTest(unittest.TestCase):
     """The shipped data configs use only current keys."""

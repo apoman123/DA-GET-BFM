@@ -41,7 +41,9 @@ What changes for several robots:
 from __future__ import annotations
 
 import copy
+from collections.abc import Callable, Mapping, Sequence
 from dataclasses import asdict, dataclass
+from functools import partial
 from pathlib import Path
 
 import torch
@@ -534,11 +536,40 @@ class DaGetFbCprAgent:
         gradients = autograd.grad(logits, (features, latents), torch.ones_like(logits), create_graph=True)
         return ((torch.cat(gradients, dim=1).norm(2, dim=1) - 1) ** 2).mean()
 
+    def _optimizer_step(self, names: list[str], losses: Sequence[Callable[[], tuple[torch.Tensor, dict[str, torch.Tensor]]]],
+                        clipped: tuple[nn.Module, ...] = ()) -> dict[str, torch.Tensor]:
+        """Step the optimizers ``names`` once on the mean gradient of the micro-batch losses.
+
+        Each callable builds the loss and metrics of one micro-batch. Its backward pass
+        frees its graph before the next one is built, so the memory is that of one
+        micro-batch. Gradients are clipped once, on the accumulated mean, before the step.
+        """
+        for name in names:
+            self.optimizers[name].zero_grad(set_to_none=True)
+        metrics: dict[str, torch.Tensor] = {}
+        for build in losses:
+            loss, values = build()
+            (loss / len(losses)).backward()
+            for key, value in values.items():
+                value = value.detach() if torch.is_tensor(value) else value
+                metrics[key] = metrics.get(key, 0.0) + value / len(losses)
+        if self.config.clip_grad_norm > 0:
+            for module in clipped:
+                torch.nn.utils.clip_grad_norm_(module.parameters(), self.config.clip_grad_norm)
+        for name in names:
+            self.optimizers[name].step()
+        return metrics
+
     def update_discriminator(self, expert: list[dict], expert_z: torch.Tensor, train: list[dict], train_z: torch.Tensor, counts: list[int]) -> dict[str, torch.Tensor]:
         """Train D to separate expert windows from replay states, each with its z.
 
         BFM-Zero's ``FBcprAgent.update_discriminator``.
         """
+        return self._optimizer_step(["discriminator"], [partial(self._discriminator_loss, expert, expert_z, train, train_z, counts)])
+
+    def _discriminator_loss(self, expert: list[dict], expert_z: torch.Tensor, train: list[dict], train_z: torch.Tensor,
+                            counts: list[int]) -> tuple[torch.Tensor, dict[str, torch.Tensor]]:
+        """Return D's loss (with its gradient penalty) and metrics on one micro-batch."""
         expert_loss = -F.logsigmoid(self._discriminator_logits(expert, expert_z, counts))
         train_loss = F.softplus(self._discriminator_logits(train, train_z, counts))
         loss = (expert_loss + train_loss).mean()
@@ -547,11 +578,8 @@ class DaGetFbCprAgent:
             penalty = self._gradient_penalty(expert, expert_z, train, train_z)
             loss = loss + self.config.grad_penalty_discriminator * penalty
             metrics["disc_wgan_gp_loss"] = penalty.detach()
-        self.optimizers["discriminator"].zero_grad(set_to_none=True)
-        loss.backward()
-        self.optimizers["discriminator"].step()
         metrics["disc_loss"] = loss.detach()
-        return metrics
+        return loss, metrics
 
     def _sample_action(self, embeddings: torch.Tensor, z: torch.Tensor, mask: torch.Tensor) -> torch.Tensor:
         """Sample a TD3-style clipped action (Fujimoto et al., ICML 2018)."""
@@ -646,8 +674,18 @@ class DaGetFbCprAgent:
         metrics["physics/loss"] = output.loss.detach()
         return output.loss, metrics
 
+    def _value_network_names(self) -> list[str]:
+        """Return the optimizers of F, B, the critics and, when it trains, the encoder."""
+        return ["forward", "backward", "critic", "aux_critic"] + (["encoder", "physics_heads"] if self.config.train_encoder else [])
+
     def update_value_networks(self, batch: TrainingBatch, z: torch.Tensor, physics_batch: dict[str, torch.Tensor] | None = None) -> dict[str, torch.Tensor]:
         """Train F, B, Q_D, Q_R and the encoder in one backward pass, as they share its graph."""
+        return self._optimizer_step(self._value_network_names(), [partial(self._value_networks_loss, batch, z, physics_batch)],
+                                    (self.model.forward_map, self.model.backward_map))
+
+    def _value_networks_loss(self, batch: TrainingBatch, z: torch.Tensor,
+                             physics_batch: dict[str, torch.Tensor] | None = None) -> tuple[torch.Tensor, dict[str, torch.Tensor]]:
+        """Return the summed loss of F, B, Q_D, Q_R and the physics heads, and metrics, on one micro-batch."""
         config = self.config
         joints = batch.joint_mask.shape[1]
         grad = config.train_encoder and config.encoder_rl_gradients
@@ -662,22 +700,17 @@ class DaGetFbCprAgent:
             physics_loss, physics_metrics = self._physics_loss(physics_batch)
             loss = loss + config.physics_loss_weight * physics_loss
             metrics.update(physics_metrics)
-        names = ["forward", "backward", "critic", "aux_critic"] + (["encoder", "physics_heads"] if config.train_encoder else [])
-        for name in names:
-            self.optimizers[name].zero_grad(set_to_none=True)
-        loss.backward()
-        if config.clip_grad_norm > 0:
-            torch.nn.utils.clip_grad_norm_(self.model.forward_map.parameters(), config.clip_grad_norm)
-            torch.nn.utils.clip_grad_norm_(self.model.backward_map.parameters(), config.clip_grad_norm)
-        for name in names:
-            self.optimizers[name].step()
-        return metrics
+        return loss, metrics
 
     def update_actor(self, batch: TrainingBatch, z: torch.Tensor) -> dict[str, torch.Tensor]:
         """Maximize ``Fᵀz + λ_D Q_D + λ_R Q_R`` with ensemble pessimism; the encoder does not move.
 
         BFM-Zero's ``FBcprAuxAgent.update_actor``.
         """
+        return self._optimizer_step(["actor"], [partial(self._actor_loss, batch, z)], (self.model.actor,))
+
+    def _actor_loss(self, batch: TrainingBatch, z: torch.Tensor) -> tuple[torch.Tensor, dict[str, torch.Tensor]]:
+        """Return the actor loss and metrics on one micro-batch."""
         config = self.config
         mask = batch.joint_mask
         embeddings = self._padded_embeddings(self.model.encoder, batch.observations, mask.shape[1])
@@ -691,23 +724,10 @@ class DaGetFbCprAgent:
         _, _, q_fb = ensemble_pessimism(self.model.fb_q_value(forward, z), config.actor_pessimism_penalty)
         weight = q_fb.abs().mean().detach() if config.scale_reg else 1.0
         loss = -q_d.mean() * config.reg_coeff * weight - q_r.mean() * config.reg_coeff_aux * weight - q_fb.mean()
-        self.optimizers["actor"].zero_grad(set_to_none=True)
-        loss.backward()
-        if config.clip_grad_norm > 0:
-            torch.nn.utils.clip_grad_norm_(self.model.actor.parameters(), config.clip_grad_norm)
-        self.optimizers["actor"].step()
-        return {"actor_loss": loss.detach(), "Q_discriminator": q_d.mean().detach(), "Q_aux": q_r.mean().detach(), "Q_fb": q_fb.mean().detach()}
+        return loss, {"actor_loss": loss.detach(), "Q_discriminator": q_d.mean().detach(), "Q_aux": q_r.mean().detach(), "Q_fb": q_fb.mean().detach()}
 
-    def update(self, replays: list[ReplayBuffer], motions: list[ExpertMotions], physics_batch: dict[str, torch.Tensor] | None = None) -> dict[str, torch.Tensor]:
-        """Run one gradient step of every network, in BFM-Zero's order, then the target updates."""
-        config = self.config
-        length = self.model_config.seq_length
-        windows = split_counts(config.batch_size // length, self.robots)
-        counts = [count * length for count in windows]
-        batch = self._training_batch(replays, counts)
-        expert_states, expert_next = self._expert_batch(motions, windows)
-        expert_z = self.encode_expert(expert_next)
-        metrics = self.update_discriminator(expert_states, expert_z, batch.states, batch.z, counts)
+    def _training_z(self, batch: TrainingBatch, expert_z: torch.Tensor) -> torch.Tensor:
+        """Return the relabeled z of a micro-batch, and store its new z in the robots' z buffers."""
         with torch.no_grad():
             goals = self.model.project_z(torch.cat([
                 self.model.backward_map(self.model.encode_state(inputs), inputs["joint_mask"])
@@ -716,10 +736,58 @@ class DaGetFbCprAgent:
         z = self.sample_mixed_z(batch.robots, goals, expert_z, batch.robots)
         for robot, buffer in enumerate(self.z_buffers):
             buffer.add(z[batch.robots == robot])
-        relabel = torch.rand((z.shape[0], 1), device=self.device) <= config.relabel_ratio
-        z = torch.where(relabel, z, batch.z)
-        metrics.update(self.update_value_networks(batch, z, physics_batch))
-        metrics.update(self.update_actor(batch, z))
+        relabel = torch.rand((z.shape[0], 1), device=self.device) <= self.config.relabel_ratio
+        return torch.where(relabel, z, batch.z)
+
+    def _physics_micro_batches(self, physics_batch: Mapping | Sequence | None) -> list:
+        """Return one physics batch (or None) per micro-batch."""
+        steps = self.config.gradient_accumulation_steps
+        if physics_batch is None:
+            return [None] * steps
+        batches = [physics_batch] if isinstance(physics_batch, Mapping) else list(physics_batch)
+        if len(batches) != steps:
+            raise ValueError(f"pass one physics batch per micro-batch: got {len(batches)} for gradient_accumulation_steps {steps}")
+        return batches
+
+    def update(self, replays: list[ReplayBuffer], motions: list[ExpertMotions],
+               physics_batch: Mapping | Sequence | None = None) -> dict[str, torch.Tensor]:
+        """Run one gradient step of every network, in BFM-Zero's order, then the target updates.
+
+        The step draws ``gradient_accumulation_steps`` micro-batches of ``batch_size``
+        transitions, and each network steps once on the mean of their gradients: D on
+        every micro-batch, then F, B, the critics and the encoder (with D's new rewards),
+        then the actor (with the new critics). The metrics are means over micro-batches.
+
+        Args:
+            replays (list[ReplayBuffer]): One replay buffer per robot.
+            motions (list[ExpertMotions]): One set of expert motions per robot.
+            physics_batch (Mapping | Sequence | None): A collated physics batch, or one per
+                micro-batch when ``gradient_accumulation_steps`` is above 1.
+
+        Returns:
+            dict[str, torch.Tensor]: Losses and diagnostics.
+        """
+        config = self.config
+        physics = self._physics_micro_batches(physics_batch)
+        length = self.model_config.seq_length
+        windows = split_counts(config.batch_size // length, self.robots)
+        counts = [count * length for count in windows]
+        micro = []
+        for _ in range(config.gradient_accumulation_steps):
+            batch = self._training_batch(replays, counts)
+            expert_states, expert_next = self._expert_batch(motions, windows)
+            micro.append((batch, expert_states, self.encode_expert(expert_next)))
+        metrics = self._optimizer_step(["discriminator"], [
+            partial(self._discriminator_loss, expert_states, expert_z, batch.states, batch.z, counts)
+            for batch, expert_states, expert_z in micro
+        ])
+        latents = [self._training_z(batch, expert_z) for batch, _, expert_z in micro]
+        metrics.update(self._optimizer_step(self._value_network_names(), [
+            partial(self._value_networks_loss, batch, z, extra) for (batch, _, _), z, extra in zip(micro, latents, physics)
+        ], (self.model.forward_map, self.model.backward_map)))
+        metrics.update(self._optimizer_step(["actor"], [
+            partial(self._actor_loss, batch, z) for (batch, _, _), z in zip(micro, latents)
+        ], (self.model.actor,)))
         soft_update(self.model.forward_map, self.target_forward_map, config.fb_target_tau)
         soft_update(self.model.backward_map, self.target_backward_map, config.fb_target_tau)
         soft_update(self.model.state_adapter, self.target_state_adapter, config.fb_target_tau)

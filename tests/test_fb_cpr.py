@@ -7,6 +7,7 @@ import math
 import sys
 import tempfile
 import unittest
+from functools import partial
 from pathlib import Path
 from unittest import mock
 
@@ -475,6 +476,59 @@ class AgentTest(unittest.TestCase):
             torch.testing.assert_close(new, (1 - tau) * old + tau * online, rtol=1e-5, atol=1e-6)
         for new, old, online in zip(agent.target_state_adapter.parameters(), adapter_target, agent.model.state_adapter.parameters()):
             torch.testing.assert_close(new, (1 - tau) * old + tau * online, rtol=1e-5, atol=1e-6)
+
+    def test_gradient_accumulation_steps_once_on_the_mean_gradient(self) -> None:
+        """With two micro-batches, each optimizer steps once on the mean of their gradients."""
+        agent, replays, _ = build_agent(gradient_accumulation_steps=2)
+        batches = [agent._training_batch(replays, [8, 8]) for _ in range(2)]
+        latents = [project_to_sphere(torch.randn(16, Z)) for _ in range(2)]
+        names = agent._value_network_names()
+        parameters = [parameter for name in names for group in agent.optimizers[name].param_groups for parameter in group["params"]]
+
+        def loss(index: int):
+            torch.manual_seed(index)  # the same action noise in both passes
+            return agent._value_networks_loss(batches[index], latents[index])
+
+        # The auxiliary reward normalizer moves with every loss; both passes start from the same state.
+        normalizer = {key: value.clone() for key, value in agent.aux_normalizer.state_dict().items()}
+        gradients = []
+        for index in range(2):
+            for parameter in parameters:
+                parameter.grad = None
+            loss(index)[0].backward()
+            gradients.append([None if parameter.grad is None else parameter.grad.clone() for parameter in parameters])
+        agent.aux_normalizer.load_state_dict(normalizer)
+        agent._optimizer_step(names, [partial(loss, 0), partial(loss, 1)])
+        compared = 0
+        for parameter, first, second in zip(parameters, *gradients):
+            if first is None:
+                self.assertIsNone(parameter.grad)
+                continue
+            torch.testing.assert_close(parameter.grad, (first + second) / 2, rtol=1e-5, atol=1e-7)
+            steps = [int(agent.optimizers[name].state[parameter]["step"]) for name in names if parameter in agent.optimizers[name].state]
+            self.assertEqual(steps, [1])
+            compared += 1
+        self.assertGreater(compared, 0)
+
+    def test_full_update_accumulates_micro_batches(self) -> None:
+        """A full update draws one replay batch and one physics batch per micro-batch, and steps each network once."""
+        agent, replays, motions = build_agent(gradient_accumulation_steps=2)
+        with tempfile.TemporaryDirectory() as folder:
+            physics = physics_batch(Path(folder))
+        with self.assertRaisesRegex(ValueError, "one physics batch per micro-batch"):
+            agent.update(replays, motions, physics)
+        with mock.patch.object(agent, "_training_batch", wraps=agent._training_batch) as draw, \
+                mock.patch.object(agent, "_physics_loss", wraps=agent._physics_loss) as physics_loss:
+            metrics = agent.update(replays, motions, [physics, physics])
+        self.assertEqual(draw.call_count, 2)
+        self.assertEqual(physics_loss.call_count, 2)
+        self.assertTrue(all(np.isfinite(float(value)) for value in metrics.values()))
+        self.assertIn("physics/loss_fk", metrics)
+        for name, optimizer in agent.optimizers.items():
+            steps = {int(state["step"]) for state in optimizer.state.values()}
+            self.assertEqual(steps, {1}, name)
+        with self.assertRaisesRegex(ValueError, "gradient_accumulation_steps"):
+            FbCprConfig(gradient_accumulation_steps=0)
 
     def test_f_and_b_are_compared_only_within_a_robot(self) -> None:
         """The agent gives the FB and orthonormality losses the same-robot mask, unless told not to."""
@@ -1132,8 +1186,11 @@ class EnvironmentTest(unittest.TestCase):
             self.assertIn(tag, tags)
         names = [item["name"] for item in json.loads((output / "embodiments.json").read_text())]
         self.assertEqual(names, ["quad/0-ground", "biped/0-ground"])
-        script.main([*common, "--num_env_steps", "64", "--resume_from", str(checkpoint)])
-        self.assertEqual(torch.load(checkpoint, weights_only=False)["frames"], 64)
+        # The resumed run also accumulates two micro-batches per update, each with its physics batch.
+        script.main([*common, "--num_env_steps", "64", "--resume_from", str(checkpoint), "--gradient_accumulation_steps", "2"])
+        state = torch.load(checkpoint, weights_only=False)
+        self.assertEqual(state["frames"], 64)
+        self.assertEqual(state["config"]["gradient_accumulation_steps"], 2)
 
 
 class PenaltyMultiplierTest(unittest.TestCase):

@@ -1,7 +1,7 @@
 #!/usr/bin/env bash
 # Launch large physics pretraining using configs from generate_training_configs.py.
 set -euo pipefail
-
+export CUDA_VISIBLE_DEVICES=0
 PROJECT_ROOT="$(cd "$(dirname "${BASH_SOURCE[0]}")/.." && pwd)"
 cd "$PROJECT_ROOT"
 

@@ -47,7 +47,7 @@ URDF ──parse_urdf──▶ UrdfRobot ──EmbodimentGraph.from_urdf──�
                      several graphs ──collate_embodiments──▶ EmbodimentBatch
                                                                │
  joint + base observations ──DaGetTokenizer──▶ observation tokens [B, J, F]
- rigid body │ actuator │ dynamics ──physics tokenizers──▶ physics tokens [B, 3J, hidden]
+ rigid body │ actuator │ root │ dynamics ──tokenizers──▶ physics tokens [B, 3J + 1, hidden]
                                                                │
  tokens, M(q), graph, physics ──DaGetEncoder──▶ joint embeddings H [B, J, hidden]
                                                                │
@@ -259,11 +259,13 @@ tokenizer first maps every feature to `asinh(x / s)` with a per-feature scale
 which is linear for small values and logarithmic for large ones, so a
 20 g finger link and a 10 kg thigh are both well conditioned. A two-layer MLP
 then gives one token per joint, and a learned group embedding is added. The
-three groups are concatenated into a memory of `3J` tokens:
+The three per-joint groups and one root-body token form a memory of `3J + 1`
+tokens:
 
 $$
 \mathcal M = [\,\mathrm{rigid\ body}_{1:J},\;
-                 \mathrm{actuator}_{1:J},\;\mathrm{dynamics}_{1:J}\,],
+                 \mathrm{actuator}_{1:J},\;\mathrm{root},\;
+                 \mathrm{dynamics}_{1:J}\,],
 $$
 
 $$
@@ -274,8 +276,9 @@ $$
 $$
 
 Queries are the observation tokens. The bias lets a joint focus on its own
-physics (`SPD = 0`) and on nearby joints. The bias tables are per layer and per
-head, and padded joints are masked out. Physics Cross Attention is controlled by
+physics (`SPD = 0`) and on nearby joints; the root token has a separate learned
+per-head bias. The bias tables are per layer and per head, and padded joints are
+masked out. Physics Cross Attention is controlled by
 `use_physics_cross_attention` and `physics_cross_attention_layers` (default:
 every layer).
 
@@ -283,12 +286,12 @@ every layer).
 
 | Tier | Features | Changes when | At training time | At control time |
 |---|---|---|---|---|
-| embodiment | all rigid-body and actuator features | the robot or its randomized parameters change | once per robot, when the dataset is built | once per robot; their per-layer keys and values are cached in a `PhysicsMemory` |
+| embodiment | all rigid-body, actuator, and root features | the robot or its randomized parameters change | once per robot, when the dataset is built | once per robot; their per-layer keys and values are cached in a `PhysicsMemory` |
 | configuration | $M_{ii}(q)$, $g(q)$, gravity load | $q$ or the gravity direction | once per frame, cached on disk | `PhysicsFeatureCache`: every `configuration_interval` steps, or sooner if any joint moves more than `configuration_tolerance` or gravity turns |
 | velocity | $c(q,\dot q,\text{base twist})$, $\hat\tau_f$ | $\dot q$, the base twist (and $q$) | once per frame, cached on disk | every `velocity_interval` steps, if $\dot q$ or the base twist moves more than `velocity_tolerance`, or with the configuration tier |
 
-`encoder.build_physics_memory(rigid_body, actuator, joint_mask)` precomputes the
-rigid-body and actuator tokens and their keys and values for every physics
+`encoder.build_physics_memory(rigid_body, actuator, joint_mask, root_features)`
+precomputes the rigid-body, actuator, and root tokens and their keys and values for every physics
 layer. After that, a control step only embeds and projects the `J` dynamics
 tokens. The memory records the versions of the parameters it came from. After
 an optimizer step, or any other in-place weight change, the encoder refuses a
@@ -409,12 +412,14 @@ in its code) with width 512, eight layers, and a 1024-wide feed-forward block.
 | `physics_cross_attention_layers` | `None` (all) | `None` | Layers with Physics Cross Attention |
 | `rigid_body_feature_size`, `actuator_feature_size`, `dynamics_feature_size` | 26, 6, 5 | same | Physics feature widths; must equal `model/physics_schema.py` when Physics Cross Attention is on |
 | `physics_tokenizer_hidden_size` | `None` (= `hidden_size`) | same | Physics tokenizer MLP width |
-| `use_root_token` | `False` | `False` | One root-body token per robot in the Physics Cross Attention memory ([C1](zero_shot.md#c-physics-the-encoder-could-not-see)); needs `root_features` |
 | `root_feature_size` | 13 | same | Root features (`model.physics.root_features`) |
 | `dimensionless_physics` | `False` | `False` | Physics features in units of total mass, size and `sqrt(L / g)` ([A3](zero_shot.md#a-targets-and-inputs-that-depend-on-physics-only)); needs `root_features` |
 | `use_morphology_modulation` | `False` | `False` | ModuMorph-style contextual modulation ([D4](zero_shot.md#d-coverage-of-morphologies)) |
 | `modulation_rank` | `None` (= heads) | same | Rank of the modulation's input-projection correction |
 | `physics_masking` | `False` | `False` | Learned mask embeddings for masked physics modeling ([E3](zero_shot.md#e-robustness-to-wrong-or-missing-specifications)) |
+
+Physics Cross Attention always includes one root-body token per robot and
+requires `root_features`; it has no on/off setting.
 
 `EmbodimentGraph.from_urdf` options:
 

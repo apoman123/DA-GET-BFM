@@ -134,18 +134,40 @@ class SchemaAndEncoderTest(unittest.TestCase):
         self.assertAlmostEqual(float(units[0, 1, 0]), 10.0 * 9.80665, places=4)
 
     def test_dimensionless_encoder_is_mass_scale_invariant(self) -> None:
-        """Scaling every mass, inertia and torque leaves dimensionless tokens and the output unchanged."""
+        """Keep joint physics dimensionless while exposing mass in the root token.
+
+        Returns:
+            None: Asserts non-root physics tokens are invariant under mass
+            scaling and the absolute-scale root token can change the output.
+        """
         graph = go1_graph()
         encoder = DaGetEncoder(tiny_encoder_config(12, dimensionless_physics=True)).eval()
+        first_inputs = encoder_inputs(graph, mass_scale=1.0)
+        second_inputs = encoder_inputs(graph, mass_scale=3.0)
         with torch.no_grad():
-            first = encoder(**encoder_inputs(graph, mass_scale=1.0))
-            second = encoder(**encoder_inputs(graph, mass_scale=3.0))
-        torch.testing.assert_close(first, second, atol=2e-4, rtol=1e-4)
+            first_memory = encoder.build_physics_memory(
+                first_inputs["rigid_body_features"], first_inputs["actuator_features"],
+                first_inputs["joint_mask"], first_inputs["root_features"],
+            )
+            second_memory = encoder.build_physics_memory(
+                second_inputs["rigid_body_features"], second_inputs["actuator_features"],
+                second_inputs["joint_mask"], second_inputs["root_features"],
+            )
+            first = encoder(**first_inputs)
+            second = encoder(**second_inputs)
+        torch.testing.assert_close(first_memory.keys[0][:, :, :-1], second_memory.keys[0][:, :, :-1], atol=2e-4, rtol=1e-4)
+        torch.testing.assert_close(first_memory.values[0][:, :, :-1], second_memory.values[0][:, :, :-1], atol=2e-4, rtol=1e-4)
+        self.assertFalse(torch.allclose(first_memory.keys[0][:, :, -1], second_memory.keys[0][:, :, -1]))
+        self.assertFalse(torch.allclose(first, second))
 
     def test_root_token_extends_memory(self) -> None:
-        """The physics memory has 2J + 1 static tokens with a root token, and the root matters."""
+        """Require the root token and its features in physics memory.
+
+        Returns:
+            None: Asserts static memory width and root-feature sensitivity.
+        """
         graph = go1_graph()
-        encoder = DaGetEncoder(tiny_encoder_config(12, use_root_token=True)).eval()
+        encoder = DaGetEncoder(tiny_encoder_config(12)).eval()
         inputs = encoder_inputs(graph)
         memory = encoder.build_physics_memory(inputs["rigid_body_features"], inputs["actuator_features"],
                                               inputs["joint_mask"], inputs["root_features"])
@@ -180,10 +202,31 @@ class SchemaAndEncoderTest(unittest.TestCase):
             self.assertFalse(torch.allclose(encoder(**inputs), encoder(**inputs, physics_token_mask={"rigid_body": mask})))
 
     def test_options_need_physics_cross_attention(self) -> None:
-        """Root token, dimensionless physics, modulation and masking need Physics Cross Attention."""
-        for option in ("use_root_token", "dimensionless_physics", "use_morphology_modulation", "physics_masking"):
+        """Reject physics-specific options without Physics Cross Attention.
+
+        Returns:
+            None: Asserts that incompatible encoder options are rejected.
+        """
+        for option in ("dimensionless_physics", "use_morphology_modulation", "physics_masking"):
             with self.assertRaises(ValueError):
                 DaGetConfig.from_size(12, "tiny", **{option: True})
+
+    def test_legacy_checkpoint_without_root_token_is_rejected(self) -> None:
+        """Accept old root-enabled settings and reject root-free checkpoints.
+
+        Returns:
+            None: Asserts compatibility with root-enabled checkpoints only.
+        """
+        legacy = {
+            "input_size": 12,
+            "use_physics_cross_attention": True,
+            "use_root_token": True,
+        }
+        self.assertTrue(DaGetPhysicsPretrainingConfig(encoder=legacy).encoder_config.needs_root_features)
+        with self.assertRaisesRegex(ValueError, "without root token"):
+            DaGetPhysicsPretrainingConfig(
+                encoder={**legacy, "use_root_token": False}
+            ).encoder_config
 
 
 @NEEDS_URDFS
@@ -354,9 +397,13 @@ class DataPipelineTest(unittest.TestCase):
             self.assertIsInstance(trainer._get_train_sampler(), WeightedRandomSampler)
 
     def test_all_heads_train(self) -> None:
-        """Every new loss is present, finite and differentiable with every option on."""
+        """Train all auxiliary heads with the root token present.
+
+        Returns:
+            None: Asserts finite, differentiable losses with all heads enabled.
+        """
         encoder = tiny_encoder_config(
-            self.datasets.token_size, use_root_token=True, dimensionless_physics=True,
+            self.datasets.token_size, dimensionless_physics=True,
             use_morphology_modulation=True, physics_masking=True,
         )
         config = DaGetPhysicsPretrainingConfig.from_encoder_config(
@@ -530,7 +577,11 @@ class ZeroShotConfigTest(unittest.TestCase):
         self.assertTrue(manifest.check_training_config(ROOT / "configs" / "data" / "ground_contact.json"))
 
     def test_pretraining_arguments_parse(self) -> None:
-        """The training-argument file is valid for the training script's parser."""
+        """Parse shipped arguments with the mandatory root token.
+
+        Returns:
+            None: Asserts valid model and data arguments without a root toggle.
+        """
         import importlib.util
 
         spec = importlib.util.spec_from_file_location("train_physics", ROOT / "scripts" / "train_physics_da_get.py")
@@ -546,4 +597,4 @@ class ZeroShotConfigTest(unittest.TestCase):
         self.assertEqual(model_args.head_type, "linear_residual")
         self.assertEqual(data_args.data_config, "configs/data/zero_shot.json")
         encoder = module.encoder_config(model_args, 64)
-        self.assertTrue(encoder.use_root_token and encoder.dimensionless_physics and encoder.physics_masking)
+        self.assertTrue(encoder.needs_root_features and encoder.dimensionless_physics and encoder.physics_masking)

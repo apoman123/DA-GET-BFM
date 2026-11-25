@@ -246,11 +246,17 @@ class DaGetPhysicsPretrainingConfig(PretrainedConfig):
 
     @property
     def encoder_config(self) -> DaGetConfig:
-        """Return the validated ``DaGetConfig``.
+        """Return an encoder config and reject checkpoints without a root token.
 
         Returns:
-            DaGetConfig: Encoder configuration.
+            DaGetConfig: Encoder configuration with mandatory root physics memory.
+
+        Raises:
+            ValueError: A legacy Physics Cross Attention checkpoint lacks its
+                root token and cannot supply the required parameters.
         """
+        if self.encoder.get("use_physics_cross_attention") and self.encoder.get("use_root_token") is False:
+            raise ValueError("checkpoint without root token is incompatible; pretrain the encoder again")
         valid = {item.name for item in fields(DaGetConfig)}
         return DaGetConfig(**{key: value for key, value in self.encoder.items() if key in valid})
 
@@ -382,7 +388,6 @@ class GraphActionMixer(nn.Module):
             use_mass_encoding=False,
             use_physics_cross_attention=False,
             physics_cross_attention_layers=None,
-            use_root_token=False,
             dimensionless_physics=False,
             use_morphology_modulation=False,
             physics_masking=False,

@@ -1,6 +1,6 @@
 # 附錄:實作對照(branch `feature/proposal-v4`)
 
-本附錄記錄 proposal v4 每一項在 repo 中的實作位置、設定方式與測試。所有選項**預設關閉**,原本的模型與 checkpoint 行為不變;英文的完整說明在 `docs/zero_shot.md`。
+本附錄記錄 proposal v4 每一項在 repo 中的實作位置、設定方式與測試。啟用 Physics Cross Attention 時一律加入 root token;其餘選項依各自預設值。英文的完整說明在 `docs/zero_shot.md`。
 
 **重要限制**:開發機沒有 GPU,因此**沒有跑任何大規模訓練或 ablation**。所有 [H] 項目都還沒有被證實或否定。目前的驗證是單元測試,加上 CPU 上的端到端 smoke run(極小模型、幾個 step)。
 
@@ -16,7 +16,7 @@
 | B1 結構化介面 | `pretraining.py` `DaGetPhysicsInterface`(Ĝ = WWᵀ + diag、f̂、K̂);operator 與 consistency loss;rollout effect | `head_type`、`interface_rank`、`effect_mode` | `tests/test_zero_shot.py`(真 G 代入時 R/R⁻¹ 讀出等於 target) |
 | B2 actor 介面 bias | `modeling_bfm.py`(`interface_operator`、actor 每層 bias) | `BfmConfig.use_interface_bias` | 同上 |
 | B3 heads lr | 既有 `FbCprConfig.lr_physics_heads` | config | — |
-| C1 root token | `physics.py` `root_features`、encoder memory 加 1 個 token | `use_root_token` | 同上 |
+| C1 root token | `physics.py` `root_features`、encoder memory 加 1 個 token | Physics Cross Attention 啟用時固定使用 | 同上 |
 | C2 接觸 head | `episodes.py`(`contact_label_valid`)、`dataset.py`(link→joint)、`pretraining.py` | `use_contact_head` | 同上 |
 | C3 centroidal | `model/centroidal.py`(自由落體時 ṗ = mg、k̇_G = 0 已驗證) | `use_centroidal_head` | 同上 |
 | D1 形態生成器 | `model/morphology.py`、`model/training/procedural.py`、`scripts/generate_morphologies.py` | source `type: "procedural"` | `tests/test_morphology.py` |
@@ -32,6 +32,8 @@
 | G3 retargeting | `model/rl/retarget.py`、`scripts/retarget_motion.py` | CLI | `tests/test_retarget.py` |
 | R6 修正 | `StateView.mass`、replay buffer、`encode_state`、deployment | 預設啟用 | `tests/test_zero_shot.py` |
 | 評估 L0–L4 | `configs/splits/zero_shot.json`、`model/evaluation/statistics.py`(IQM、stratified bootstrap,以機器人為單位)、`scripts/evaluate_zero_shot.py` | CLI | `tests/test_evaluation.py` |
+
+原 proposal v4 §5.6 列出 root token 的有/無 ablation;目前依固定啟用的設計決定，不提供這個切換參數。
 
 ## B. 設定檔
 

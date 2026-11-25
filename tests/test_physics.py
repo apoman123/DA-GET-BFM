@@ -27,6 +27,7 @@ from model.physics import (
     motor_labels,
     requested_torque,
     rigid_body_features,
+    root_features,
     torque_limit,
     velocity_terms,
 )
@@ -303,12 +304,17 @@ class PhysicsCrossAttentionTest(unittest.TestCase):
     """Check the encoder's Physics Cross Attention and its memory cache."""
 
     def setUp(self) -> None:
-        """Build a padded batch of two robots with physics features."""
+        """Build a padded batch with joint and mandatory root physics features.
+
+        Returns:
+            None: Initializes two robots, their feature cache, and the encoder.
+        """
         torch.manual_seed(0)
         self.graphs = [EmbodimentGraph.from_urdf(quadruped()), EmbodimentGraph.from_urdf(humanoid())]
         self.batch = collate_embodiments(self.graphs)
         specs = [actuator_specs(graph) for graph in self.graphs]
         self.cache = PhysicsFeatureCache(self.graphs, specs)
+        self.root_features = torch.stack([root_features(graph) for graph in self.graphs])
         joints = self.batch.joint_mask.shape[1]
         self.q = torch.zeros(2, joints)
         self.dynamics = self.cache.update(self.q, torch.zeros_like(self.q))
@@ -331,17 +337,23 @@ class PhysicsCrossAttentionTest(unittest.TestCase):
         }
 
     def test_memory_equals_recomputation_and_detects_staleness(self) -> None:
-        """Cached static keys and values give identical outputs until weights change."""
+        """Match direct outputs with cached root-aware physics memory.
+
+        Returns:
+            None: Asserts cached equality and rejection after weight changes.
+        """
         tokens = self.batch.joint_features
         direct = self.encoder(
             tokens,
             rigid_body_features=self.cache.rigid_body_features,
             actuator_features=self.cache.actuator_features,
+            root_features=self.root_features,
             dynamics_features=self.dynamics,
             **self.inputs(),
         )
         memory = self.encoder.build_physics_memory(
-            self.cache.rigid_body_features, self.cache.actuator_features, self.batch.joint_mask
+            self.cache.rigid_body_features, self.cache.actuator_features,
+            self.batch.joint_mask, self.root_features,
         )
         self.assertEqual(len(memory.keys), 2)
         cached = self.encoder(tokens, dynamics_features=self.dynamics, physics_memory=memory, **self.inputs())
@@ -352,11 +364,16 @@ class PhysicsCrossAttentionTest(unittest.TestCase):
             self.encoder(tokens, dynamics_features=self.dynamics, physics_memory=memory, **self.inputs())
 
     def test_physics_changes_output_and_padding_is_invariant(self) -> None:
-        """Physics features matter, and the quadruped encodes the same alone or padded."""
+        """Preserve the first robot's output when a padded robot is added.
+
+        Returns:
+            None: Asserts physics sensitivity and padding invariance.
+        """
         tokens = self.batch.joint_features
         kwargs = {
             "rigid_body_features": self.cache.rigid_body_features,
             "actuator_features": self.cache.actuator_features,
+            "root_features": self.root_features,
         }
         base = self.encoder(tokens, dynamics_features=self.dynamics, **kwargs, **self.inputs())
         heavier = self.encoder(tokens, dynamics_features=self.dynamics * 2, **kwargs, **self.inputs())
@@ -368,6 +385,7 @@ class PhysicsCrossAttentionTest(unittest.TestCase):
             mass_matrix=single.mass_matrix(torch.zeros(1, count, dtype=torch.float64)).float(),
             rigid_body_features=self.cache.rigid_body_features[:1, :count],
             actuator_features=self.cache.actuator_features[:1, :count],
+            root_features=self.root_features[:1],
             dynamics_features=self.dynamics[:1, :count],
             **single.encoder_inputs(),
         )

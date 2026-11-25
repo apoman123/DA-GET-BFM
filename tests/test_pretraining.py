@@ -1,7 +1,9 @@
 """Test the physics pretraining data pipeline, heads, losses, and Trainer."""
 
 import copy
+import contextlib
 import importlib.util
+import io
 import json
 import sys
 import tempfile
@@ -160,6 +162,90 @@ class PretrainingPipelineTest(unittest.TestCase):
         again = build_physics_datasets(self.config_path, cache_dir=root / "cache")
         self.assertEqual(len(again.train), len(self.datasets.train))
         self.assertEqual((entries[0] / "complete").stat().st_mtime_ns, marker_time)
+
+    def test_preprocessing_reports_source_progress_and_cache_reuse(self) -> None:
+        """Report episode completion during a build and identify a later cache hit.
+
+        Returns:
+            None: Asserts that progress reaches the completed source and that
+            the next load reports reuse of the completed cache.
+        """
+        root = Path(self.directory.name)
+        config_path = root / "progress_data.json"
+        config_path.write_text(json.dumps({"sources": [self.config["sources"][1]]}))
+        cache_dir = root / "progress_cache"
+        output = io.StringIO()
+        with contextlib.redirect_stderr(output):
+            build_physics_datasets(config_path, cache_dir=cache_dir, workers=1, progress=True)
+        self.assertIn("0/1 sources", output.getvalue())
+        self.assertIn("loading", output.getvalue())
+        self.assertIn("0/3 episodes", output.getvalue())
+        self.assertIn("1/1 sources", output.getvalue())
+        self.assertIn("3/3 episodes", output.getvalue())
+        self.assertIn("Processed-data cache ready:", output.getvalue())
+
+        output = io.StringIO()
+        with contextlib.redirect_stderr(output):
+            build_physics_datasets(config_path, cache_dir=cache_dir, progress=True)
+        self.assertIn("Using processed-data cache:", output.getvalue())
+
+    def test_preprocessing_resumes_completed_sources_from_configured_cache(self) -> None:
+        """Reuse the first source after the next source fails to load.
+
+        Returns:
+            None: Asserts that the configured cache survives interruption,
+            skips the completed source, and becomes a complete dataset.
+        """
+        from model.training import dataset as data_module
+
+        root = Path(self.directory.name)
+        config = copy.deepcopy(self.config)
+        config["sources"][1]["path"] = "future_arm_dataset"
+        cache_dir = root / "resume_cache"
+        config["cache_dir"] = str(cache_dir)
+        config_path = root / "resume_data.json"
+        config_path.write_text(json.dumps(config))
+
+        with self.assertRaises(FileNotFoundError):
+            build_physics_datasets(config_path, workers=1)
+        partials = list(cache_dir.glob("*.incomplete"))
+        self.assertEqual(len(partials), 1)
+        checkpoint = json.loads((partials[0] / "checkpoint.json").read_text())
+        self.assertEqual(checkpoint["completed_sources"], 1)
+        metadata = json.loads((partials[0] / "checkpoint-0001-episodes.json").read_text())
+        orphan_name = f"frames-{metadata['shards'] + 1:05d}.arrow"
+        (partials[0] / orphan_name).write_bytes(b"interrupted shard")
+
+        write_lerobot_dataset(root / "future_arm_dataset")
+        with mock.patch.object(data_module, "load_source", wraps=data_module.load_source) as loader:
+            resumed = build_physics_datasets(config_path, workers=1)
+        self.assertEqual(loader.call_count, 1)
+        self.assertEqual(loader.call_args.args[0]["name"], "humanoid_arms")
+        self.assertEqual(len(resumed.records), len(self.datasets.records))
+        self.assertEqual(len(resumed.train), len(self.datasets.train))
+        self.assertFalse(list(cache_dir.glob("*.incomplete")))
+        self.assertEqual(len(list(cache_dir.glob("*/complete"))), 1)
+        self.assertFalse(list(cache_dir.glob(f"*/{orphan_name}")))
+
+    def test_adding_cache_directory_reuses_existing_processed_data(self) -> None:
+        """Reuse a complete entry when JSON gains a cache directory setting.
+
+        Returns:
+            None: Asserts that cache location does not change the content key
+            or trigger source loading.
+        """
+        from model.training import dataset as data_module
+
+        root = Path(self.directory.name)
+        config_path = root / "data_with_cache.json"
+        config_path.write_text(
+            json.dumps({**self.config, "cache_dir": str(root / "cache")})
+        )
+        with mock.patch.object(
+            data_module, "load_source", side_effect=AssertionError("cache miss")
+        ):
+            reused = build_physics_datasets(config_path)
+        self.assertEqual(len(reused.train), len(self.datasets.train))
 
     def test_parallel_preprocessing_gives_the_same_cache(self) -> None:
         """Worker processes write the same episodes, in the same order, as the main process."""

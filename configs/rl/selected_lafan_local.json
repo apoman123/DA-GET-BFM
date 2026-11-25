@@ -1,0 +1,144 @@
+{
+  "history_size": 25,
+  "joint_features": "da_get_zero",
+  "seed": 0,
+  "control_dt": 0.02,
+  "target_normalization": "physics",
+  "dimensionless_inputs": true,
+  "group_variants": true,
+  "cache_dir": "/home/apoman123/DA-GET-BFM/.cache/physics_data",
+  "sources": [
+    {
+      "type": "huggingface",
+      "name": "lafan1_g1",
+      "path": "/mnt/e/robotics_datasets/lafan1_g1/hf",
+      "urdf": "/home/apoman123/DA-GET-BFM/assets/urdf/g1_29dof_rev_1_0.urdf",
+      "joint_names": [
+        "left_hip_pitch_joint",
+        "left_hip_roll_joint",
+        "left_hip_yaw_joint",
+        "left_knee_joint",
+        "left_ankle_pitch_joint",
+        "left_ankle_roll_joint",
+        "right_hip_pitch_joint",
+        "right_hip_roll_joint",
+        "right_hip_yaw_joint",
+        "right_knee_joint",
+        "right_ankle_pitch_joint",
+        "right_ankle_roll_joint",
+        "waist_yaw_joint",
+        "waist_roll_joint",
+        "waist_pitch_joint",
+        "left_shoulder_pitch_joint",
+        "left_shoulder_roll_joint",
+        "left_shoulder_yaw_joint",
+        "left_elbow_joint",
+        "left_wrist_roll_joint",
+        "left_wrist_pitch_joint",
+        "left_wrist_yaw_joint",
+        "right_shoulder_pitch_joint",
+        "right_shoulder_roll_joint",
+        "right_shoulder_yaw_joint",
+        "right_elbow_joint",
+        "right_wrist_roll_joint",
+        "right_wrist_pitch_joint",
+        "right_wrist_yaw_joint"
+      ],
+      "state_key": "observation.state",
+      "fps": 30.0,
+      "floating_base": true,
+      "base_position_key": "observation.base_position",
+      "base_orientation_key": "observation.base_orientation",
+      "base_orientation_format": "xyzw",
+      "contact_links": [
+        "left_ankle_roll_link",
+        "right_ankle_roll_link"
+      ],
+      "smoothing_window": 3,
+      "robot": "g1",
+      "expert": true,
+      "armature": 0.01,
+      "nominal_pose": {
+        "left_hip_pitch_joint": -0.2,
+        "right_hip_pitch_joint": -0.2,
+        "left_knee_joint": 0.4,
+        "right_knee_joint": 0.4,
+        "left_ankle_pitch_joint": -0.2,
+        "right_ankle_pitch_joint": -0.2
+      },
+      "contact_geometry": {
+        "radius": 0.01,
+        "sole_offset": [
+          0.03,
+          0.0,
+          -0.03
+        ],
+        "foot_size": [
+          0.18,
+          0.06
+        ]
+      }
+    },
+    {
+      "type": "huggingface",
+      "name": "lafan1_h1",
+      "path": "/mnt/e/robotics_datasets/lafan1_h1/hf",
+      "urdf": "/home/apoman123/DA-GET-BFM/assets/urdf/h1.urdf",
+      "joint_names": [
+        "left_hip_yaw_joint",
+        "left_hip_roll_joint",
+        "left_hip_pitch_joint",
+        "left_knee_joint",
+        "left_ankle_joint",
+        "right_hip_yaw_joint",
+        "right_hip_roll_joint",
+        "right_hip_pitch_joint",
+        "right_knee_joint",
+        "right_ankle_joint",
+        "torso_joint",
+        "left_shoulder_pitch_joint",
+        "left_shoulder_roll_joint",
+        "left_shoulder_yaw_joint",
+        "left_elbow_joint",
+        "right_shoulder_pitch_joint",
+        "right_shoulder_roll_joint",
+        "right_shoulder_yaw_joint",
+        "right_elbow_joint"
+      ],
+      "state_key": "observation.state",
+      "fps": 30.0,
+      "floating_base": true,
+      "base_position_key": "observation.base_position",
+      "base_orientation_key": "observation.base_orientation",
+      "base_orientation_format": "xyzw",
+      "contact_links": [
+        "left_ankle_link",
+        "right_ankle_link"
+      ],
+      "smoothing_window": 3,
+      "robot": "h1",
+      "expert": true,
+      "armature": 0.01,
+      "nominal_pose": {
+        "left_hip_pitch_joint": -0.4,
+        "right_hip_pitch_joint": -0.4,
+        "left_knee_joint": 0.8,
+        "right_knee_joint": 0.8,
+        "left_ankle_joint": -0.4,
+        "right_ankle_joint": -0.4
+      },
+      "contact_geometry": {
+        "radius": 0.01,
+        "sole_offset": [
+          0.04,
+          0.0,
+          -0.07
+        ],
+        "foot_size": [
+          0.22,
+          0.07
+        ]
+      }
+    }
+  ]
+}

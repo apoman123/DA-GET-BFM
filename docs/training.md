@@ -602,7 +602,7 @@ A data config is JSON. Relative paths start from the config file.
 | `proposal_variants` | 2 | Random torque proposals per frame (task D) for data without probes |
 | `response_range` | `[0.02, 1.0]` | Torque changes of R and R⁻¹, as fractions of peak torque (log-uniform, random sign) |
 | `include_probe_variants` | true | Index probe and proposal variants as samples |
-| `cache_dir` | `.cache/physics_data` | Processed-data cache |
+| `cache_dir` | `.cache/physics_data` | Directory for processed-data cache entries. Set it in the pretraining run JSON (for example, `configs/pretraining/selected_large.json`) or the data JSON; the run setting takes precedence. Use an absolute path to keep the location independent of the launch directory. Completed sources are checkpointed and reused after an interrupted run; the source in progress is recomputed |
 
 Keys of the earlier estimate-based pipeline (`allow_estimated_torque_for_fd`,
 `use_estimated_previous_torque`, `estimated_torque_weight`,

@@ -50,7 +50,7 @@ class DaGetConfig:
             code does (``enable_input_layer_norm``) because token features have very
             different scales.
         use_physics_cross_attention (bool): Whether observation tokens attend to
-            rigid-body, actuator, and dynamics tokens ("Physics Cross
+            rigid-body, actuator, root-body, and dynamics tokens ("Physics Cross
             Attention"). The encoder then requires physics features.
         physics_cross_attention_layers (tuple[int, ...] | None): Layers with
             Physics Cross Attention; None means every layer.
@@ -59,11 +59,8 @@ class DaGetConfig:
         dynamics_feature_size (int): Dynamics features per joint.
         physics_tokenizer_hidden_size (int | None): Hidden width of each physics
             tokenizer MLP; defaults to hidden_size.
-        use_root_token (bool): Add one physics token per robot for the root body
-            and the robot's absolute size (``model.physics.root_features``) to the
-            Physics Cross Attention memory (proposal C1). Needs Physics Cross
-            Attention and ``root_features`` inputs.
-        root_feature_size (int): Root features per robot.
+        root_feature_size (int): Root features per robot; must match the 13-field
+            root schema when Physics Cross Attention is enabled.
         dimensionless_physics (bool): Divide every physics feature by its unit
             built from the robot's total mass, characteristic length and
             ``sqrt(L / g)`` before tokenizing (proposal A3, dynamic similarity).
@@ -100,7 +97,6 @@ class DaGetConfig:
     actuator_feature_size: int = ACTUATOR_FEATURE_SIZE
     dynamics_feature_size: int = DYNAMICS_FEATURE_SIZE
     physics_tokenizer_hidden_size: int | None = None
-    use_root_token: bool = False
     root_feature_size: int = ROOT_FEATURE_SIZE
     dimensionless_physics: bool = False
     use_morphology_modulation: bool = False
@@ -205,7 +201,6 @@ class DaGetConfig:
         ):
             raise ValueError("physics feature and tokenizer sizes must be positive")
         needs_physics = {
-            "use_root_token": self.use_root_token,
             "dimensionless_physics": self.dimensionless_physics,
             "use_morphology_modulation": self.use_morphology_modulation,
             "physics_masking": self.physics_masking,
@@ -213,7 +208,7 @@ class DaGetConfig:
         missing = [name for name, enabled in needs_physics.items() if enabled]
         if missing and not self.use_physics_cross_attention:
             raise ValueError(f"{', '.join(missing)} need use_physics_cross_attention")
-        if self.root_feature_size != ROOT_FEATURE_SIZE and (self.use_root_token or self.dimensionless_physics):
+        if self.root_feature_size != ROOT_FEATURE_SIZE and self.use_physics_cross_attention:
             raise ValueError(f"root_feature_size must be {ROOT_FEATURE_SIZE}")
         if self.modulation_rank is not None and self.modulation_rank <= 0:
             raise ValueError("modulation_rank must be positive")
@@ -227,12 +222,12 @@ class DaGetConfig:
 
     @property
     def needs_root_features(self) -> bool:
-        """Return whether the encoder reads ``root_features``.
+        """Return whether Physics Cross Attention requires root features.
 
         Returns:
-            bool: True with a root token or dimensionless physics.
+            bool: True when the encoder has Physics Cross Attention.
         """
-        return self.use_root_token or self.dimensionless_physics
+        return self.use_physics_cross_attention
 
     @property
     def physics_layers(self) -> tuple[int, ...]:

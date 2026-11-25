@@ -9,9 +9,9 @@ Each encoder layer runs, in order:
 3. context cross-attention (optional) to external tokens;
 4. a feed-forward block.
 
-Options added by the zero-shot proposal (``docs/zero_shot.md``):
+The zero-shot proposal adds a root token to every Physics Cross Attention
+memory (C1). Its remaining optional mechanisms are:
 
-* a root token per robot in the Physics Cross Attention memory (C1);
 * dimensionless physics features, divided by units built from the robot's total
   mass, size and ``sqrt(L / g)`` (A3);
 * ModuMorph-style contextual modulation (Xiong, Beck & Whiteson, "Universal
@@ -331,6 +331,7 @@ class PhysicsCrossAttention(nn.Module):
         output (nn.Linear): Output projection.
         spatial_embedding (nn.Embedding): Graph distance to per-head bias.
         group_bias (nn.Parameter): ``[3, heads]`` per-group bias.
+        root_bias (nn.Parameter): Per-head bias for the root-body token.
     """
 
     def __init__(self, config: DaGetConfig) -> None:
@@ -356,7 +357,7 @@ class PhysicsCrossAttention(nn.Module):
         self.output = nn.Linear(hidden, hidden)
         self.spatial_embedding = nn.Embedding(config.max_graph_distance + 2, self.num_heads)
         self.group_bias = nn.Parameter(torch.zeros(len(PHYSICS_GROUPS), self.num_heads))
-        self.root_bias = nn.Parameter(torch.zeros(self.num_heads)) if config.use_root_token else None
+        self.root_bias = nn.Parameter(torch.zeros(self.num_heads))
         self.dropout = nn.Dropout(config.hidden_dropout_prob)
 
     def memory_parameters(self) -> list[nn.Parameter]:
@@ -392,7 +393,7 @@ class PhysicsCrossAttention(nn.Module):
     def attention_bias(
         self, spatial_distances: torch.Tensor, joint_mask: torch.Tensor, dtype: torch.dtype
     ) -> torch.Tensor:
-        """Build the additive logit bias for all three groups.
+        """Build additive attention bias for three joint groups and root.
 
         Args:
             spatial_distances (torch.Tensor): Integer ``[batch, joints, joints]``.
@@ -400,19 +401,18 @@ class PhysicsCrossAttention(nn.Module):
             dtype (torch.dtype): Logit dtype.
 
         Returns:
-            torch.Tensor: ``[batch, heads, joints, 3 * joints]`` (``3 * joints + 1``
-                with a root token, which sits after the actuator tokens); padded
-                physics tokens are -infinity.
+            torch.Tensor: ``[batch, heads, joints, 3 * joints + 1]``. The root
+                token sits after the actuator tokens; padded physics tokens
+                are -infinity.
         """
         buckets = _spatial_buckets(spatial_distances, self.max_graph_distance)
         spatial = self.spatial_embedding(buckets).permute(0, 3, 1, 2).to(dtype)
         groups = [spatial + self.group_bias[group].to(dtype)[None, :, None, None] for group in range(3)]
         masks = [joint_mask] * 3
-        if self.root_bias is not None:
-            batch, joints = joint_mask.shape
-            root = self.root_bias.to(dtype)[None, :, None, None].expand(batch, -1, joints, 1)
-            groups.insert(2, root)
-            masks.insert(2, torch.ones((batch, 1), dtype=torch.bool, device=joint_mask.device))
+        batch, joints = joint_mask.shape
+        root = self.root_bias.to(dtype)[None, :, None, None].expand(batch, -1, joints, 1)
+        groups.insert(2, root)
+        masks.insert(2, torch.ones((batch, 1), dtype=torch.bool, device=joint_mask.device))
         bias = torch.cat(groups, dim=-1)
         key_mask = torch.cat(masks, dim=1)
         return bias.masked_fill(~key_mask[:, None, None, :], float("-inf"))
@@ -428,9 +428,9 @@ class PhysicsCrossAttention(nn.Module):
 
         Args:
             hidden_states (torch.Tensor): ``[batch, joints, hidden]``.
-            keys (torch.Tensor): ``[batch, heads, 3 * joints, head_size]``.
+            keys (torch.Tensor): ``[batch, heads, 3 * joints + 1, head_size]``.
             values (torch.Tensor): Same shape as keys.
-            bias (torch.Tensor): ``[batch, heads, joints, 3 * joints]``.
+            bias (torch.Tensor): ``[batch, heads, joints, 3 * joints + 1]``.
 
         Returns:
             torch.Tensor: Updated tokens with the residual added.
@@ -461,8 +461,8 @@ class PhysicsMemory:
     mistake.
 
     Attributes:
-        keys (tuple[torch.Tensor, ...]): Per physics layer, ``[B, heads, 2J, d]``
-            (``2J + 1`` with a root token).
+        keys (tuple[torch.Tensor, ...]): Per physics layer,
+            ``[B, heads, 2J + 1, d]``.
         values (tuple[torch.Tensor, ...]): Per physics layer, same shape.
         joint_mask (torch.Tensor): Bool ``[B, J]`` the memory was built for.
         parameter_versions (tuple[int, ...]): Versions of the source parameters.
@@ -782,7 +782,7 @@ class DaGetEncoderLayer(nn.Module):
             mass_matrix (torch.Tensor | None): Joint-space mass matrix at q.
             context_states (torch.Tensor | None): Context tokens when enabled.
             context_mask (torch.Tensor | None): Boolean valid-context mask.
-            physics (tuple | None): Static keys ``[B, heads, 2J, d]``, static
+            physics (tuple | None): Static keys ``[B, heads, 2J + 1, d]``, static
                 values, and dynamics tokens ``[B, J, hidden]``, required when
                 the layer has Physics Cross Attention.
             mass_normalized (bool): ``mass_matrix`` comes from ``normalize_mass_matrix``.
@@ -886,10 +886,9 @@ class DaGetEncoder(nn.Module):
                 )
                 for group in PHYSICS_GROUPS
             }
-            if config.use_root_token:
-                tokenizers["root"] = PhysicsFeatureTokenizer(
-                    "root", config.root_feature_size, config.hidden_size, mlp_size
-                )
+            tokenizers["root"] = PhysicsFeatureTokenizer(
+                "root", config.root_feature_size, config.hidden_size, mlp_size
+            )
             self.physics_tokenizers = nn.ModuleDict(tokenizers)
             if config.physics_masking:
                 self.physics_mask_embeddings = nn.ParameterDict(
@@ -912,8 +911,7 @@ class DaGetEncoder(nn.Module):
             *self.physics_tokenizers["rigid_body"].parameters(),
             *self.physics_tokenizers["actuator"].parameters(),
         ]
-        if "root" in self.physics_tokenizers:
-            parameters += list(self.physics_tokenizers["root"].parameters())
+        parameters += list(self.physics_tokenizers["root"].parameters())
         if self.physics_mask_embeddings is not None:
             parameters += list(self.physics_mask_embeddings.parameters())
         for attention in self._physics_attention_layers():
@@ -954,8 +952,8 @@ class DaGetEncoder(nn.Module):
             rigid_body_features (torch.Tensor): ``[B, J, F_rb]``.
             actuator_features (torch.Tensor): ``[B, J, F_act]``.
             joint_mask (torch.Tensor | None): Bool ``[B, J]``; defaults to all.
-            root_features (torch.Tensor | None): ``[B, F_root]``; required with a
-                root token or dimensionless physics.
+            root_features (torch.Tensor | None): ``[B, F_root]``; required by
+                Physics Cross Attention.
             physics_token_mask (dict | None): Bool ``[B, J]`` per maskable group
                 (``rigid_body``, ``actuator``): tokens replaced by the learned
                 mask embedding (masked physics modeling).
@@ -980,8 +978,7 @@ class DaGetEncoder(nn.Module):
             "actuator_features", actuator_features, self.config.actuator_feature_size, batch, joints
         )
         units = {group: None for group in PHYSICS_GROUPS}
-        if self.config.needs_root_features:
-            root_features = self._check_root_features(root_features, batch)
+        root_features = self._check_root_features(root_features, batch)
         if self.config.dimensionless_physics:
             prismatic = rigid_body_features[..., PRISMATIC_INDEX] > 0.5
             mass, length = root_features[:, TOTAL_MASS_INDEX], root_features[:, LENGTH_INDEX]
@@ -997,12 +994,12 @@ class DaGetEncoder(nn.Module):
                 embedding = self.physics_mask_embeddings[group].to(group_tokens[group].dtype)
                 group_tokens[group] = torch.where(mask[..., None], embedding, group_tokens[group])
         pieces = [group_tokens["rigid_body"], group_tokens["actuator"]]
-        if "root" in self.physics_tokenizers:
-            pieces.append(self.physics_tokenizers["root"](root_features[:, None, :]))
+        pieces.append(self.physics_tokenizers["root"](root_features[:, None, :]))
         tokens = torch.cat(pieces, dim=1)
         token_mask = joint_mask.repeat(1, 2)
-        if len(pieces) == 3:
-            token_mask = torch.cat((token_mask, torch.ones((batch, 1), dtype=torch.bool, device=joint_mask.device)), dim=1)
+        token_mask = torch.cat(
+            (token_mask, torch.ones((batch, 1), dtype=torch.bool, device=joint_mask.device)), dim=1
+        )
         tokens = tokens.masked_fill(~token_mask[..., None], 0)
         keys, values = [], []
         for attention in self._physics_attention_layers():
@@ -1076,8 +1073,8 @@ class DaGetEncoder(nn.Module):
                 as ``DaGetBfmPolicy`` does: each value check waits for the
                 device, which a CUDA Graph cannot capture.
             root_features (torch.Tensor | None): ``[batch, 13]`` root features
-                (``model.physics.root_features``); required with a root token or
-                dimensionless physics unless ``physics_memory`` is given.
+                (``model.physics.root_features``); required by Physics Cross
+                Attention unless ``physics_memory`` is given.
             physics_token_mask (dict | None): Masked physics tokens, see
                 ``build_physics_memory``.
 

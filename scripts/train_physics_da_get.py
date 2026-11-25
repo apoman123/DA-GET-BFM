@@ -57,7 +57,51 @@ from model.training.sampling import sample_groups, temperature_weights  # noqa: 
 
 @dataclass
 class ModelArguments:
-    """Encoder and head settings."""
+    """Configure the physics encoder and auxiliary pretraining heads.
+
+    Physics Cross Attention always includes the root-body token.
+
+    Attributes:
+        preset (str): Encoder size, one of tiny, small, medium, large, or
+            da_get_zero.
+        hidden_size (int | None): Optional encoder width override.
+        num_hidden_layers (int | None): Optional encoder depth override.
+        num_attention_heads (int | None): Optional attention head override.
+        intermediate_size (int | None): Optional feed-forward width override.
+        dropout (float | None): Optional dropout probability in [0, 1).
+        physics_cross_attention (bool): Enable physics memory, including root.
+        physics_layers (str | None): Optional comma-separated layer indices.
+        mass_encoding (bool): Include the normalized mass-matrix attention bias.
+        mixing_layers (int): Number of graph layers in action-conditioned heads.
+        head_hidden_size (int | None): Optional auxiliary-head MLP width.
+        fk_orientation (bool): Include orientation in forward-kinematics loss.
+        fk_weight (float): Forward-kinematics task loss weight.
+        fd_weight (float): Forward-dynamics task loss weight.
+        id_weight (float): Inverse-dynamics task loss weight.
+        response_weight (float): Contact-constrained response loss weight.
+        inverse_response_weight (float): Inverse-response task loss weight.
+        motor_weight (float): Motor-feasibility task loss weight.
+        effect_weight (float): Action-effect task loss weight.
+        init_from (str | None): Optional pretrained checkpoint path.
+        dimensionless_physics (bool): Scale physics features by robot units.
+        topology_bias (str): GET, none, or modulation graph bias.
+        modulation_rank (int | None): Optional morphology hypernetwork rank.
+        head_type (str): Mixer, linear, or linear_residual physics head.
+        interface_rank (int): Factor rank of the structured physics operator.
+        acceleration_metric (str): Euclidean or mass-weighted error metric.
+        effect_mode (str): Direct head or differentiable rollout effect.
+        contact_head (bool): Train the contact-probability head.
+        centroidal_head (bool): Train the centroidal-physics head.
+        sysid_head (bool): Train the specification-deviation head.
+        physics_mask_ratio (float): Physics-token mask probability in [0, 1).
+        operator_weight (float): Structured-operator loss weight.
+        consistency_weight (float): Operator-consistency loss weight.
+        effect_rollout_weight (float): Effect-rollout loss weight.
+        contact_weight (float): Contact-head loss weight.
+        centroidal_weight (float): Centroidal-head loss weight.
+        mask_weight (float): Masked-physics-modeling loss weight.
+        sysid_weight (float): Specification-deviation loss weight.
+    """
 
     preset: str = field(
         default="small",
@@ -84,8 +128,7 @@ class ModelArguments:
     motor_weight: float = 1.0
     effect_weight: float = 1.0
     init_from: str | None = field(default=None, metadata={"help": "Pretrained checkpoint to continue from."})
-    # Options of the zero-shot proposal (docs/zero_shot.md); defaults keep the original model.
-    root_token: bool = field(default=False, metadata={"help": "C1: root-body token in Physics Cross Attention."})
+    # Options of the zero-shot proposal (docs/zero_shot.md).
     dimensionless_physics: bool = field(default=False, metadata={"help": "A3: physics features in units of m, L, sqrt(L/g)."})
     topology_bias: str = field(
         default="get", metadata={"help": "D4: 'get' (GET-Zero structural bias), 'none', or 'modulation' (ModuMorph-style)."}
@@ -136,7 +179,18 @@ class PretrainingArguments(TrainingArguments):
 
 
 def encoder_config(arguments: ModelArguments, input_size: int) -> DaGetConfig:
-    """Build the encoder configuration from the preset and overrides."""
+    """Build an encoder with a mandatory root token in physics memory.
+
+    Args:
+        arguments (ModelArguments): Parsed architecture and pretraining options.
+        input_size (int): Positive observation token width.
+
+    Returns:
+        DaGetConfig: Validated encoder configuration for the selected preset.
+
+    Raises:
+        ValueError: The topology bias or preset is unknown.
+    """
     values = {}
     for name in ("hidden_size", "num_hidden_layers", "num_attention_heads", "intermediate_size"):
         if getattr(arguments, name) is not None:
@@ -151,7 +205,6 @@ def encoder_config(arguments: ModelArguments, input_size: int) -> DaGetConfig:
     values.update(use_mass_encoding=arguments.mass_encoding,
                   use_physics_cross_attention=arguments.physics_cross_attention,
                   physics_cross_attention_layers=layers,
-                  use_root_token=arguments.root_token,
                   dimensionless_physics=arguments.dimensionless_physics,
                   use_spatial_encoding=arguments.topology_bias != "none",
                   use_parent_child_encoding=arguments.topology_bias != "none",
@@ -164,7 +217,14 @@ def encoder_config(arguments: ModelArguments, input_size: int) -> DaGetConfig:
 
 
 def main() -> None:
-    """Parse arguments, build data and model, and train."""
+    """Parse arguments, report data preparation, and train the physics model.
+
+    Returns:
+        None: Writes the processed-data cache, checkpoints, and training logs.
+
+    Raises:
+        ValueError: The data or model configuration is invalid.
+    """
     parser = HfArgumentParser((ModelArguments, DataArguments, PretrainingArguments))
     if len(sys.argv) == 2 and sys.argv[1].endswith(".json"):
         model_args, data_args, training_args = parser.parse_json_file(sys.argv[1])
@@ -180,7 +240,13 @@ def main() -> None:
     # The main process of each node builds the Arrow cache; the other ranks wait and read it.
     rebuild = data_args.rebuild_cache and training_args.local_process_index == 0
     with training_args.main_process_first(desc="physics data"):
-        datasets = build_physics_datasets(data_args.data_config, data_args.cache_dir, rebuild, data_args.preprocess_workers)
+        datasets = build_physics_datasets(
+            data_args.data_config,
+            data_args.cache_dir,
+            rebuild,
+            data_args.preprocess_workers,
+            progress=training_args.local_process_index == 0,
+        )
     if datasets.eval is None:
         training_args.eval_strategy = IntervalStrategy.NO
     print(

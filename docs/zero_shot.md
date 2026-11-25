@@ -11,8 +11,9 @@ model with zero-shot capabilities**. Zero-shot has two meanings here:
 - **Task zero-shot**: goal, tracking and reward prompts without retraining (BFM-Zero).
 - **Embodiment zero-shot**: control of robots that were never trained on.
 
-Every option below is off by default, so the original model and its checkpoints are
-unchanged. Each item is labelled with its proposal ID and with the evidence it rests on.
+The root token is always present when Physics Cross Attention is enabled. Other
+proposal options keep their documented defaults. Each item is labelled with its
+proposal ID and with the evidence it rests on.
 Items marked **[H]** are hypotheses without a direct precedent: they come with the
 ablation that tests them and are not claimed to help until that ablation is run.
 
@@ -136,9 +137,11 @@ RL ([H]).
 
 ### C. Physics the encoder could not see
 
-**C1. `use_root_token`** (encoder). One more Physics Cross Attention token per robot with the
+**C1. Root token** (encoder, always enabled with Physics Cross Attention). One more token per robot with the
 root body's mass, center of mass and inertia, the total mass, the characteristic length and
 the floating-base flag (`model.physics.root_features`), as MetaMorph gives the torso a token.
+The original proposal lists a root-token on/off ablation; the current implementation
+keeps the root token on and does not expose that switch.
 
 **C2. `use_contact_head`** (model). Per-joint contact probability of the bodies that carry
 contact links. Labels come from sensors or simulators, or from inferred contacts whose

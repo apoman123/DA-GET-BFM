@@ -78,10 +78,13 @@ References:
 
 from __future__ import annotations
 
+import fcntl
 import hashlib
 import json
 import math
 import random
+import sys
+import time
 from dataclasses import dataclass, field
 from pathlib import Path
 from typing import Any, Sequence
@@ -198,11 +201,22 @@ def _optional_float(value: Any) -> float | None:
 
 
 def _cache_key(config: dict[str, Any], base: Path | None) -> str:
-    """Hash the config and the contents of every URDF it references.
+    """Hash preprocessing settings and every referenced URDF, excluding cache location.
 
     Procedural sources have no URDF file; their generated URDF texts are hashed instead.
+
+    Args:
+        config (dict[str, Any]): Data settings and trajectory sources.
+        base (Path | None): Directory for relative URDF paths.
+
+    Returns:
+        str: First 16 hexadecimal characters of the cache content hash.
+
+    Raises:
+        FileNotFoundError: A referenced URDF is missing.
     """
-    digest = hashlib.sha256(json.dumps(config, sort_keys=True).encode())
+    content = {key: value for key, value in config.items() if key != "cache_dir"}
+    digest = hashlib.sha256(json.dumps(content, sort_keys=True).encode())
     digest.update(str(CACHE_VERSION).encode())
     for source in config["sources"]:
         if "urdf" in source:
@@ -377,6 +391,46 @@ def _from_worker(episode: dict[str, Any]) -> dict[str, Any]:
     return {key: torch.from_numpy(value) if isinstance(value, np.ndarray) else value for key, value in episode.items()}
 
 
+def _report_preprocessing_progress(
+    completed_sources: int,
+    source_count: int,
+    source_name: str,
+    completed_episodes: int,
+    episode_count: int | None,
+    *,
+    newline: bool = False,
+) -> None:
+    """Display completed sources and the current source's episode progress.
+
+    Args:
+        completed_sources (int): Number of fully processed sources, from zero
+            through ``source_count``.
+        source_count (int): Positive total number of configured sources.
+        source_name (str): Name of the source currently being processed.
+        completed_episodes (int): Episodes written for the current source.
+        episode_count (int | None): Total episodes for the current source, or
+            ``None`` while its trajectories are loading.
+        newline (bool): End the terminal progress line after a source finishes.
+
+    Returns:
+        None: Writes a flushed progress bar to standard error.
+    """
+    bar_width = 20
+    filled = bar_width * completed_sources // source_count
+    bar = "#" * filled + "." * (bar_width - filled)
+    status = (
+        "loading" if episode_count is None else f"{completed_episodes}/{episode_count} episodes"
+    )
+    message = (
+        f"[{bar}] {completed_sources}/{source_count} sources | "
+        f"{source_name[:40]:<40} | {status}"
+    )
+    if sys.stderr.isatty():
+        print(f"\r{message:<100}", end="\n" if newline else "", file=sys.stderr, flush=True)
+    else:
+        print(message, file=sys.stderr, flush=True)
+
+
 def _processed_episodes(records, trajectories, options: dict[str, Any], first_seed: int, pool, in_flight: int = 1):
     """Yield ``(embodiment, processed episode)`` in trajectory order, in ``pool`` when given.
 
@@ -412,33 +466,82 @@ def _write_entry(
     feature_config: JointFeatureConfig,
     control_dt: float | None,
     workers: int | None = None,
+    progress: bool = False,
+    rebuild: bool = False,
 ) -> None:
     """Process every source and write the episodes of a cache entry, one source at a time.
 
-    Processed episodes go to disk as they are made; only their label statistics stay in
-    memory until ``finalize_acceleration_scales`` sets the record scales. The entry is
-    written under ``<entry>.partial-<pid>`` and renamed when complete; if another process
-    finished the same entry first, this copy is discarded.
+    Processed episodes go to disk as they are made. Completed sources are
+    checkpointed under ``<entry>.incomplete`` and reused after interruption.
+    The folder is renamed to ``entry`` after all sources finish.
 
     Sources with at least ``PARALLEL_MIN_FRAMES`` frames are processed by ``workers``
     processes (``default_preprocess_workers()`` when None; 1 processes everything here).
     Episodes keep their order and seeds, so the entry does not depend on the number of
     workers.
+
+    Args:
+        entry (Path): Destination for the completed cache entry.
+        config (dict[str, Any]): Validated data configuration with source entries.
+        base (Path | None): Directory used to resolve relative source paths.
+        feature_config (JointFeatureConfig): Joint feature layout for each robot.
+        control_dt (float | None): Optional control period in seconds.
+        workers (int | None): Number of preprocessing processes; ``None``
+            selects the default, and one processes episodes in this process.
+        progress (bool): Whether to display source and episode progress.
+        rebuild (bool): Discard saved partial work and recompute every source.
+
+    Returns:
+        None: Writes the processed cache entry to ``entry``.
+
+    Raises:
+        ValueError: No source produces any episodes.
+        OSError: The cache cannot be written or renamed.
+        FileNotFoundError: A saved checkpoint is missing a required shard.
     """
     import multiprocessing
-    import os
     import shutil
     from concurrent.futures import ProcessPoolExecutor
 
     workers = default_preprocess_workers() if workers is None else max(1, int(workers))
-    partial = entry.with_name(f"{entry.name}.partial-{os.getpid()}")
-    writer = EpisodeWriter(partial)
-    records: list[EmbodimentRecord] = []
-    statistics: list[tuple[int, dict[str, torch.Tensor]]] = []
+    partial = entry.with_name(f"{entry.name}.incomplete")
+    if rebuild and partial.exists():
+        shutil.rmtree(partial)
+    if entry_complete(partial):
+        if entry.exists():
+            shutil.rmtree(entry)
+        partial.rename(entry)
+        if progress:
+            print(f"Processed-data cache ready: {entry}", file=sys.stderr, flush=True)
+        return
+    if (partial / "checkpoint.json").is_file():
+        writer, records, completed_sources = EpisodeWriter.resume(partial)
+        if progress:
+            print(
+                f"Resuming processed-data cache: {completed_sources}/{len(config['sources'])} sources ready",
+                file=sys.stderr,
+                flush=True,
+            )
+    else:
+        if partial.exists():
+            shutil.rmtree(partial)
+        writer = EpisodeWriter(partial)
+        records = []
+        completed_sources = 0
     pool = None
+    source_count = len(config["sources"])
+    if completed_sources > source_count:
+        raise ValueError(f"Checkpoint has {completed_sources} sources, expected at most {source_count}")
     try:
-        for source in config["sources"]:
+        for source_number in range(completed_sources + 1, source_count + 1):
+            source = config["sources"][source_number - 1]
+            source_name = str(source.get("name", source.get("type", "unnamed")))
+            if progress:
+                _report_preprocessing_progress(source_number - 1, source_count, source_name, 0, None)
             source_records, trajectories = load_source(source, base, feature_config, control_dt)
+            episode_count = len(trajectories)
+            if progress:
+                _report_preprocessing_progress(source_number - 1, source_count, source_name, 0, episode_count)
             offset = len(records)
             records += source_records
             frames = sum(len(trajectory.positions) for trajectory in trajectories)
@@ -448,32 +551,41 @@ def _write_entry(
                     max_workers=workers, mp_context=multiprocessing.get_context("spawn"),
                     initializer=_init_worker, initargs=(WORKER_THREADS,),
                 )
-            first_seed = int(config.get("seed", 0)) * 1_000_003 + len(statistics)
+            first_seed = int(config.get("seed", 0)) * 1_000_003 + len(writer.episodes)
             options = _episode_options(config, source)
             episodes = _processed_episodes(source_records, trajectories, options, first_seed, pool if parallel else None, 2 * workers)
-            for embodiment, episode in episodes:
+            source_statistics: list[tuple[int, dict[str, torch.Tensor]]] = []
+            last_report = time.monotonic()
+            report_interval = 0.25 if sys.stderr.isatty() else 10.0
+            for episode_number, (embodiment, episode) in enumerate(episodes, start=1):
                 index = offset + embodiment
-                statistics.append((index, {key: value for key, value in episode.items() if key.startswith("_")}))
+                source_statistics.append((embodiment, {key: value for key, value in episode.items() if key.startswith("_")}))
                 writer.add(index, episode)
+                if progress and time.monotonic() - last_report >= report_interval:
+                    _report_preprocessing_progress(
+                        source_number - 1, source_count, source_name, episode_number, episode_count
+                    )
+                    last_report = time.monotonic()
+            finalize_acceleration_scales(source_records, source_statistics)
+            writer.checkpoint(records, source_number)
+            if progress:
+                _report_preprocessing_progress(
+                    source_number, source_count, source_name, episode_count, episode_count, newline=True
+                )
             del trajectories
     finally:
         if pool is not None:
             pool.shutdown(cancel_futures=True)
-    if not statistics:
+    if not writer.episodes:
         raise ValueError("the data config produced no episodes")
-    finalize_acceleration_scales(records, statistics)
+    if progress:
+        print("Finalizing processed-data cache...", file=sys.stderr, flush=True)
     writer.close(records)
-    if entry_complete(entry):
-        shutil.rmtree(partial)
-        return
     if entry.exists():
         shutil.rmtree(entry)
-    try:
-        partial.rename(entry)
-    except OSError:
-        if not entry_complete(entry):
-            raise
-        shutil.rmtree(partial)
+    partial.rename(entry)
+    if progress:
+        print(f"Processed-data cache ready: {entry}", file=sys.stderr, flush=True)
 
 
 def build_physics_datasets(
@@ -481,23 +593,29 @@ def build_physics_datasets(
     cache_dir: str | Path | None = None,
     rebuild: bool = False,
     workers: int | None = None,
+    progress: bool = False,
 ) -> PhysicsDatasets:
     """Load, process, cache, and split every source of a data config.
 
     Args:
         config_source (str | Path | dict): Data config path or dict.
-        cache_dir (str | Path | None): Where processed data is cached; the
-            config's ``cache_dir`` or ``.cache/physics_data`` by default.
-        rebuild (bool): Ignore an existing cache.
+        cache_dir (str | Path | None): Override for the processed-data cache
+            directory; otherwise use the config's ``cache_dir`` or
+            ``.cache/physics_data``. Relative paths use the working directory.
+        rebuild (bool): Discard completed and partial cache entries and
+            recompute every source.
         workers (int | None): Processes that build a missing cache entry
             (``default_preprocess_workers()`` when None; 1 for none). The entry is
             the same for any number.
+        progress (bool): Whether to report preprocessing progress on standard
+            error, including when a completed cache is reused.
 
     Returns:
         PhysicsDatasets: Datasets and records.
 
     Raises:
         ValueError: A source type is unknown or the config has no sources.
+        OSError: The cache directory cannot be locked or written.
     """
     config, base = load_data_config(config_source)
     if not config.get("sources"):
@@ -509,7 +627,15 @@ def build_physics_datasets(
     cache_root = Path(cache_dir or config.get("cache_dir") or ".cache/physics_data")
     entry = cache_root / _cache_key(config, base)
     if rebuild or not entry_complete(entry):
-        _write_entry(entry, config, base, feature_config, control_dt, workers)
+        cache_root.mkdir(parents=True, exist_ok=True)
+        with (cache_root / f"{entry.name}.lock").open("a+b") as lock:
+            fcntl.flock(lock, fcntl.LOCK_EX)
+            if rebuild or not entry_complete(entry):
+                _write_entry(entry, config, base, feature_config, control_dt, workers, progress, rebuild)
+            elif progress:
+                print(f"Using processed-data cache: {entry}", file=sys.stderr, flush=True)
+    elif progress:
+        print(f"Using processed-data cache: {entry}", file=sys.stderr, flush=True)
     store = ProcessedEpisodes(entry)
     records = store.records()
     episode_count = len(store)

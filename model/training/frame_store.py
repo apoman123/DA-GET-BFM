@@ -14,7 +14,8 @@ be larger than the RAM: only the frames a batch needs are read. A cache entry
   frames, tensor layout and scalars (``dt``);
 * ``records.pt``: the embodiment records, including the data scales of
   ``finalize_acceleration_scales``;
-* ``complete``: written last; an entry without it is rebuilt.
+* ``complete``: written last; an entry without it can resume from its last
+  source checkpoint in ``<key>.incomplete/``.
 
 ``MemoryEpisodes`` gives the same interface over episodes held in memory (the physics
 replay of RL, and tests).
@@ -78,10 +79,22 @@ def _split_episode(episode: Mapping[str, torch.Tensor]) -> tuple[int, dict[str, 
 
 
 class EpisodeWriter:
-    """Write processed episodes to a new cache entry, one Arrow row per frame.
+    """Write episodes to Arrow shards and checkpoint completed sources.
 
     Args:
         path (str | Path): Folder of the entry; an existing folder is replaced.
+
+    Attributes:
+        path (Path): Directory containing Arrow shards and cache metadata.
+        episodes (list[dict[str, Any]]): Per-episode shard, row, and layout data.
+        layouts (list[dict[str, Any]]): Tensor shapes and dtypes by layout ID.
+        _layout_ids (dict[tuple, int]): Layout signatures mapped to IDs.
+        _writer (Any | None): Open Arrow stream writer, if a shard is active.
+        _sink (Any | None): Open Arrow file sink, if a shard is active.
+        _schema (Any | None): Schema of the active shard.
+        _shard (int): Index of the latest shard, or -1 before the first.
+        _rows (int): Number of frames in the active shard.
+        _bytes (int): Approximate uncompressed bytes in the active shard.
     """
 
     def __init__(self, path: str | Path) -> None:
@@ -98,6 +111,100 @@ class EpisodeWriter:
         self._shard = -1
         self._rows = 0
         self._bytes = 0
+
+    @classmethod
+    def resume(cls, path: str | Path) -> tuple[EpisodeWriter, list[Any], int]:
+        """Restore a writer from the last completed source checkpoint.
+
+        Args:
+            path (str | Path): Incomplete cache directory with a checkpoint.
+
+        Returns:
+            tuple[EpisodeWriter, list[Any], int]: Writer ready for a new shard,
+            saved embodiment records, and number of completed sources.
+
+        Raises:
+            FileNotFoundError: Checkpoint metadata, records, or a saved shard
+                is missing.
+            ValueError: The checkpoint uses an incompatible cache format.
+            json.JSONDecodeError: Checkpoint metadata is malformed JSON.
+        """
+        folder = Path(path)
+        marker = json.loads((folder / "checkpoint.json").read_text())
+        completed_sources = int(marker["completed_sources"])
+        prefix = f"checkpoint-{completed_sources:04d}"
+        metadata = json.loads((folder / f"{prefix}-episodes.json").read_text())
+        if metadata["format"] != FORMAT:
+            raise ValueError(f"Incompatible processed-data checkpoint in {folder}")
+        shard_count = int(metadata["shards"])
+        for index in range(shard_count):
+            shard = folder / f"frames-{index:05d}.arrow"
+            if not shard.is_file():
+                raise FileNotFoundError(f"Missing checkpoint shard: {shard}")
+        records = torch.load(folder / f"{prefix}-records.pt", weights_only=False)
+        for shard in folder.glob("frames-*.arrow"):
+            if int(shard.stem.split("-")[-1]) >= shard_count:
+                shard.unlink()
+
+        writer = cls.__new__(cls)
+        writer.path = folder
+        writer.episodes = metadata["episodes"]
+        writer.layouts = metadata["layouts"]
+        writer._layout_ids = {
+            tuple((key, tuple(value["shape"]), value["dtype"]) for key, value in layout.items()): index
+            for index, layout in enumerate(writer.layouts)
+        }
+        writer._writer = None
+        writer._sink = None
+        writer._schema = None
+        writer._shard = shard_count - 1
+        writer._rows = 0
+        writer._bytes = 0
+        return writer, records, completed_sources
+
+    def checkpoint(self, records: Sequence[Any], completed_sources: int) -> None:
+        """Persist a source boundary so interrupted preprocessing can resume.
+
+        The marker is replaced last, leaving the previous checkpoint valid if
+        writing the new metadata is interrupted.
+
+        Args:
+            records (Sequence[Any]): Embodiment records with finalized scales
+                for every completed source.
+            completed_sources (int): Number of sources fully written to shards.
+
+        Returns:
+            None: Closes the current shard and writes checkpoint metadata.
+
+        Raises:
+            OSError: A shard or checkpoint file cannot be written.
+            TypeError: Episode metadata cannot be encoded as JSON.
+        """
+        self._close_shard()
+        prefix = f"checkpoint-{completed_sources:04d}"
+        metadata_path = self.path / f"{prefix}-episodes.json"
+        records_path = self.path / f"{prefix}-records.pt"
+        metadata_tmp = self.path / f".{prefix}-episodes.tmp"
+        records_tmp = self.path / f".{prefix}-records.tmp"
+        marker_tmp = self.path / ".checkpoint.tmp"
+        metadata = {
+            "format": FORMAT,
+            "shards": self._shard + 1,
+            "layouts": self.layouts,
+            "episodes": self.episodes,
+        }
+        metadata_tmp.write_text(json.dumps(metadata))
+        torch.save(list(records), records_tmp)
+        metadata_tmp.replace(metadata_path)
+        records_tmp.replace(records_path)
+        marker_tmp.write_text(json.dumps({"completed_sources": completed_sources}))
+        marker_tmp.replace(self.path / "checkpoint.json")
+        for old in self.path.glob("checkpoint-*-episodes.json"):
+            if old != metadata_path:
+                old.unlink()
+        for old in self.path.glob("checkpoint-*-records.pt"):
+            if old != records_path:
+                old.unlink()
 
     def _open_shard(self, schema) -> None:
         """Close the current file and start the next one."""

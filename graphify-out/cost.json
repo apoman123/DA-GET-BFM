@@ -5,6 +5,13 @@
       "input_tokens": 48165,
       "output_tokens": 0,
       "files": 10
+    },
+    {
+      "date": "2026-11-17T08:55:09.197415+00:00",
+      "input_tokens": 0,
+      "output_tokens": 0,
+      "files": 72,
+      "token_usage_unavailable": true
     }
   ],
   "total_input_tokens": 48165,

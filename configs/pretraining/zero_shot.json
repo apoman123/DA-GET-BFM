@@ -2,7 +2,6 @@
   "data_config": "configs/data/zero_shot.json",
   "output_dir": "runs/zero_shot",
   "preset": "small",
-  "root_token": true,
   "dimensionless_physics": true,
   "topology_bias": "get",
   "head_type": "linear_residual",

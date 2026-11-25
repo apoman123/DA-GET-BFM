@@ -51,6 +51,8 @@ URDF + dynamics ─────────────────► DaGetEnco
 
 ## Installation
 
+For TWCC Nano5 Slurm jobs, see [download, conversion, and training](docs/twcc_nano5.md).
+
 The project uses [uv](https://docs.astral.sh/uv/) and needs Python 3.10 or
 newer.
 

@@ -1,0 +1,1 @@
+sbatch -A MST114506 scripts/slurm/pretrain.sbatch

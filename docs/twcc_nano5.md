@@ -1,17 +1,18 @@
 # Run the selected training pipeline on TWCC Nano5
 
-These four independent jobs follow the
+These five independent jobs follow the
 [Nano5 manual](https://man.twcc.ai/@AI-Pilot/manual): download, convert,
-pretrain the physics encoder, and train the BFM. Submit each script separately
-from the repository root on a Nano5 login node. The work runs on compute nodes.
+preprocess, pretrain the physics encoder, and train the BFM. Submit each script
+separately from the repository root on a Nano5 login node. The work runs on
+compute nodes.
 An iService project account is required for each submission.
 
 The default partition is `normal` (H100, up to 48 hours per job). Use
 `sbatch -p normal2` for H200.
 The `dev` partition has a two-hour limit and is useful for short checks. The
-download and conversion jobs request CPUs and memory; each training job requests
-one GPU. Resource needs and time limits are estimates, so adjust them to your
-quota and actual data size.
+download, conversion, and preprocessing jobs request CPUs and memory; each
+training job requests one GPU. Resource needs and time limits are estimates,
+so adjust them to your quota and actual data size.
 
 ## Prepare the Python environment
 
@@ -51,10 +52,13 @@ default in each script with your absolute storage path. For example:
 ```bash
 cd /path/to/DA-GET-BFM
 export DATA_ROOT=/work/YOUR_PROJECT/robotics_datasets
+mkdir -p logs
 sbatch -A YOUR_ISERVICE_PROJECT_ID scripts/slurm/download.sbatch
 # After the download completes:
 sbatch -A YOUR_ISERVICE_PROJECT_ID scripts/slurm/convert.sbatch
-# After conversion completes:
+# After conversion completes, prepare configs with Nano5 paths (see below), then:
+sbatch -A YOUR_ISERVICE_PROJECT_ID scripts/slurm/preprocess.sbatch
+# After preprocessing completes:
 sbatch -A YOUR_ISERVICE_PROJECT_ID scripts/slurm/pretrain.sbatch
 # After pretraining produces an encoder checkpoint:
 sbatch -A YOUR_ISERVICE_PROJECT_ID scripts/slurm/train_bfm.sbatch
@@ -65,8 +69,16 @@ repository root. The scripts have no Slurm dependencies, so submit only the
 stage you want. You can run the download and conversion stages again; they
 skip completed files.
 
+The preprocessing job calls the same `build_physics_datasets()` function that
+pretraining calls and writes a reusable Arrow cache. Its `DATA_CONFIG` and
+`CACHE_DIR` must match `data_config` and `cache_dir` in the pretraining JSON;
+otherwise pretraining will build another cache. A change to the data config or
+URDF contents creates a new cache key. An interrupted run reuses completed
+sources.
+
 Use `squeue -u "$USER"` or `sacct -j JOB_ID` to check status. Slurm logs are
-`slurm-<job-name>-<job-id>.out` and `.err` in the submission directory. Avoid
+`logs/<job-name>-<job-id>.out` and `.err` in the repository root. Create
+`logs/` before submitting. Avoid
 rapid polling with `watch` or a loop, as the Nano5 manual requests.
 
 To estimate the download before submitting, run the catalog's `--list` and
@@ -82,8 +94,8 @@ checked-in selected configs contain paths from the machine where they were
 generated; update those paths for Nano5 before submitting. If you use the
 default dataset selection, the project's existing
 `.venv/bin/python scripts/generate_training_configs.py --data-root "$DATA_ROOT"`
-can regenerate
-the selected configs once after conversion. This is a separate setup command,
+can regenerate the selected configs once after conversion, before preprocessing.
+This is a separate setup command,
 not part of any Slurm job. Alternatively, supply your own config paths through
 `PRETRAIN_CONFIG` and `BFM_DATA_CONFIG`. Changing `DATA_ROOT` alone does not
 rewrite paths inside JSON files.

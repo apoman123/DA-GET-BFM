@@ -8,8 +8,8 @@
 #SBATCH --gpus-per-node=1
 #SBATCH --mem=96G
 #SBATCH --time=48:00:00
-#SBATCH --output=slurm-%x-%j.out
-#SBATCH --error=slurm-%x-%j.err
+#SBATCH --output=logs/%x-%j.out
+#SBATCH --error=logs/%x-%j.err
 
 set -euo pipefail
 

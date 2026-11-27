@@ -4,12 +4,12 @@
 #SBATCH --partition=normal
 #SBATCH --nodes=1
 #SBATCH --ntasks=1
-#SBATCH --cpus-per-task=8
+#SBATCH --cpus-per-task=12
 #SBATCH --gpus-per-node=1
 #SBATCH --mem=96G
 #SBATCH --time=48:00:00
-#SBATCH --output=logs/%x-%j.out
-#SBATCH --error=logs/%x-%j.err
+#SBATCH --output=pretrain/logs/%x-%j.out
+#SBATCH --error=pretrain/logs/%x-%j.err
 
 set -euo pipefail
 

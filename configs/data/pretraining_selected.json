@@ -184,7 +184,7 @@
     {
       "type": "huggingface",
       "name": "grandtour_anymal_d",
-      "path": "/mnt/e/robotics_datasets/grandtour/hf",
+      "path": "/work/apoman123/robotics_datasets/grandtour/hf",
       "urdf": "/home/apoman123/DA-GET-BFM/assets/urdf/anymal_d.urdf",
       "joint_names": [
         "LF_HAA",
@@ -221,7 +221,7 @@
     {
       "type": "huggingface",
       "name": "mipo_go1",
-      "path": "/mnt/e/robotics_datasets/mipo/hf",
+      "path": "/work/apoman123/robotics_datasets/mipo/hf",
       "urdf": "/home/apoman123/DA-GET-BFM/assets/urdf/go1.urdf",
       "joint_names": [
         "FL_hip_joint",
@@ -337,7 +337,7 @@
         "kd": 2.0
       },
       "name": "g1_wbt_brainco_adjust_sickbed",
-      "path": "/mnt/e/robotics_datasets/g1_wbt/hf/G1_WBT_Brainco_Adjust_Sickbed",
+      "path": "/work/apoman123/robotics_datasets/g1_wbt/hf/G1_WBT_Brainco_Adjust_Sickbed",
       "urdf": "/home/apoman123/DA-GET-BFM/assets/urdf/g1_29dof_rev_1_0.urdf"
     },
     {
@@ -424,7 +424,7 @@
         "kd": 2.0
       },
       "name": "g1_wbt_brainco_clean_tea_table_garbage",
-      "path": "/mnt/e/robotics_datasets/g1_wbt/hf/G1_WBT_Brainco_Clean_Tea_Table_Garbage",
+      "path": "/work/apoman123/robotics_datasets/g1_wbt/hf/G1_WBT_Brainco_Clean_Tea_Table_Garbage",
       "urdf": "/home/apoman123/DA-GET-BFM/assets/urdf/g1_29dof_rev_1_0.urdf"
     },
     {
@@ -511,7 +511,7 @@
         "kd": 2.0
       },
       "name": "g1_wbt_brainco_collect_plates_into_dishwasher",
-      "path": "/mnt/e/robotics_datasets/g1_wbt/hf/G1_WBT_Brainco_Collect_Plates_Into_Dishwasher",
+      "path": "/work/apoman123/robotics_datasets/g1_wbt/hf/G1_WBT_Brainco_Collect_Plates_Into_Dishwasher",
       "urdf": "/home/apoman123/DA-GET-BFM/assets/urdf/g1_29dof_rev_1_0.urdf"
     },
     {
@@ -598,7 +598,7 @@
         "kd": 2.0
       },
       "name": "g1_wbt_brainco_empty_folder_in_cabinet",
-      "path": "/mnt/e/robotics_datasets/g1_wbt/hf/G1_WBT_Brainco_Empty_Folder_In_Cabinet",
+      "path": "/work/apoman123/robotics_datasets/g1_wbt/hf/G1_WBT_Brainco_Empty_Folder_In_Cabinet",
       "urdf": "/home/apoman123/DA-GET-BFM/assets/urdf/g1_29dof_rev_1_0.urdf"
     },
     {
@@ -685,7 +685,7 @@
         "kd": 2.0
       },
       "name": "g1_wbt_brainco_hang_up_clothes",
-      "path": "/mnt/e/robotics_datasets/g1_wbt/hf/G1_WBT_Brainco_Hang_Up_Clothes",
+      "path": "/work/apoman123/robotics_datasets/g1_wbt/hf/G1_WBT_Brainco_Hang_Up_Clothes",
       "urdf": "/home/apoman123/DA-GET-BFM/assets/urdf/g1_29dof_rev_1_0.urdf"
     },
     {
@@ -772,7 +772,7 @@
         "kd": 2.0
       },
       "name": "g1_wbt_brainco_laundry_basket_washer",
-      "path": "/mnt/e/robotics_datasets/g1_wbt/hf/G1_WBT_Brainco_Laundry_Basket_Washer",
+      "path": "/work/apoman123/robotics_datasets/g1_wbt/hf/G1_WBT_Brainco_Laundry_Basket_Washer",
       "urdf": "/home/apoman123/DA-GET-BFM/assets/urdf/g1_29dof_rev_1_0.urdf"
     },
     {
@@ -859,7 +859,7 @@
         "kd": 2.0
       },
       "name": "g1_wbt_brainco_make_bed",
-      "path": "/mnt/e/robotics_datasets/g1_wbt/hf/G1_WBT_Brainco_Make_Bed",
+      "path": "/work/apoman123/robotics_datasets/g1_wbt/hf/G1_WBT_Brainco_Make_Bed",
       "urdf": "/home/apoman123/DA-GET-BFM/assets/urdf/g1_29dof_rev_1_0.urdf"
     },
     {
@@ -946,7 +946,7 @@
         "kd": 2.0
       },
       "name": "g1_wbt_brainco_make_the_bed",
-      "path": "/mnt/e/robotics_datasets/g1_wbt/hf/G1_WBT_Brainco_Make_The_Bed",
+      "path": "/work/apoman123/robotics_datasets/g1_wbt/hf/G1_WBT_Brainco_Make_The_Bed",
       "urdf": "/home/apoman123/DA-GET-BFM/assets/urdf/g1_29dof_rev_1_0.urdf"
     },
     {
@@ -1033,7 +1033,7 @@
         "kd": 2.0
       },
       "name": "g1_wbt_brainco_pick_cloth_on_bed_and_put_in_laundry",
-      "path": "/mnt/e/robotics_datasets/g1_wbt/hf/G1_WBT_Brainco_Pick_Cloth_On_Bed_And_Put_In_Laundry",
+      "path": "/work/apoman123/robotics_datasets/g1_wbt/hf/G1_WBT_Brainco_Pick_Cloth_On_Bed_And_Put_In_Laundry",
       "urdf": "/home/apoman123/DA-GET-BFM/assets/urdf/g1_29dof_rev_1_0.urdf"
     },
     {
@@ -1120,7 +1120,7 @@
         "kd": 2.0
       },
       "name": "g1_wbt_brainco_pick_up_clothes",
-      "path": "/mnt/e/robotics_datasets/g1_wbt/hf/G1_WBT_Brainco_Pick_Up_Clothes",
+      "path": "/work/apoman123/robotics_datasets/g1_wbt/hf/G1_WBT_Brainco_Pick_Up_Clothes",
       "urdf": "/home/apoman123/DA-GET-BFM/assets/urdf/g1_29dof_rev_1_0.urdf"
     },
     {
@@ -1207,7 +1207,7 @@
         "kd": 2.0
       },
       "name": "g1_wbt_brainco_pick_up_cushion",
-      "path": "/mnt/e/robotics_datasets/g1_wbt/hf/G1_WBT_Brainco_Pick_Up_Cushion",
+      "path": "/work/apoman123/robotics_datasets/g1_wbt/hf/G1_WBT_Brainco_Pick_Up_Cushion",
       "urdf": "/home/apoman123/DA-GET-BFM/assets/urdf/g1_29dof_rev_1_0.urdf"
     },
     {
@@ -1294,7 +1294,7 @@
         "kd": 2.0
       },
       "name": "g1_wbt_brainco_pick_up_drinks",
-      "path": "/mnt/e/robotics_datasets/g1_wbt/hf/G1_WBT_Brainco_Pick_Up_Drinks",
+      "path": "/work/apoman123/robotics_datasets/g1_wbt/hf/G1_WBT_Brainco_Pick_Up_Drinks",
       "urdf": "/home/apoman123/DA-GET-BFM/assets/urdf/g1_29dof_rev_1_0.urdf"
     },
     {
@@ -1381,7 +1381,7 @@
         "kd": 2.0
       },
       "name": "g1_wbt_brainco_pick_up_fruit",
-      "path": "/mnt/e/robotics_datasets/g1_wbt/hf/G1_WBT_Brainco_Pick_Up_Fruit",
+      "path": "/work/apoman123/robotics_datasets/g1_wbt/hf/G1_WBT_Brainco_Pick_Up_Fruit",
       "urdf": "/home/apoman123/DA-GET-BFM/assets/urdf/g1_29dof_rev_1_0.urdf"
     },
     {
@@ -1468,7 +1468,7 @@
         "kd": 2.0
       },
       "name": "g1_wbt_brainco_pick_up_medicine",
-      "path": "/mnt/e/robotics_datasets/g1_wbt/hf/G1_WBT_Brainco_Pick_Up_Medicine",
+      "path": "/work/apoman123/robotics_datasets/g1_wbt/hf/G1_WBT_Brainco_Pick_Up_Medicine",
       "urdf": "/home/apoman123/DA-GET-BFM/assets/urdf/g1_29dof_rev_1_0.urdf"
     },
     {
@@ -1555,7 +1555,7 @@
         "kd": 2.0
       },
       "name": "g1_wbt_brainco_pick_up_medicine_v0",
-      "path": "/mnt/e/robotics_datasets/g1_wbt/hf/G1_WBT_Brainco_Pick_Up_Medicine_v0",
+      "path": "/work/apoman123/robotics_datasets/g1_wbt/hf/G1_WBT_Brainco_Pick_Up_Medicine_v0",
       "urdf": "/home/apoman123/DA-GET-BFM/assets/urdf/g1_29dof_rev_1_0.urdf"
     },
     {
@@ -1642,7 +1642,7 @@
         "kd": 2.0
       },
       "name": "g1_wbt_brainco_pick_up_multiple_cushions",
-      "path": "/mnt/e/robotics_datasets/g1_wbt/hf/G1_WBT_Brainco_Pick_Up_Multiple_Cushions",
+      "path": "/work/apoman123/robotics_datasets/g1_wbt/hf/G1_WBT_Brainco_Pick_Up_Multiple_Cushions",
       "urdf": "/home/apoman123/DA-GET-BFM/assets/urdf/g1_29dof_rev_1_0.urdf"
     },
     {
@@ -1729,7 +1729,7 @@
         "kd": 2.0
       },
       "name": "g1_wbt_brainco_pickup_pillow",
-      "path": "/mnt/e/robotics_datasets/g1_wbt/hf/G1_WBT_Brainco_Pickup_Pillow",
+      "path": "/work/apoman123/robotics_datasets/g1_wbt/hf/G1_WBT_Brainco_Pickup_Pillow",
       "urdf": "/home/apoman123/DA-GET-BFM/assets/urdf/g1_29dof_rev_1_0.urdf"
     },
     {
@@ -1816,7 +1816,7 @@
         "kd": 2.0
       },
       "name": "g1_wbt_brainco_plastic_box_parts",
-      "path": "/mnt/e/robotics_datasets/g1_wbt/hf/G1_WBT_Brainco_Plastic_Box_Parts",
+      "path": "/work/apoman123/robotics_datasets/g1_wbt/hf/G1_WBT_Brainco_Plastic_Box_Parts",
       "urdf": "/home/apoman123/DA-GET-BFM/assets/urdf/g1_29dof_rev_1_0.urdf"
     },
     {
@@ -1903,7 +1903,7 @@
         "kd": 2.0
       },
       "name": "g1_wbt_brainco_put_clothes_into_washing_machine",
-      "path": "/mnt/e/robotics_datasets/g1_wbt/hf/G1_WBT_Brainco_Put_Clothes_Into_Washing_Machine",
+      "path": "/work/apoman123/robotics_datasets/g1_wbt/hf/G1_WBT_Brainco_Put_Clothes_Into_Washing_Machine",
       "urdf": "/home/apoman123/DA-GET-BFM/assets/urdf/g1_29dof_rev_1_0.urdf"
     },
     {
@@ -1990,7 +1990,7 @@
         "kd": 2.0
       },
       "name": "g1_wbt_brainco_put_drinks_into_fridge",
-      "path": "/mnt/e/robotics_datasets/g1_wbt/hf/G1_WBT_Brainco_Put_Drinks_Into_Fridge",
+      "path": "/work/apoman123/robotics_datasets/g1_wbt/hf/G1_WBT_Brainco_Put_Drinks_Into_Fridge",
       "urdf": "/home/apoman123/DA-GET-BFM/assets/urdf/g1_29dof_rev_1_0.urdf"
     },
     {
@@ -2077,7 +2077,7 @@
         "kd": 2.0
       },
       "name": "g1_wbt_brainco_put_plate_into_dishwasher",
-      "path": "/mnt/e/robotics_datasets/g1_wbt/hf/G1_WBT_Brainco_Put_Plate_Into_Dishwasher",
+      "path": "/work/apoman123/robotics_datasets/g1_wbt/hf/G1_WBT_Brainco_Put_Plate_Into_Dishwasher",
       "urdf": "/home/apoman123/DA-GET-BFM/assets/urdf/g1_29dof_rev_1_0.urdf"
     },
     {
@@ -2164,7 +2164,7 @@
         "kd": 2.0
       },
       "name": "g1_wbt_brainco_put_sink_towel",
-      "path": "/mnt/e/robotics_datasets/g1_wbt/hf/G1_WBT_Brainco_Put_Sink_Towel",
+      "path": "/work/apoman123/robotics_datasets/g1_wbt/hf/G1_WBT_Brainco_Put_Sink_Towel",
       "urdf": "/home/apoman123/DA-GET-BFM/assets/urdf/g1_29dof_rev_1_0.urdf"
     },
     {
@@ -2251,7 +2251,7 @@
         "kd": 2.0
       },
       "name": "g1_wbt_brainco_put_vegetables_into_basket",
-      "path": "/mnt/e/robotics_datasets/g1_wbt/hf/G1_WBT_Brainco_Put_Vegetables_Into_Basket",
+      "path": "/work/apoman123/robotics_datasets/g1_wbt/hf/G1_WBT_Brainco_Put_Vegetables_Into_Basket",
       "urdf": "/home/apoman123/DA-GET-BFM/assets/urdf/g1_29dof_rev_1_0.urdf"
     },
     {
@@ -2338,7 +2338,7 @@
         "kd": 2.0
       },
       "name": "g1_wbt_brainco_sort_fruit",
-      "path": "/mnt/e/robotics_datasets/g1_wbt/hf/G1_WBT_Brainco_Sort_Fruit",
+      "path": "/work/apoman123/robotics_datasets/g1_wbt/hf/G1_WBT_Brainco_Sort_Fruit",
       "urdf": "/home/apoman123/DA-GET-BFM/assets/urdf/g1_29dof_rev_1_0.urdf"
     },
     {
@@ -2425,7 +2425,7 @@
         "kd": 2.0
       },
       "name": "g1_wbt_brainco_supermarket_shelf_organizing",
-      "path": "/mnt/e/robotics_datasets/g1_wbt/hf/G1_WBT_Brainco_Supermarket_Shelf_Organizing",
+      "path": "/work/apoman123/robotics_datasets/g1_wbt/hf/G1_WBT_Brainco_Supermarket_Shelf_Organizing",
       "urdf": "/home/apoman123/DA-GET-BFM/assets/urdf/g1_29dof_rev_1_0.urdf"
     },
     {
@@ -2512,7 +2512,7 @@
         "kd": 2.0
       },
       "name": "g1_wbt_brainco_tidy_living_room_slippers",
-      "path": "/mnt/e/robotics_datasets/g1_wbt/hf/G1_WBT_Brainco_Tidy_Living_Room_Slippers",
+      "path": "/work/apoman123/robotics_datasets/g1_wbt/hf/G1_WBT_Brainco_Tidy_Living_Room_Slippers",
       "urdf": "/home/apoman123/DA-GET-BFM/assets/urdf/g1_29dof_rev_1_0.urdf"
     },
     {
@@ -2599,7 +2599,7 @@
         "kd": 2.0
       },
       "name": "g1_wbt_brainco_tidy_the_bed",
-      "path": "/mnt/e/robotics_datasets/g1_wbt/hf/G1_WBT_Brainco_Tidy_The_Bed",
+      "path": "/work/apoman123/robotics_datasets/g1_wbt/hf/G1_WBT_Brainco_Tidy_The_Bed",
       "urdf": "/home/apoman123/DA-GET-BFM/assets/urdf/g1_29dof_rev_1_0.urdf"
     },
     {
@@ -2686,7 +2686,7 @@
         "kd": 2.0
       },
       "name": "g1_wbt_brainco_tidy_the_bed_and_pick_cloth_on_bed_and_put_in_laundry",
-      "path": "/mnt/e/robotics_datasets/g1_wbt/hf/G1_WBT_Brainco_Tidy_The_Bed_And_Pick_Cloth_On_Bed_And_Put_In_Laundry",
+      "path": "/work/apoman123/robotics_datasets/g1_wbt/hf/G1_WBT_Brainco_Tidy_The_Bed_And_Pick_Cloth_On_Bed_And_Put_In_Laundry",
       "urdf": "/home/apoman123/DA-GET-BFM/assets/urdf/g1_29dof_rev_1_0.urdf"
     },
     {
@@ -2773,7 +2773,7 @@
         "kd": 2.0
       },
       "name": "g1_wbt_brainco_walk_to_table_put_cups_and_rack_plates_in_dishwasher",
-      "path": "/mnt/e/robotics_datasets/g1_wbt/hf/G1_WBT_Brainco_Walk_To_Table_Put_Cups_And_Rack_Plates_In_Dishwasher",
+      "path": "/work/apoman123/robotics_datasets/g1_wbt/hf/G1_WBT_Brainco_Walk_To_Table_Put_Cups_And_Rack_Plates_In_Dishwasher",
       "urdf": "/home/apoman123/DA-GET-BFM/assets/urdf/g1_29dof_rev_1_0.urdf"
     },
     {
@@ -2860,7 +2860,7 @@
         "kd": 2.0
       },
       "name": "g1_wbt_dex1_put_clothes_into_washing_machine",
-      "path": "/mnt/e/robotics_datasets/g1_wbt/hf/G1_WBT_Dex1_Put_Clothes_into_Washing_Machine",
+      "path": "/work/apoman123/robotics_datasets/g1_wbt/hf/G1_WBT_Dex1_Put_Clothes_into_Washing_Machine",
       "urdf": "/home/apoman123/DA-GET-BFM/assets/urdf/g1_29dof_rev_1_0.urdf"
     },
     {
@@ -2947,7 +2947,7 @@
         "kd": 2.0
       },
       "name": "g1_wbt_inspire_clean_living_room",
-      "path": "/mnt/e/robotics_datasets/g1_wbt/hf/G1_WBT_Inspire_Clean_Living_Room",
+      "path": "/work/apoman123/robotics_datasets/g1_wbt/hf/G1_WBT_Inspire_Clean_Living_Room",
       "urdf": "/home/apoman123/DA-GET-BFM/assets/urdf/g1_29dof_rev_1_0.urdf"
     },
     {
@@ -3034,7 +3034,7 @@
         "kd": 2.0
       },
       "name": "g1_wbt_inspire_clean_the_living_room",
-      "path": "/mnt/e/robotics_datasets/g1_wbt/hf/G1_WBT_Inspire_Clean_The_Living_Room",
+      "path": "/work/apoman123/robotics_datasets/g1_wbt/hf/G1_WBT_Inspire_Clean_The_Living_Room",
       "urdf": "/home/apoman123/DA-GET-BFM/assets/urdf/g1_29dof_rev_1_0.urdf"
     },
     {
@@ -3121,7 +3121,7 @@
         "kd": 2.0
       },
       "name": "g1_wbt_inspire_empty_folder_in_cabinet",
-      "path": "/mnt/e/robotics_datasets/g1_wbt/hf/G1_WBT_Inspire_Empty_Folder_In_Cabinet",
+      "path": "/work/apoman123/robotics_datasets/g1_wbt/hf/G1_WBT_Inspire_Empty_Folder_In_Cabinet",
       "urdf": "/home/apoman123/DA-GET-BFM/assets/urdf/g1_29dof_rev_1_0.urdf"
     },
     {
@@ -3208,7 +3208,7 @@
         "kd": 2.0
       },
       "name": "g1_wbt_inspire_hang_up_clothes",
-      "path": "/mnt/e/robotics_datasets/g1_wbt/hf/G1_WBT_Inspire_Hang_Up_Clothes",
+      "path": "/work/apoman123/robotics_datasets/g1_wbt/hf/G1_WBT_Inspire_Hang_Up_Clothes",
       "urdf": "/home/apoman123/DA-GET-BFM/assets/urdf/g1_29dof_rev_1_0.urdf"
     },
     {
@@ -3295,7 +3295,7 @@
         "kd": 2.0
       },
       "name": "g1_wbt_inspire_pick_cloth_on_bed_and_put_in_laundry",
-      "path": "/mnt/e/robotics_datasets/g1_wbt/hf/G1_WBT_Inspire_Pick_Cloth_On_Bed_And_Put_In_Laundry",
+      "path": "/work/apoman123/robotics_datasets/g1_wbt/hf/G1_WBT_Inspire_Pick_Cloth_On_Bed_And_Put_In_Laundry",
       "urdf": "/home/apoman123/DA-GET-BFM/assets/urdf/g1_29dof_rev_1_0.urdf"
     },
     {
@@ -3382,7 +3382,7 @@
         "kd": 2.0
       },
       "name": "g1_wbt_inspire_pick_up_basket_and_put_vegetables_into_basket",
-      "path": "/mnt/e/robotics_datasets/g1_wbt/hf/G1_WBT_Inspire_Pick_Up_Basket_And_Put_Vegetables_Into_Basket",
+      "path": "/work/apoman123/robotics_datasets/g1_wbt/hf/G1_WBT_Inspire_Pick_Up_Basket_And_Put_Vegetables_Into_Basket",
       "urdf": "/home/apoman123/DA-GET-BFM/assets/urdf/g1_29dof_rev_1_0.urdf"
     },
     {
@@ -3469,7 +3469,7 @@
         "kd": 2.0
       },
       "name": "g1_wbt_inspire_pick_up_clothes",
-      "path": "/mnt/e/robotics_datasets/g1_wbt/hf/G1_WBT_Inspire_Pick_Up_Clothes",
+      "path": "/work/apoman123/robotics_datasets/g1_wbt/hf/G1_WBT_Inspire_Pick_Up_Clothes",
       "urdf": "/home/apoman123/DA-GET-BFM/assets/urdf/g1_29dof_rev_1_0.urdf"
     },
     {
@@ -3556,7 +3556,7 @@
         "kd": 2.0
       },
       "name": "g1_wbt_inspire_pick_up_drinks",
-      "path": "/mnt/e/robotics_datasets/g1_wbt/hf/G1_WBT_Inspire_Pick_Up_Drinks",
+      "path": "/work/apoman123/robotics_datasets/g1_wbt/hf/G1_WBT_Inspire_Pick_Up_Drinks",
       "urdf": "/home/apoman123/DA-GET-BFM/assets/urdf/g1_29dof_rev_1_0.urdf"
     },
     {
@@ -3643,7 +3643,7 @@
         "kd": 2.0
       },
       "name": "g1_wbt_inspire_pick_up_drinks_v0",
-      "path": "/mnt/e/robotics_datasets/g1_wbt/hf/G1_WBT_Inspire_Pick_Up_Drinks_v0",
+      "path": "/work/apoman123/robotics_datasets/g1_wbt/hf/G1_WBT_Inspire_Pick_Up_Drinks_v0",
       "urdf": "/home/apoman123/DA-GET-BFM/assets/urdf/g1_29dof_rev_1_0.urdf"
     },
     {
@@ -3730,7 +3730,7 @@
         "kd": 2.0
       },
       "name": "g1_wbt_inspire_pick_up_fruit",
-      "path": "/mnt/e/robotics_datasets/g1_wbt/hf/G1_WBT_Inspire_Pick_Up_Fruit",
+      "path": "/work/apoman123/robotics_datasets/g1_wbt/hf/G1_WBT_Inspire_Pick_Up_Fruit",
       "urdf": "/home/apoman123/DA-GET-BFM/assets/urdf/g1_29dof_rev_1_0.urdf"
     },
     {
@@ -3817,7 +3817,7 @@
         "kd": 2.0
       },
       "name": "g1_wbt_inspire_pick_up_multiple_cushions",
-      "path": "/mnt/e/robotics_datasets/g1_wbt/hf/G1_WBT_Inspire_Pick_Up_Multiple_Cushions",
+      "path": "/work/apoman123/robotics_datasets/g1_wbt/hf/G1_WBT_Inspire_Pick_Up_Multiple_Cushions",
       "urdf": "/home/apoman123/DA-GET-BFM/assets/urdf/g1_29dof_rev_1_0.urdf"
     },
     {
@@ -3904,7 +3904,7 @@
         "kd": 2.0
       },
       "name": "g1_wbt_inspire_plastic_box_parts",
-      "path": "/mnt/e/robotics_datasets/g1_wbt/hf/G1_WBT_Inspire_Plastic_Box_Parts",
+      "path": "/work/apoman123/robotics_datasets/g1_wbt/hf/G1_WBT_Inspire_Plastic_Box_Parts",
       "urdf": "/home/apoman123/DA-GET-BFM/assets/urdf/g1_29dof_rev_1_0.urdf"
     },
     {
@@ -3991,7 +3991,7 @@
         "kd": 2.0
       },
       "name": "g1_wbt_inspire_push_wheelchair",
-      "path": "/mnt/e/robotics_datasets/g1_wbt/hf/G1_WBT_Inspire_Push_Wheelchair",
+      "path": "/work/apoman123/robotics_datasets/g1_wbt/hf/G1_WBT_Inspire_Push_Wheelchair",
       "urdf": "/home/apoman123/DA-GET-BFM/assets/urdf/g1_29dof_rev_1_0.urdf"
     },
     {
@@ -4078,7 +4078,7 @@
         "kd": 2.0
       },
       "name": "g1_wbt_inspire_put_clothes_into_basket",
-      "path": "/mnt/e/robotics_datasets/g1_wbt/hf/G1_WBT_Inspire_Put_Clothes_Into_Basket",
+      "path": "/work/apoman123/robotics_datasets/g1_wbt/hf/G1_WBT_Inspire_Put_Clothes_Into_Basket",
       "urdf": "/home/apoman123/DA-GET-BFM/assets/urdf/g1_29dof_rev_1_0.urdf"
     },
     {
@@ -4165,7 +4165,7 @@
         "kd": 2.0
       },
       "name": "g1_wbt_inspire_put_clothes_into_washing_machine",
-      "path": "/mnt/e/robotics_datasets/g1_wbt/hf/G1_WBT_Inspire_Put_Clothes_into_Washing_Machine",
+      "path": "/work/apoman123/robotics_datasets/g1_wbt/hf/G1_WBT_Inspire_Put_Clothes_into_Washing_Machine",
       "urdf": "/home/apoman123/DA-GET-BFM/assets/urdf/g1_29dof_rev_1_0.urdf"
     },
     {
@@ -4252,7 +4252,7 @@
         "kd": 2.0
       },
       "name": "g1_wbt_inspire_put_drinks_into_fridge",
-      "path": "/mnt/e/robotics_datasets/g1_wbt/hf/G1_WBT_Inspire_Put_Drinks_Into_Fridge",
+      "path": "/work/apoman123/robotics_datasets/g1_wbt/hf/G1_WBT_Inspire_Put_Drinks_Into_Fridge",
       "urdf": "/home/apoman123/DA-GET-BFM/assets/urdf/g1_29dof_rev_1_0.urdf"
     },
     {
@@ -4339,7 +4339,7 @@
         "kd": 2.0
       },
       "name": "g1_wbt_inspire_put_drinks_into_fridge_v0",
-      "path": "/mnt/e/robotics_datasets/g1_wbt/hf/G1_WBT_Inspire_Put_Drinks_Into_Fridge_v0",
+      "path": "/work/apoman123/robotics_datasets/g1_wbt/hf/G1_WBT_Inspire_Put_Drinks_Into_Fridge_v0",
       "urdf": "/home/apoman123/DA-GET-BFM/assets/urdf/g1_29dof_rev_1_0.urdf"
     },
     {
@@ -4426,7 +4426,7 @@
         "kd": 2.0
       },
       "name": "g1_wbt_inspire_put_plate_into_dishwasher",
-      "path": "/mnt/e/robotics_datasets/g1_wbt/hf/G1_WBT_Inspire_Put_Plate_Into_Dishwasher",
+      "path": "/work/apoman123/robotics_datasets/g1_wbt/hf/G1_WBT_Inspire_Put_Plate_Into_Dishwasher",
       "urdf": "/home/apoman123/DA-GET-BFM/assets/urdf/g1_29dof_rev_1_0.urdf"
     },
     {
@@ -4507,7 +4507,7 @@
         "kd": 2.0
       },
       "name": "g1_wbt_inspire_put_sink_towel",
-      "path": "/mnt/e/robotics_datasets/g1_wbt/hf/G1_WBT_Inspire_Put_Sink_Towel",
+      "path": "/work/apoman123/robotics_datasets/g1_wbt/hf/G1_WBT_Inspire_Put_Sink_Towel",
       "urdf": "/home/apoman123/DA-GET-BFM/assets/urdf/g1_29dof_rev_1_0.urdf"
     },
     {
@@ -4594,7 +4594,7 @@
         "kd": 2.0
       },
       "name": "g1_wbt_inspire_put_vegetables_into_basket",
-      "path": "/mnt/e/robotics_datasets/g1_wbt/hf/G1_WBT_Inspire_Put_Vegetables_Into_Basket",
+      "path": "/work/apoman123/robotics_datasets/g1_wbt/hf/G1_WBT_Inspire_Put_Vegetables_Into_Basket",
       "urdf": "/home/apoman123/DA-GET-BFM/assets/urdf/g1_29dof_rev_1_0.urdf"
     },
     {
@@ -4681,7 +4681,7 @@
         "kd": 2.0
       },
       "name": "g1_wbt_inspire_put_vegetables_into_basket_v0",
-      "path": "/mnt/e/robotics_datasets/g1_wbt/hf/G1_WBT_Inspire_Put_Vegetables_Into_Basket_v0",
+      "path": "/work/apoman123/robotics_datasets/g1_wbt/hf/G1_WBT_Inspire_Put_Vegetables_Into_Basket_v0",
       "urdf": "/home/apoman123/DA-GET-BFM/assets/urdf/g1_29dof_rev_1_0.urdf"
     },
     {
@@ -4768,7 +4768,7 @@
         "kd": 2.0
       },
       "name": "g1_wbt_inspire_sort_fruit",
-      "path": "/mnt/e/robotics_datasets/g1_wbt/hf/G1_WBT_Inspire_Sort_Fruit",
+      "path": "/work/apoman123/robotics_datasets/g1_wbt/hf/G1_WBT_Inspire_Sort_Fruit",
       "urdf": "/home/apoman123/DA-GET-BFM/assets/urdf/g1_29dof_rev_1_0.urdf"
     },
     {
@@ -4855,7 +4855,7 @@
         "kd": 2.0
       },
       "name": "g1_wbt_inspire_supermarket_shelf_organizing",
-      "path": "/mnt/e/robotics_datasets/g1_wbt/hf/G1_WBT_Inspire_Supermarket_Shelf_Organizing",
+      "path": "/work/apoman123/robotics_datasets/g1_wbt/hf/G1_WBT_Inspire_Supermarket_Shelf_Organizing",
       "urdf": "/home/apoman123/DA-GET-BFM/assets/urdf/g1_29dof_rev_1_0.urdf"
     },
     {
@@ -4942,7 +4942,7 @@
         "kd": 2.0
       },
       "name": "g1_wbt_inspire_tidy_living_room_slippers",
-      "path": "/mnt/e/robotics_datasets/g1_wbt/hf/G1_WBT_Inspire_Tidy_Living_Room_Slippers",
+      "path": "/work/apoman123/robotics_datasets/g1_wbt/hf/G1_WBT_Inspire_Tidy_Living_Room_Slippers",
       "urdf": "/home/apoman123/DA-GET-BFM/assets/urdf/g1_29dof_rev_1_0.urdf"
     },
     {
@@ -5029,7 +5029,7 @@
         "kd": 2.0
       },
       "name": "g1_wbt_inspire_walk_to_table_put_cups_and_rack_plates_in_dishwasher",
-      "path": "/mnt/e/robotics_datasets/g1_wbt/hf/G1_WBT_Inspire_Walk_To_Table_Put_Cups_And_Rack_Plates_In_Dishwasher",
+      "path": "/work/apoman123/robotics_datasets/g1_wbt/hf/G1_WBT_Inspire_Walk_To_Table_Put_Cups_And_Rack_Plates_In_Dishwasher",
       "urdf": "/home/apoman123/DA-GET-BFM/assets/urdf/g1_29dof_rev_1_0.urdf"
     },
     {
@@ -5127,7 +5127,7 @@
         "right_ankle_roll_joint"
       ],
       "name": "g1_wbt_inspire_collect_clothes_maincamonly",
-      "path": "/mnt/e/robotics_datasets/g1_wbt_q36/hf/G1_WBT_Inspire_Collect_Clothes_MainCamOnly",
+      "path": "/work/apoman123/robotics_datasets/g1_wbt_q36/hf/G1_WBT_Inspire_Collect_Clothes_MainCamOnly",
       "urdf": "/home/apoman123/DA-GET-BFM/assets/urdf/g1_29dof_rev_1_0.urdf"
     },
     {
@@ -5225,7 +5225,7 @@
         "right_ankle_roll_joint"
       ],
       "name": "g1_wbt_inspire_pickup_pillow_maincamonly",
-      "path": "/mnt/e/robotics_datasets/g1_wbt_q36/hf/G1_WBT_Inspire_Pickup_Pillow_MainCamOnly",
+      "path": "/work/apoman123/robotics_datasets/g1_wbt_q36/hf/G1_WBT_Inspire_Pickup_Pillow_MainCamOnly",
       "urdf": "/home/apoman123/DA-GET-BFM/assets/urdf/g1_29dof_rev_1_0.urdf"
     },
     {
@@ -5323,7 +5323,7 @@
         "right_ankle_roll_joint"
       ],
       "name": "g1_wbt_inspire_put_clothes_into_washing_machine_maincamonly",
-      "path": "/mnt/e/robotics_datasets/g1_wbt_q36/hf/G1_WBT_Inspire_Put_Clothes_into_Washing_Machine_MainCamOnly",
+      "path": "/work/apoman123/robotics_datasets/g1_wbt_q36/hf/G1_WBT_Inspire_Put_Clothes_into_Washing_Machine_MainCamOnly",
       "urdf": "/home/apoman123/DA-GET-BFM/assets/urdf/g1_29dof_rev_1_0.urdf"
     },
     {
@@ -5421,7 +5421,7 @@
         "right_ankle_roll_joint"
       ],
       "name": "g1_wbt_inspire_take_plates_into_dishwasher",
-      "path": "/mnt/e/robotics_datasets/g1_wbt_q36/hf/G1_WBT_Inspire_Take_Plates_Into_Dishwasher",
+      "path": "/work/apoman123/robotics_datasets/g1_wbt_q36/hf/G1_WBT_Inspire_Take_Plates_Into_Dishwasher",
       "urdf": "/home/apoman123/DA-GET-BFM/assets/urdf/g1_29dof_rev_1_0.urdf"
     },
     {
@@ -5519,7 +5519,7 @@
         "right_ankle_roll_joint"
       ],
       "name": "g1_wbt_smpl_brainco_empty_folder_in_cabinet",
-      "path": "/mnt/e/robotics_datasets/g1_wbt_smpl/hf/G1_WBT_SMPL_Brainco_Empty_Folder_In_Cabinet",
+      "path": "/work/apoman123/robotics_datasets/g1_wbt_smpl/hf/G1_WBT_SMPL_Brainco_Empty_Folder_In_Cabinet",
       "urdf": "/home/apoman123/DA-GET-BFM/assets/urdf/g1_29dof_rev_1_0.urdf"
     },
     {
@@ -5617,7 +5617,7 @@
         "right_ankle_roll_joint"
       ],
       "name": "g1_wbt_smpl_brainco_operate_washing_machine",
-      "path": "/mnt/e/robotics_datasets/g1_wbt_smpl/hf/G1_WBT_SMPL_Brainco_Operate_Washing_Machine",
+      "path": "/work/apoman123/robotics_datasets/g1_wbt_smpl/hf/G1_WBT_SMPL_Brainco_Operate_Washing_Machine",
       "urdf": "/home/apoman123/DA-GET-BFM/assets/urdf/g1_29dof_rev_1_0.urdf"
     },
     {
@@ -5715,7 +5715,7 @@
         "right_ankle_roll_joint"
       ],
       "name": "g1_wbt_smpl_brainco_organize_washtable",
-      "path": "/mnt/e/robotics_datasets/g1_wbt_smpl/hf/G1_WBT_SMPL_Brainco_Organize_Washtable",
+      "path": "/work/apoman123/robotics_datasets/g1_wbt_smpl/hf/G1_WBT_SMPL_Brainco_Organize_Washtable",
       "urdf": "/home/apoman123/DA-GET-BFM/assets/urdf/g1_29dof_rev_1_0.urdf"
     },
     {
@@ -5813,7 +5813,7 @@
         "right_ankle_roll_joint"
       ],
       "name": "g1_wbt_smpl_brainco_pick_up_cushions",
-      "path": "/mnt/e/robotics_datasets/g1_wbt_smpl/hf/G1_WBT_SMPL_Brainco_Pick_Up_Cushions",
+      "path": "/work/apoman123/robotics_datasets/g1_wbt_smpl/hf/G1_WBT_SMPL_Brainco_Pick_Up_Cushions",
       "urdf": "/home/apoman123/DA-GET-BFM/assets/urdf/g1_29dof_rev_1_0.urdf"
     },
     {
@@ -5911,7 +5911,7 @@
         "right_ankle_roll_joint"
       ],
       "name": "g1_wbt_smpl_brainco_pick_vegetables",
-      "path": "/mnt/e/robotics_datasets/g1_wbt_smpl/hf/G1_WBT_SMPL_Brainco_Pick_Vegetables",
+      "path": "/work/apoman123/robotics_datasets/g1_wbt_smpl/hf/G1_WBT_SMPL_Brainco_Pick_Vegetables",
       "urdf": "/home/apoman123/DA-GET-BFM/assets/urdf/g1_29dof_rev_1_0.urdf"
     },
     {
@@ -6009,7 +6009,7 @@
         "right_ankle_roll_joint"
       ],
       "name": "g1_wbt_smpl_brainco_plastic_box_parts",
-      "path": "/mnt/e/robotics_datasets/g1_wbt_smpl/hf/G1_WBT_SMPL_Brainco_Plastic_Box_Parts",
+      "path": "/work/apoman123/robotics_datasets/g1_wbt_smpl/hf/G1_WBT_SMPL_Brainco_Plastic_Box_Parts",
       "urdf": "/home/apoman123/DA-GET-BFM/assets/urdf/g1_29dof_rev_1_0.urdf"
     },
     {
@@ -6107,7 +6107,7 @@
         "right_ankle_roll_joint"
       ],
       "name": "g1_wbt_smpl_brainco_supermarket_shelf_organizing",
-      "path": "/mnt/e/robotics_datasets/g1_wbt_smpl/hf/G1_WBT_SMPL_Brainco_Supermarket_Shelf_Organizing",
+      "path": "/work/apoman123/robotics_datasets/g1_wbt_smpl/hf/G1_WBT_SMPL_Brainco_Supermarket_Shelf_Organizing",
       "urdf": "/home/apoman123/DA-GET-BFM/assets/urdf/g1_29dof_rev_1_0.urdf"
     },
     {
@@ -6205,7 +6205,7 @@
         "right_ankle_roll_joint"
       ],
       "name": "g1_wbt_smpl_brainco_take_out_the_rubbish",
-      "path": "/mnt/e/robotics_datasets/g1_wbt_smpl/hf/G1_WBT_SMPL_Brainco_Take_Out_The_Rubbish",
+      "path": "/work/apoman123/robotics_datasets/g1_wbt_smpl/hf/G1_WBT_SMPL_Brainco_Take_Out_The_Rubbish",
       "urdf": "/home/apoman123/DA-GET-BFM/assets/urdf/g1_29dof_rev_1_0.urdf"
     },
     {
@@ -6303,7 +6303,7 @@
         "right_ankle_roll_joint"
       ],
       "name": "g1_wbt_smpl_brainco_tidy_bed_pick_up_clothes",
-      "path": "/mnt/e/robotics_datasets/g1_wbt_smpl/hf/G1_WBT_SMPL_Brainco_Tidy_Bed_Pick_Up_Clothes",
+      "path": "/work/apoman123/robotics_datasets/g1_wbt_smpl/hf/G1_WBT_SMPL_Brainco_Tidy_Bed_Pick_Up_Clothes",
       "urdf": "/home/apoman123/DA-GET-BFM/assets/urdf/g1_29dof_rev_1_0.urdf"
     },
     {
@@ -6401,7 +6401,7 @@
         "right_ankle_roll_joint"
       ],
       "name": "g1_wbt_smpl_brainco_tidy_up_slippers",
-      "path": "/mnt/e/robotics_datasets/g1_wbt_smpl/hf/G1_WBT_SMPL_Brainco_Tidy_Up_Slippers",
+      "path": "/work/apoman123/robotics_datasets/g1_wbt_smpl/hf/G1_WBT_SMPL_Brainco_Tidy_Up_Slippers",
       "urdf": "/home/apoman123/DA-GET-BFM/assets/urdf/g1_29dof_rev_1_0.urdf"
     },
     {
@@ -6499,7 +6499,7 @@
         "right_ankle_roll_joint"
       ],
       "name": "g1_wbt_smpl_brainco_walk_to_table_put_cups_and_rack_plates_in_dishwasher",
-      "path": "/mnt/e/robotics_datasets/g1_wbt_smpl/hf/G1_WBT_SMPL_Brainco_Walk_To_Table_Put_Cups_And_Rack_Plates_In_Dishwasher",
+      "path": "/work/apoman123/robotics_datasets/g1_wbt_smpl/hf/G1_WBT_SMPL_Brainco_Walk_To_Table_Put_Cups_And_Rack_Plates_In_Dishwasher",
       "urdf": "/home/apoman123/DA-GET-BFM/assets/urdf/g1_29dof_rev_1_0.urdf"
     },
     {
@@ -6597,7 +6597,7 @@
         "right_ankle_roll_joint"
       ],
       "name": "g1_wbt_smpl_inspire_empty_folder_in_cabinet",
-      "path": "/mnt/e/robotics_datasets/g1_wbt_smpl/hf/G1_WBT_SMPL_Inspire_Empty_Folder_In_Cabinet",
+      "path": "/work/apoman123/robotics_datasets/g1_wbt_smpl/hf/G1_WBT_SMPL_Inspire_Empty_Folder_In_Cabinet",
       "urdf": "/home/apoman123/DA-GET-BFM/assets/urdf/g1_29dof_rev_1_0.urdf"
     },
     {
@@ -6695,7 +6695,7 @@
         "right_ankle_roll_joint"
       ],
       "name": "g1_wbt_smpl_inspire_pick_up_cushions",
-      "path": "/mnt/e/robotics_datasets/g1_wbt_smpl/hf/G1_WBT_SMPL_Inspire_Pick_Up_Cushions",
+      "path": "/work/apoman123/robotics_datasets/g1_wbt_smpl/hf/G1_WBT_SMPL_Inspire_Pick_Up_Cushions",
       "urdf": "/home/apoman123/DA-GET-BFM/assets/urdf/g1_29dof_rev_1_0.urdf"
     },
     {
@@ -6793,7 +6793,7 @@
         "right_ankle_roll_joint"
       ],
       "name": "g1_wbt_smpl_inspire_pick_vegetables",
-      "path": "/mnt/e/robotics_datasets/g1_wbt_smpl/hf/G1_WBT_SMPL_Inspire_Pick_Vegetables",
+      "path": "/work/apoman123/robotics_datasets/g1_wbt_smpl/hf/G1_WBT_SMPL_Inspire_Pick_Vegetables",
       "urdf": "/home/apoman123/DA-GET-BFM/assets/urdf/g1_29dof_rev_1_0.urdf"
     },
     {
@@ -6891,7 +6891,7 @@
         "right_ankle_roll_joint"
       ],
       "name": "g1_wbt_smpl_inspire_plastic_box_parts",
-      "path": "/mnt/e/robotics_datasets/g1_wbt_smpl/hf/G1_WBT_SMPL_Inspire_Plastic_Box_Parts",
+      "path": "/work/apoman123/robotics_datasets/g1_wbt_smpl/hf/G1_WBT_SMPL_Inspire_Plastic_Box_Parts",
       "urdf": "/home/apoman123/DA-GET-BFM/assets/urdf/g1_29dof_rev_1_0.urdf"
     },
     {
@@ -6989,7 +6989,7 @@
         "right_ankle_roll_joint"
       ],
       "name": "g1_wbt_smpl_inspire_tidy_bed_pick_up_clothes",
-      "path": "/mnt/e/robotics_datasets/g1_wbt_smpl/hf/G1_WBT_SMPL_Inspire_Tidy_Bed_Pick_Up_Clothes",
+      "path": "/work/apoman123/robotics_datasets/g1_wbt_smpl/hf/G1_WBT_SMPL_Inspire_Tidy_Bed_Pick_Up_Clothes",
       "urdf": "/home/apoman123/DA-GET-BFM/assets/urdf/g1_29dof_rev_1_0.urdf"
     },
     {
@@ -7087,7 +7087,7 @@
         "right_ankle_roll_joint"
       ],
       "name": "g1_wbt_smpl_inspire_tidy_up_slippers",
-      "path": "/mnt/e/robotics_datasets/g1_wbt_smpl/hf/G1_WBT_SMPL_Inspire_Tidy_Up_Slippers",
+      "path": "/work/apoman123/robotics_datasets/g1_wbt_smpl/hf/G1_WBT_SMPL_Inspire_Tidy_Up_Slippers",
       "urdf": "/home/apoman123/DA-GET-BFM/assets/urdf/g1_29dof_rev_1_0.urdf"
     },
     {
@@ -7185,13 +7185,13 @@
         "right_ankle_roll_joint"
       ],
       "name": "g1_wbt_smpl_inspire_walk_to_table_put_cups_and_rack_plates_in_dishwasher",
-      "path": "/mnt/e/robotics_datasets/g1_wbt_smpl/hf/G1_WBT_SMPL_Inspire_Walk_To_Table_Put_Cups_And_Rack_Plates_In_Dishwasher",
+      "path": "/work/apoman123/robotics_datasets/g1_wbt_smpl/hf/G1_WBT_SMPL_Inspire_Walk_To_Table_Put_Cups_And_Rack_Plates_In_Dishwasher",
       "urdf": "/home/apoman123/DA-GET-BFM/assets/urdf/g1_29dof_rev_1_0.urdf"
     },
     {
       "type": "huggingface",
       "name": "xwbc_unitree_g1_29dof_amass",
-      "path": "/mnt/e/robotics_datasets/xwbc_g1_amass/hf",
+      "path": "/work/apoman123/robotics_datasets/xwbc_g1_amass/hf",
       "urdf": "/home/apoman123/DA-GET-BFM/assets/urdf/g1_29dof_rev_1_0.urdf",
       "joint_names": [
         "left_hip_pitch_joint",
@@ -7242,7 +7242,7 @@
     {
       "type": "huggingface",
       "name": "locomujoco_g1_defaultdatasets",
-      "path": "/mnt/e/robotics_datasets/locomujoco_g1/defaultdatasets/hf",
+      "path": "/work/apoman123/robotics_datasets/locomujoco_g1/defaultdatasets/hf",
       "urdf": "/home/apoman123/DA-GET-BFM/assets/urdf/g1_29dof_rev_1_0.urdf",
       "joint_names": [
         "left_hip_pitch_joint",
@@ -7282,7 +7282,7 @@
     {
       "type": "huggingface",
       "name": "locomujoco_g1_lafan1",
-      "path": "/mnt/e/robotics_datasets/locomujoco_g1/lafan1/hf",
+      "path": "/work/apoman123/robotics_datasets/locomujoco_g1/lafan1/hf",
       "urdf": "/home/apoman123/DA-GET-BFM/assets/urdf/g1_29dof_rev_1_0.urdf",
       "joint_names": [
         "left_hip_pitch_joint",
@@ -7383,7 +7383,7 @@
         "kd": 1.5
       },
       "name": "g1_dex3_toastedbread_dataset",
-      "path": "/mnt/e/robotics_datasets/g1_dex3/hf/G1_Dex3_ToastedBread_Dataset",
+      "path": "/work/apoman123/robotics_datasets/g1_dex3/hf/G1_Dex3_ToastedBread_Dataset",
       "urdf": "/home/apoman123/DA-GET-BFM/assets/urdf/g1_29dof_rev_1_0.urdf"
     }
   ]

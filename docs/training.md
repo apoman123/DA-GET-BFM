@@ -675,6 +675,21 @@ Processed features and labels are cached as Hugging Face `datasets` Arrow files 
 and the URDF contents, so the analytic dynamics run once per dataset rather than once per
 epoch. Episodes, not frames, are split between train and eval.
 
+To build this cache locally before starting the trainer, run the preprocessing
+entry point from the repository root with the same training JSON:
+
+```bash
+uv run python scripts/preprocess_physics_data.py configs/pretraining/selected_large.json
+```
+
+It reads `data_config`, `cache_dir`, and `preprocess_workers` from that JSON,
+reports source and episode progress, and then exits without initializing a
+model. The later training run reuses the completed cache. Use `--workers N` to
+change only the number of preprocessing processes; this does not change the
+cache key.
+Keep `rebuild_cache` set to `false` in the training JSON so pretraining reuses
+the cache prepared by this script.
+
 | File | Content |
 |---|---|
 | `frames-00000.arrow`, … | One row per frame, one list column per per-frame tensor (flattened). Each file opens with `datasets.Dataset.from_file(path)`; `ProcessedEpisodes(path).dataset()` concatenates them. |

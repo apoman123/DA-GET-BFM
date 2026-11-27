@@ -69,12 +69,12 @@ repository root. The scripts have no Slurm dependencies, so submit only the
 stage you want. You can run the download and conversion stages again; they
 skip completed files.
 
-The preprocessing job calls the same `build_physics_datasets()` function that
-pretraining calls and writes a reusable Arrow cache. Its `DATA_CONFIG` and
-`CACHE_DIR` must match `data_config` and `cache_dir` in the pretraining JSON;
-otherwise pretraining will build another cache. A change to the data config or
-URDF contents creates a new cache key. An interrupted run reuses completed
-sources.
+The preprocessing job runs `scripts/preprocess_physics_data.py` with the same
+`PRETRAIN_CONFIG` JSON used by pretraining. It calls the same
+`build_physics_datasets()` function and writes a reusable Arrow cache. A change
+to the data config or URDF contents creates a new cache key. An interrupted run
+reuses completed sources. The script can also run locally from the repository
+root with `uv run python scripts/preprocess_physics_data.py`.
 
 Use `squeue -u "$USER"` or `sacct -j JOB_ID` to check status. Slurm logs are
 `logs/<job-name>-<job-id>.out` and `.err` in the repository root. Create

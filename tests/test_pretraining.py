@@ -5,6 +5,7 @@ import contextlib
 import importlib.util
 import io
 import json
+import subprocess
 import sys
 import tempfile
 import unittest
@@ -188,6 +189,47 @@ class PretrainingPipelineTest(unittest.TestCase):
         with contextlib.redirect_stderr(output):
             build_physics_datasets(config_path, cache_dir=cache_dir, progress=True)
         self.assertIn("Using processed-data cache:", output.getvalue())
+
+    def test_local_preprocess_entry_point_reuses_training_cache(self) -> None:
+        """Build and reuse the cache named by a pretraining JSON file.
+
+        Returns:
+            None: Checks that the CLI writes one complete cache and reuses it
+            when launched again with the same training configuration.
+        """
+        root = Path(self.directory.name)
+        cache_dir = root / "local_preprocess_cache"
+        training_config = root / "local_preprocess.json"
+        training_config.write_text(
+            json.dumps(
+                {
+                    "data_config": str(self.config_path),
+                    "cache_dir": str(cache_dir),
+                    "preprocess_workers": 1,
+                }
+            ),
+            encoding="utf-8",
+        )
+        project_root = Path(__file__).resolve().parents[1]
+        command = [
+            sys.executable,
+            str(project_root / "scripts/preprocess_physics_data.py"),
+            str(training_config),
+        ]
+        first = subprocess.run(
+            command, cwd=project_root, capture_output=True, text=True, check=True
+        )
+        self.assertIn("Preprocessing ready:", first.stdout)
+        self.assertIn("Processed-data cache ready:", first.stderr)
+        completed = list(cache_dir.glob("*/complete"))
+        self.assertEqual(len(completed), 1)
+        marker_time = completed[0].stat().st_mtime_ns
+
+        second = subprocess.run(
+            command, cwd=project_root, capture_output=True, text=True, check=True
+        )
+        self.assertIn("Using processed-data cache:", second.stderr)
+        self.assertEqual(completed[0].stat().st_mtime_ns, marker_time)
 
     def test_preprocessing_resumes_completed_sources_from_configured_cache(self) -> None:
         """Reuse the first source after the next source fails to load.

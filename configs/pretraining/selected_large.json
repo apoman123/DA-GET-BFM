@@ -1,6 +1,6 @@
 {
   "data_config": "/home/apoman123/DA-GET-BFM/configs/data/pretraining_selected.json",
-  "cache_dir": "/home/apoman123/DA-GET-BFM/.cache/physics_data",
+  "cache_dir": "/mnt/e/robotics_datasets/physics_data",
   "output_dir": "/home/apoman123/DA-GET-BFM/runs/pretraining_large_selected",
   "preset": "large",
   "dimensionless_physics": true,
@@ -20,7 +20,7 @@
   "seed": 0,
   "gradient_accumulation_steps": 4,
   "bf16": true,
-  "preprocess_workers": 8,
+  "preprocess_workers": 4,
   "dataloader_num_workers": 8,
   "num_train_epochs": 1
 }

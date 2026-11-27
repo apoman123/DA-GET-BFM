@@ -2,7 +2,8 @@
 
 [← Back to the README](../README.md)
 
-The seven auxiliary tasks that train the encoder, where their labels come from (never from an estimated torque), how to run them with the Hugging Face `Trainer`, and the data config format.
+The seven core tasks and optional auxiliary losses that train the encoder,
+their labels, physics masking, the Hugging Face `Trainer`, and data configuration.
 
 ## Contents
 
@@ -17,6 +18,8 @@ The seven auxiliary tasks that train the encoder, where their labels come from (
   - [R-inv. Inverse response (R⁻¹)](#r-inv-inverse-response)
   - [D. Motor feasibility](#d-motor-feasibility)
   - [E. Action effect](#e-action-effect)
+  - [Optional losses and implementation locations](#optional-losses-and-implementation-locations)
+  - [Masked physics modeling](#masked-physics-modeling)
   - [Removed: F. Rigid-body dynamics consistency](#removed-f-rigid-body-dynamics-consistency)
 - [Training with the Hugging Face Trainer](#training-with-the-hugging-face-trainer)
   - [Watching training in TensorBoard](#watching-training-in-tensorboard)
@@ -152,8 +155,19 @@ confidence weight yields zero.
 FD and ID use $w_b=1$ for exact simulated torque, $w_b=$ `measured_torque_weight`
 (default 0) for torque-sensor data, and $w_b=0$ otherwise. The total objective
 is $\mathcal L=\sum_{k}\alpha_k\mathcal L_k$, where $k$ runs over A, B, C, R,
-R⁻¹, D and E and $\alpha_k$ is the configured task weight, 1 by default.
+R⁻¹, D and E plus any enabled optional losses below. $\alpha_k$ is the
+configured task weight, 1 by default.
 Every coefficient denoted $\lambda$ below defaults to 1.
+
+The Euclidean formulas below describe `acceleration_metric="euclidean"`.
+For `"mass"`, joint FD and R errors use
+$e^T\widetilde M e/N_b$, with the diagonal-normalized mass matrix and masked
+rows and columns, instead of mean squared error. The base terms remain MSE.
+With `target_normalization="physics"`, acceleration and action-effect scales
+come from the robot specification and Froude units rather than trajectory RMS;
+the loss reductions stay the same. Rotation distance uses a cosine clamped to
+$[-1+10^{-6},1-10^{-6}]$ for stable gradients; identical rotations therefore
+have a small positive squared-error floor (approximately $2\times10^{-6}$).
 
 ### A. Forward kinematics
 
@@ -470,6 +484,139 @@ When a recording has no command and no known torque, the action features are
 zero (as at the first frame of an episode) and the head predicts the next frame
 from the state and its history alone; the target is still exact kinematics.
 
+### Optional losses and implementation locations
+
+All task losses are assembled in `DaGetForPhysicsPretraining.forward` in
+[`model/pretraining.py`](../model/pretraining.py). The encoder, heads, targets,
+and logging have separate responsibilities:
+
+| Loss | Prediction and reduction | Labels and eligibility |
+|---|---|---|
+| `fk` | `fk_head`; XYZ squared-error sum plus squared SO(3) distance; `masked_joint_mean` | `process_episode` in `model/training/episodes.py`; all valid joints |
+| `fd` | Interface and/or `fd_mixer`, `fd_head`, `fd_base_head`; `_acceleration_loss` plus base MSE | `PhysicsDataCollator` in `model/training/dataset.py`; positive torque-label weight, actuated joints; separate base mask |
+| `id` | Interface and/or `id_mixer`, `id_head`; torque error projected in physical units before normalization | Same collator; torque-label weight and trusted contacts |
+| `response` | Interface and/or `response_mixer`, `response_head`, `response_base_head`; `_acceleration_loss` plus base MSE | Collator draws a fresh torque change and multiplies by the cached analytic response operator; trusted support/contact frames |
+| `inverse_response` | Interface and/or `inverse_response_mixer`, `inverse_response_head`; projected peak-normalized torque error | Same fresh torque change; actuated joints in valid response frames |
+| `motor` | `motor_head`; mean BCE over two flags plus Huber averaged over defined margins | `process_episode` motor labels, normalized/masked by the collator; actuated joints with valid proposals |
+| `effect` | `effect_head`; position, rotation, linear and angular velocity errors | `process_episode` next-frame kinematics; selected end-effectors and valid transitions |
+| `operator`, `consistency` | `_operator_losses`; relative Frobenius errors | Cached `response_operator`, valid response frames |
+| `effect_rollout` | `_effect_rollout`; differentiable integration and analytic FK | Known-torque transitions, `effect_mask`, and `structure.graphs` |
+| `contact` | `contact_head`; joint-masked BCE with logits | `_contact_labels` maps trusted per-link contact flags to owning joints |
+| `centroidal` | `centroidal_head` on the pooled embedding; masked component MSE | `model/centroidal.py`, cached episode targets and collator group masks |
+| `sysid` | `sysid_head`; component-masked MSE, then joint/sample reduction | Collator `_spec_noise`; valid perturbed specification fields |
+| `mask` | `mask_heads`; scaled-feature reconstruction at masked joints | `_physics_token_mask` and `_mask_targets`; details below |
+
+`PhysicsPretrainingTrainer.compute_loss` in
+[`model/training/trainer.py`](../model/training/trainer.py) forwards the model's
+weighted sum to the optimizer. It records detached, unweighted components as
+`loss_<name>` and `eval_loss_<name>`. A missing/disabled head contributes no
+component. The mask component is intentionally absent during evaluation.
+
+**Structured interface.** `head_type="linear"` predicts a generalized response
+operator $\hat G$, inverse $\hat K$, and drift $\hat f$ from the embeddings.
+FD, ID, R and R⁻¹ use these readouts in `interface_units`;
+`"linear_residual"` adds the graph mixer predictions as residuals.
+With valid response labels, two further losses apply, where $V$ selects valid
+base/joint rows and joint columns and $\widetilde G$ is the analytic response
+operator converted to the same units:
+
+$$
+L_{\mathrm{operator},b}=
+\frac{\|V_b\odot(\hat G_b-\widetilde G_b)\|_F^2}
+{\max(\varepsilon,\|V_b\odot\widetilde G_b\|_F^2)},\qquad
+L_{\mathrm{consistency},b}=
+\frac{\|V_b\odot(\hat G_b\hat K_b\hat G_b-\hat G_b)\|_F^2}
+{\max(\varepsilon,\|V_b\odot\hat G_b\|_F^2)}.
+$$
+
+Each is averaged over states with any valid response label. They return zero
+when there are no eligible states. These losses are independent of the outer
+`operator_weight` and `consistency_weight`, which multiply them in the total.
+
+**Rollout effect.** `effect_mode="rollout"` requires an interface and adds
+`effect_rollout`; it retains the direct `effect` loss. The interface predicts
+acceleration, integrates $\dot q'=\dot q+\Delta t\hat{\ddot q}$,
+$q'=q+\Delta t\dot q'$, and evaluates analytic FK, including predicted base
+motion for floating robots. This loss averages normalized displacement error
+plus squared rotation distance over joints selected by `effect_mask`, then
+eligible known-torque variants. Despite evaluating FK for every joint, the
+loss supervises selected end-effectors only. It does not include the direct
+effect head's velocity terms or its internal lambda coefficients.
+
+**Contact and centroidal heads.** `contact_head=true` enables BCE at joints
+whose trusted contact labels are known, using the same per-joint/sample
+reduction as the core tasks. `centroidal_head=true` predicts 21 dimensionless
+quantities: CoM (3), linear/angular momentum (6), symmetric composite inertia
+(6), and momentum rates (6). Geometry, momentum, and rate groups have separate
+availability masks. Squared error is averaged over available components per
+state, then over the entire batch; a state with no available components
+contributes zero in this particular reduction.
+
+**System identification.** `sysid_head=true` enables prediction of four
+$\log(\mathrm{true}/\mathrm{given})$ specification factors: mass/inertia,
+peak effort, continuous effort, and armature. Labels are created online by the
+collator's `spec_noise`; only configured noise fields with valid nonzero
+specifications are supervised. Component MSE is averaged within each joint,
+then valid joints and states. Enabling the head without `spec_noise` creates
+no sysid labels and hence no `sysid` component.
+
+### Masked physics modeling
+
+`physics_mask_ratio` enables an auxiliary reconstruction objective in the
+pretraining model. It operates online on every training forward pass;
+preprocessing stores the original physics features, not randomly masked data.
+For example, `"physics_mask_ratio": 0.15` in the pretraining JSON selects each
+valid joint independently with probability 0.15 in each of two groups:
+`rigid_body` and `actuator`. The training entry point also enables the encoder's
+`physics_masking` parameters. Python callers must enable both explicitly.
+
+`_physics_token_mask` samples each group independently and excludes padding.
+If all valid tokens of a group were selected for one robot, its first valid
+joint is left visible. A single-joint robot is therefore never masked. The
+root token, dynamics tokens, observations, and mass-matrix bias remain visible.
+This is partial physics-memory masking, not removal of all information about
+a joint. `joint_features="cross_embodiment"` can repeat masked attributes in
+the observation tokens; use `"da_get_zero"` for the intended setup.
+
+In `DaGetEncoder.build_physics_memory` in
+[`model/modeling_da_get.py`](../model/modeling_da_get.py), selected physics
+token embeddings are replaced by a learned group-specific mask embedding
+before attention keys and values are projected. Tokens remain in attention;
+their raw features are not replaced with zero. Linear `mask_heads` then
+reconstruct each selected joint's physics features from its encoder embedding.
+`_mask_targets` uses the same `PhysicsTokenizer.scaled` transformation as the
+encoder: optionally divide by dimensionless units, then use
+$\operatorname{asinh}(x/s)$ for components with positive schema scale $s$;
+components with scale zero remain linear.
+
+For group $g$ with $D_g$ features and sampled mask $m^g$:
+
+$$
+\ell^g_{b,i}=\frac{1}{D_g}\sum_d
+(\hat x^g_{b,i,d}-\operatorname{scaled}(x^g_{b,i,d}))^2,
+\qquad L_{\mathrm{mask}}=
+\frac{1}{|\mathcal G'|}\sum_{g\in\mathcal G'}
+\mathcal A(\ell^g,m^g,1).
+$$
+
+$\mathcal G'$ contains only groups with at least one masked token in the
+batch. Each group averages masked joints per robot first, then robots with a
+nonempty mask. `mask_weight` multiplies this loss in the total. No `mask`
+component is emitted when nothing is selected. Masking is disabled under
+`model.eval()` and at inference, so there is no `eval_loss_mask`. It does not
+require a new preprocessed cache when only the ratio or weight changes.
+Set `physics_mask_ratio=0` to disable masking itself; setting only
+`mask_weight=0` removes the reconstruction term but still masks physics memory
+for the other tasks.
+
+The regression tests independently reconstruct the seven core task formulas
+in `test_seven_losses_match_documented_formulas` (`tests/test_pretraining.py`).
+`test_optional_losses_and_mask_reconstruction_formulas` and
+`test_rollout_effect_matches_constant_velocity_kinematics`
+(`tests/test_zero_shot.py`) check the seven optional losses, base terms,
+mask-token gradients, and evaluation behavior. These are numerical checks on
+small fixtures, not evidence of convergence on the full training collection.
+
 ### Removed: F. Rigid-body dynamics consistency
 
 Task F checked whether B's predicted acceleration satisfied the fixed-base
@@ -724,6 +871,31 @@ processed frames. The disk use is about 25 KB per frame for G1 with two probe va
 1.2 ms against 0.3 ms from memory, small next to collating a batch of 64 (about 250 ms on
 one CPU thread); set `--dataloader_num_workers` to hide both. Caches of earlier versions
 (`<hash>.pt`) are not read; delete them.
+
+**Preprocessing and file-descriptor limits.** A traceback in
+`multiprocessing/resource_sharer.py` or `reduction.send_handle` with
+`OSError: [Errno 24] Too many open files` can result from sending retained CPU
+trajectory tensors through a multiprocessing queue. PyTorch's default
+`file_descriptor` sharing strategy holds a descriptor per shared storage; a
+bounded number of pending tasks alone does not release descriptors on the
+original trajectory objects. See the
+[PyTorch sharing-strategy documentation](https://docs.pytorch.org/docs/stable/multiprocessing).
+
+`_processed_episodes` now serializes input tasks to ordinary pickle bytes
+before submitting them to the process pool. Workers return NumPy arrays, so
+neither direction uses PyTorch's descriptor-based tensor transport. This adds
+copying/serialization overhead in exchange for avoiding descriptor accumulation
+across thousands of episodes. The bytes are generated internally from loaded
+objects and never accepted directly from a downloaded pickle file.
+
+After updating the code, restart preprocessing with the same configuration and
+cache directory. Keep `<hash>.incomplete/` and leave `rebuild_cache=false`.
+Completed source checkpoints are reused; the source that was in progress
+starts again from its first episode. For example, a failure at 84/88 sources
+inside xwbc preserves the 84 completed sources, but not the 10,827 episodes of
+that unfinished source. To finish a run with the previous code, use
+`--workers 1` on `scripts/preprocess_physics_data.py`; serial preprocessing
+avoids this process-pool tensor transport. No cache-format change is required.
 
 ### Values taken from papers in the shipped configs
 

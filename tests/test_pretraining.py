@@ -164,6 +164,114 @@ class PretrainingPipelineTest(unittest.TestCase):
         self.assertEqual(len(again.train), len(self.datasets.train))
         self.assertEqual((entries[0] / "complete").stat().st_mtime_ns, marker_time)
 
+    def test_preprocessing_many_episodes_under_low_descriptor_limit(self) -> None:
+        """Process many retained trajectories with a 128-descriptor limit.
+
+        Returns:
+            None: Verifies parallel processing completes without accumulating
+            tensor-storage descriptors as more trajectories enter the workers.
+        """
+        root = Path(self.directory.name)
+        write_lerobot_dataset(root / "many_episodes", episodes=160, frames=12)
+        source = dict(self.config["sources"][1], path="many_episodes")
+        config_path = root / "many_episodes.json"
+        config_path.write_text(json.dumps({"sources": [source]}), encoding="utf-8")
+        code = """
+import resource
+import sys
+from model.training import dataset
+
+soft, hard = resource.getrlimit(resource.RLIMIT_NOFILE)
+resource.setrlimit(resource.RLIMIT_NOFILE, (min(128, soft), hard))
+dataset.PARALLEL_MIN_FRAMES = 1
+result = dataset.build_physics_datasets(sys.argv[1], sys.argv[2], workers=2)
+print('processed', len(result.train.episodes) + len(result.eval.episodes))
+"""
+        result = subprocess.run(
+            [sys.executable, "-c", code, str(config_path), str(root / "low_fd_cache")],
+            capture_output=True, text=True, timeout=120,
+        )
+        self.assertEqual(result.returncode, 0, result.stderr)
+        self.assertIn("processed 160", result.stdout)
+
+    def test_seven_losses_match_documented_formulas(self) -> None:
+        """Recompute the seven task losses from predictions and collator labels.
+
+        Returns:
+            None: Checks task reductions, projected torque errors, margin Huber
+            loss, rotation errors, and the weighted total against explicit sums.
+        """
+        batch = self.batch()
+        model = self.model().eval()
+        model.config.loss_weights.update({name: (index + 1) / 3 for index, name in enumerate(LOSS_NAMES)})
+        output = model(**batch)
+        prediction = output.predictions
+        config = model.config
+
+        def average(values: torch.Tensor, mask: torch.Tensor,
+                    weights: torch.Tensor | None = None) -> torch.Tensor:
+            """Average joints and then eligible samples using explicit indexing.
+
+            Args:
+                values (torch.Tensor): Per-joint errors of shape [B, J].
+                mask (torch.Tensor): Boolean eligible-joint mask of shape [B, J].
+                weights (torch.Tensor | None): Optional nonnegative [B] weights.
+
+            Returns:
+                torch.Tensor: Weighted mean, or differentiable zero if empty.
+            """
+            rows = [i for i in range(len(values)) if bool(mask[i].any())]
+            if not rows:
+                return values.sum() * 0
+            losses = torch.stack([values[i][mask[i]].mean() for i in rows])
+            if weights is None:
+                return losses.mean()
+            return (losses * weights[rows]).sum() / weights[rows].sum().clamp_min(1e-12)
+
+        expected = {}
+        fk = (prediction["fk_position"] - batch["fk_position"]).square().sum(-1)
+        fk += geodesic_distance(prediction["fk_rotation"], batch["fk_rotation"]).square()
+        expected["fk"] = average(fk, batch["joint_mask"])
+        expected["fd"] = average(
+            (prediction["fd_acceleration"] - batch["fd_target"]).square(),
+            batch["fd_mask"], batch["torque_label_weight"],
+        )
+        for name, predicted, target, mask, scale_key, projection_key, weights in (
+            ("id", "id_torque", "id_target", "id_mask", "torque_scale",
+             "contact_projection", batch["torque_label_weight"]),
+            ("inverse_response", "inverse_response_torque", "inverse_response_target",
+             "inverse_response_mask", "response_torque_scale", "response_projection", None),
+        ):
+            scale = batch[scale_key] + config.epsilon
+            error = (prediction[predicted] - batch[target]) * scale
+            error = torch.einsum("bij,bj->bi", batch[projection_key], error) / scale
+            expected[name] = average(error.square(), batch[mask], weights)
+        expected["response"] = average(
+            (prediction["response_acceleration"] - batch["response_target"]).square(),
+            batch["response_mask"],
+        )
+        logits = prediction["motor_logits"]
+        bce = (torch.nn.functional.softplus(logits) - logits * batch["motor_flags"]).mean(-1)
+        residual = (prediction["motor_margins"] - batch["motor_margins"]).abs()
+        delta = config.huber_delta
+        huber = torch.where(residual <= delta, residual.square() / 2,
+                            delta * (residual - delta / 2))
+        valid = batch["motor_margin_mask"]
+        margins = (huber * valid).sum(-1) / valid.sum(-1).clamp_min(1)
+        expected["motor"] = average(bce + margins, batch["motor_mask"])
+        effect = sum(
+            (prediction[f"effect_{key}"] - batch[f"effect_{key}"]).square().sum(-1)
+            for key in ("delta_position", "linear_velocity", "angular_velocity")
+        )
+        effect += geodesic_distance(prediction["effect_rotation"], batch["effect_rotation"]).square()
+        expected["effect"] = average(effect, batch["effect_mask"])
+        self.assertEqual(set(expected), set(output.loss_components))
+        for name, value in expected.items():
+            torch.testing.assert_close(value, output.loss_components[name], msg=name)
+        torch.testing.assert_close(
+            output.loss, sum(config.loss_weights[name] * value for name, value in expected.items())
+        )
+
     def test_preprocessing_reports_source_progress_and_cache_reuse(self) -> None:
         """Report episode completion during a build and identify a later cache hit.
 

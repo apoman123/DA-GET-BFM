@@ -4,6 +4,7 @@ import json
 import math
 import tempfile
 import unittest
+from unittest import mock
 from dataclasses import replace
 from pathlib import Path
 
@@ -37,6 +38,7 @@ from model.pretraining import (
     DaGetForPhysicsPretraining,
     DaGetPhysicsPretrainingConfig,
     gauss_metric_error,
+    geodesic_distance,
     interface_units,
 )
 from model.rl.observation import StateView
@@ -445,6 +447,135 @@ class DataPipelineTest(unittest.TestCase):
         peak = batch["response_torque_scale"]
         error = (projection @ ((change - batch["inverse_response_target"]) * peak)[..., None]).squeeze(-1)
         self.assertLess(float(error[batch["inverse_response_mask"]].abs().max()), 1e-2 * float(peak.max()))
+
+    def test_optional_losses_and_mask_reconstruction_formulas(self) -> None:
+        """Check optional loss formulas and training-only masking numerically.
+
+        Returns:
+            None: Verifies contact, centroidal, sysid, mask, operator, and
+            consistency reductions, plus gradients into learned mask tokens.
+        """
+        encoder = tiny_encoder_config(self.datasets.token_size, physics_masking=True)
+        config = DaGetPhysicsPretrainingConfig.from_encoder_config(
+            encoder, head_type="linear_residual", physics_mask_ratio=0.5,
+            use_contact_head=True, use_centroidal_head=True, use_sysid_head=True,
+        )
+        model = DaGetForPhysicsPretraining(config).train()
+        batch = self.collate(
+            [self.datasets.train[i] for i in range(len(self.datasets.train))],
+            spec_noise={key: (0.8, 1.2) for key in SPEC_NOISE_KEYS},
+        )
+        batch["contact_mask"] = batch["joint_mask"].clone()
+        sampled = model._physics_token_mask(batch)
+        for group in sampled:
+            self.assertFalse(bool((sampled[group] & ~batch["joint_mask"]).any()))
+            self.assertTrue(bool((sampled[group].sum(-1) < batch["joint_mask"].sum(-1)).all()))
+        chosen = torch.zeros_like(batch["joint_mask"])
+        chosen[:, 0] = True
+        token_mask = {group: chosen.clone() for group in ("rigid_body", "actuator")}
+        with mock.patch.object(model, "_physics_token_mask", return_value=token_mask):
+            output = model(**batch)
+        hidden, predictions = output.joint_embeddings, output.predictions
+        expected = {}
+        logits = predictions["contact_logits"]
+        bce = torch.nn.functional.softplus(logits) - logits * batch["contact_target"]
+        expected["contact"] = torch.stack([
+            bce[i][batch["contact_mask"][i]].mean() for i in range(len(logits))
+        ]).mean()
+        valid = batch["centroidal_mask"]
+        squared = (predictions["centroidal"] - batch["centroidal_target"]).square()
+        expected["centroidal"] = ((squared * valid).sum(-1) / valid.sum(-1).clamp_min(1)).mean()
+        valid = batch["sysid_mask"]
+        squared = (predictions["sysid"] - batch["sysid_target"]).square()
+        per_joint = (squared * valid).sum(-1) / valid.sum(-1).clamp_min(1)
+        eligible = valid.any(-1)
+        expected["sysid"] = torch.stack([
+            per_joint[i][eligible[i]].mean() for i in range(len(hidden)) if bool(eligible[i].any())
+        ]).mean()
+        # This encoder uses SI tokenizers: reconstruct their asinh-scaled inputs.
+        mask_losses = []
+        for group, key in (("rigid_body", "rigid_body_features"), ("actuator", "actuator_features")):
+            scales = torch.tensor(feature_scales(group))
+            features = batch[key]
+            target = torch.where(scales > 0, torch.asinh(features / scales.clamp_min(1e-20)), features)
+            error = (model.mask_heads[group](hidden) - target).square().mean(-1)
+            mask_losses.append(error[:, 0].mean())
+        expected["mask"] = torch.stack(mask_losses).mean()
+
+        for name, prediction_key, target_key, mask_key, base_key, base_target, base_mask in (
+            ("fd", "fd_acceleration", "fd_target", "fd_mask", "fd_base_acceleration",
+             "fd_base_target", "fd_base_mask"),
+            ("response", "response_acceleration", "response_target", "response_mask",
+             "response_base_acceleration", "response_base_target", "response_base_mask"),
+        ):
+            valid = batch[mask_key]
+            errors = (predictions[prediction_key] - batch[target_key]).square()
+            per_sample = (errors * valid).sum(-1) / valid.sum(-1).clamp_min(1)
+            weights = batch["torque_label_weight"] if name == "fd" else torch.ones_like(per_sample)
+            eligible_rows = valid.any(-1)
+            expected[name] = (per_sample[eligible_rows] * weights[eligible_rows]).sum() / weights[eligible_rows].sum()
+            eligible_base = batch[base_mask]
+            if bool(eligible_base.any()):
+                base_error = (predictions[base_key] - batch[base_target]).square().mean(-1)
+                expected[name] += config.lambda_base_acceleration * base_error[eligible_base].mean()
+
+        predicted = predictions["interface_operator"]
+        references, scale = interface_units(batch, config.epsilon)
+        target = batch["response_operator"] * references[:, :, None] * references[:, None, 6:] / scale[:, None, None]
+        rows = torch.cat((batch["response_base_mask"][:, None].expand(-1, 6), batch["joint_mask"]), dim=1)
+        entries = rows[:, :, None] & batch["joint_mask"][:, None, :]
+        valid_rows = batch["response_mask"].any(1)
+        error = ((predicted - target).square() * entries).sum((-1, -2))
+        expected["operator"] = (error / (target.square() * entries).sum((-1, -2)).clamp_min(config.epsilon))[valid_rows].mean()
+        pooled = output.pooled_embedding
+        inverse = model.interface(hidden, pooled, batch["joint_mask"])["inverse"]
+        error = ((predicted @ inverse @ predicted - predicted).square() * entries).sum((-1, -2))
+        expected["consistency"] = (error / (predicted.square() * entries).sum((-1, -2)).clamp_min(config.epsilon))[valid_rows].mean()
+        for name, value in expected.items():
+            torch.testing.assert_close(value, output.loss_components[name], msg=name)
+        output.loss.backward()
+        for group in token_mask:
+            self.assertIsNotNone(model.encoder.physics_mask_embeddings[group].grad)
+        model.eval()
+        self.assertIsNone(model._physics_token_mask(batch))
+
+    def test_rollout_effect_matches_constant_velocity_kinematics(self) -> None:
+        """Check rollout supervision against fixed-base zero-acceleration FK.
+
+        Returns:
+            None: Confirms displacement normalization, end-effector selection,
+            rotation error, and exclusion of variants with no torque labels.
+        """
+        config = DaGetPhysicsPretrainingConfig.from_encoder_config(
+            tiny_encoder_config(self.datasets.token_size),
+            head_type="linear", effect_mode="rollout",
+        )
+        model = DaGetForPhysicsPretraining(config)
+        batch = self.collate([self.datasets.train[0]], include_graphs=True)
+        units = interface_units(batch, config.epsilon)
+        references, _ = units
+        joints = batch["joint_mask"].shape[1]
+        interface = {
+            "operator": torch.zeros(1, 6 + joints, joints),
+            "drift": torch.zeros_like(references),
+        }
+        rows = batch["variant_rows"]
+        batch["torque_label_weight"].zero_()
+        batch["torque_label_weight"][0] = 1
+        graph = batch["structure"].graphs[0]
+        self.assertFalse(graph.floating_base)
+        q = batch["joint_positions"][0].double()
+        qd = batch["joint_velocities"][0].double()
+        dt = batch["frame_dt"][0].double()
+        before = graph.forward_kinematics(q)
+        after = graph.forward_kinematics(q + dt * qd)
+        delta = (after[..., :3, 3] - before[..., :3, 3]) / batch["characteristic_length"][0]
+        delta = delta / batch["effect_scales"][0, 0]
+        eligible = batch["effect_mask"][0]
+        error = (delta - batch["effect_delta_position"][0]).square().sum(-1)
+        error += geodesic_distance(after[..., :3, :3], batch["effect_rotation"][0]).square()
+        actual = model._effect_rollout(batch, interface, units, rows)
+        torch.testing.assert_close(actual.double(), error[eligible].mean(), rtol=1e-4, atol=1e-5)
 
     def test_gauss_metric_with_identity_is_mean_square(self) -> None:
         """With an identity mass matrix the Gauss metric is the mean square error."""

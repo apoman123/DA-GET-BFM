@@ -82,12 +82,13 @@ import fcntl
 import hashlib
 import json
 import math
+import pickle
 import random
 import sys
 import time
 from dataclasses import dataclass, field
 from pathlib import Path
-from typing import Any, Sequence
+from typing import Any, Iterator, Sequence
 
 import torch
 from torch.utils.data import Dataset
@@ -378,9 +379,22 @@ def _init_worker(threads: int) -> None:
     torch.set_num_threads(threads)
 
 
-def _process_in_worker(task: tuple) -> dict[str, Any]:
-    """Process one episode in a worker; tensors travel back as numpy arrays (plain pickles)."""
-    record, trajectory, options, seed = task
+def _process_in_worker(payload: bytes) -> dict[str, Any]:
+    """Process an internally serialized episode without sharing tensor storage.
+
+    Args:
+        payload (bytes): Standard-pickle encoding of a record, trajectory,
+            processing options, and deterministic seed, produced in this process
+            tree. Never accepts data downloaded from a dataset directly.
+
+    Returns:
+        dict[str, Any]: Episode tensors converted to NumPy arrays for transport
+        back to the parent without PyTorch shared-memory file descriptors.
+
+    Raises:
+        ValueError: The episode has invalid physics or trajectory inputs.
+    """
+    record, trajectory, options, seed = pickle.loads(payload)
     episode = process_episode(record, trajectory, seed=seed, **options)
     return {key: value.detach().cpu().numpy() if isinstance(value, torch.Tensor) else value for key, value in episode.items()}
 
@@ -431,11 +445,32 @@ def _report_preprocessing_progress(
         print(message, file=sys.stderr, flush=True)
 
 
-def _processed_episodes(records, trajectories, options: dict[str, Any], first_seed: int, pool, in_flight: int = 1):
-    """Yield ``(embodiment, processed episode)`` in trajectory order, in ``pool`` when given.
+def _processed_episodes(
+    records: Sequence[EmbodimentRecord],
+    trajectories: Sequence[Any],
+    options: dict[str, Any],
+    first_seed: int,
+    pool: Any,
+    in_flight: int = 1,
+) -> Iterator[tuple[int, dict[str, Any]]]:
+    """Process trajectories in order with bounded, descriptor-free transport.
 
-    At most ``in_flight`` tasks are submitted at a time, so finished episodes do not pile
-    up in memory while an earlier one is still running.
+    Args:
+        records (Sequence[EmbodimentRecord]): Robot records indexed by each
+            trajectory's embodiment number.
+        trajectories (Sequence[Any]): Trajectories in source order.
+        options (dict[str, Any]): Keyword arguments accepted by process_episode.
+        first_seed (int): Seed for the first trajectory; later seeds increment.
+        pool (Any): Optional process executor; None processes episodes locally.
+        in_flight (int): Positive maximum queued tasks, default one.
+
+    Yields:
+        tuple[int, dict[str, Any]]: Embodiment index and processed episode with
+        CPU tensors, in input order.
+
+    Raises:
+        ValueError: An episode has invalid input data.
+        RuntimeError: An episode worker fails.
     """
     from collections import deque
 
@@ -452,7 +487,12 @@ def _processed_episodes(records, trajectories, options: dict[str, Any], first_se
     embodiments = (trajectory.embodiment for trajectory in trajectories)
     window: deque = deque()
     for task in tasks:
-        window.append(pool.submit(_process_in_worker, task))
+        # ForkingPickler shares CPU tensor storage and keeps a descriptor alive
+        # in each original trajectory. The source retains thousands of those
+        # trajectories, even with a bounded task queue. Serialize to bytes first
+        # so ordinary pickle copies storage instead of sharing descriptors.
+        payload = pickle.dumps(task, protocol=pickle.HIGHEST_PROTOCOL)
+        window.append(pool.submit(_process_in_worker, payload))
         if len(window) >= in_flight:
             yield next(embodiments), _from_worker(window.popleft().result())
     while window:

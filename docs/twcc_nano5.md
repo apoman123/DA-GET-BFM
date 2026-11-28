@@ -26,10 +26,8 @@ uv sync --locked --all-extras
 .venv/bin/python -c 'import torch; print(torch.__version__)'
 ```
 
-The default `cuda124` dependency group installs PyTorch 2.6.0 with CUDA 12.4
-from the official PyTorch index. Upload both `pyproject.toml` and `uv.lock`
-before syncing. The alternative `local` group uses the latest PyPI build on local workstations;
-see [development environment setup](development.md#testing-and-validation).
+Upload both `pyproject.toml` and `uv.lock` before syncing. PyTorch is installed
+from PyPI using the lockfile; no CUDA-specific dependency group is required.
 
 The scripts use `.venv/bin/python` by default. Set `PYTHON_BIN` to the absolute
 path of another prepared Python interpreter when needed. A virtual environment

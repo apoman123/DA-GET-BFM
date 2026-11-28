@@ -115,6 +115,33 @@ uv sync --all-extras
 uv run pytest
 ```
 
+On Linux and Windows, `uv sync` uses the default `cuda124` dependency group:
+PyTorch 2.6.0 from the official CUDA 12.4 index, for Nano5. Copy
+`pyproject.toml` and `uv.lock` to Nano5 and run `uv sync --locked --all-extras`
+there; each machine needs its own environment. macOS uses PyPI builds.
+
+Local workstations can select the `local` group for the latest PyPI PyTorch
+build, including support for RTX 50-series Blackwell GPUs:
+
+```bash
+uv sync --locked --all-extras --no-group cuda124 --group local
+uv run --no-group cuda124 --group local pytest
+```
+
+Use those same group flags with later `uv run` commands on that workstation,
+or invoke `.venv/bin/python` directly, to preserve its local environment.
+To update the local build after new releases, run
+`uv lock --upgrade-package torch`, then sync with the local group flags.
+The `cuda124` and `local` groups are mutually exclusive. Check GPU availability on an
+allocated Nano5 GPU node with:
+
+```bash
+uv run python -c 'import torch; print(torch.__version__, torch.version.cuda, torch.cuda.is_available())'
+```
+
+The CUDA version in `nvidia-smi` describes driver capability; it does not have
+to match `torch.version.cuda`. A compatible NVIDIA driver is still required.
+
 The suite has 197 tests (the MuJoCo and HDF5 tests are skipped without the
 `sim` and `validation` extras, and the CUDA Graph test without a GPU):
 
